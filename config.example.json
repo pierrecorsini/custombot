@@ -1,0 +1,29 @@
+{
+  "llm": {
+    "model": "gpt-4o",
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "sk-your-api-key-here",
+    "temperature": 0.7,
+    "max_tokens": 4096,
+    "system_prompt_prefix": "",
+    "max_tool_iterations": 10
+  },
+  "whatsapp": {
+    "provider": "neonize",
+    "neonize": {
+      "db_path": "workspace/whatsapp_session.db"
+    },
+    "allowed_numbers": []
+  },
+  "memory_max_history": 50,
+  "load_history": false,
+  "skills_auto_load": true,
+  "skills_user_directory": "workspace/skills",
+  "log_incoming_messages": true,
+  "log_routing_info": false,
+  "shutdown_timeout": 30.0,
+  "log_format": "text",
+  "log_file": "workspace/logs/custombot.log",
+  "log_max_bytes": 10485760,
+  "log_backup_count": 5
+}

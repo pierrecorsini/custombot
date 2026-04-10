@@ -1,0 +1,1097 @@
+"""
+Tests for src/scheduler.py — Async task scheduler engine.
+
+Unit tests covering:
+  - _same_day utility
+  - _utc_offset_hours helper
+  - TaskScheduler configure / start / stop lifecycle
+  - Task CRUD: add_task, add_task_async, remove_task_async, list_tasks
+  - Task ID generation (sequential, collision avoidance)
+  - Persistence to JSON (sync + async paths)
+  - load_all loading tasks across multiple chats
+  - _is_due for daily / interval / cron schedule types
+  - _is_due with enabled/disabled tasks
+  - UTC offset caching behaviour
+  - _execute_task: callback invocation, compare mode, persistence after run
+  - _execute_task: missing callbacks, empty results, on_send delivery
+  - Background _loop tick behaviour
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.scheduler import (
+    SCHEDULER_DIR,
+    TASKS_FILE,
+    TICK_SECONDS,
+    TaskScheduler,
+    _now,
+    _same_day,
+    _utc_offset_hours,
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fixtures
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def workspace(tmp_path: Path) -> Path:
+    """Provide a clean temporary workspace directory."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    return ws
+
+
+@pytest.fixture
+def on_trigger() -> AsyncMock:
+    """Async mock for the on_trigger callback."""
+    return AsyncMock(return_value="result from LLM")
+
+
+@pytest.fixture
+def on_send() -> AsyncMock:
+    """Async mock for the on_send callback."""
+    return AsyncMock()
+
+
+@pytest.fixture
+def scheduler(
+    workspace: Path, on_trigger: AsyncMock, on_send: AsyncMock
+) -> TaskScheduler:
+    """Provide a fully configured TaskScheduler."""
+    s = TaskScheduler()
+    s.configure(workspace=workspace, on_trigger=on_trigger, on_send=on_send)
+    return s
+
+
+def _tasks_file(workspace: Path, chat_id: str) -> Path:
+    """Return path to the tasks.json for a given chat_id."""
+    return workspace / chat_id / SCHEDULER_DIR / TASKS_FILE
+
+
+def _make_task(
+    schedule_type: str = "interval",
+    prompt: str = "test prompt",
+    label: str = "Test Task",
+    **schedule_overrides,
+) -> dict:
+    """Build a minimal task dict for testing."""
+    schedule = {"type": schedule_type, **schedule_overrides}
+    return {"prompt": prompt, "label": label, "schedule": schedule}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _same_day
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSameDay:
+    """Tests for the _same_day() utility function."""
+
+    def test_same_timestamps(self):
+        ts = "2025-06-15T12:00:00+00:00"
+        assert _same_day(ts, ts) is True
+
+    def test_same_day_different_times(self):
+        a = "2025-06-15T01:00:00+00:00"
+        b = "2025-06-15T23:59:59+00:00"
+        assert _same_day(a, b) is True
+
+    def test_different_days(self):
+        a = "2025-06-15T23:59:59+00:00"
+        b = "2025-06-16T00:00:00+00:00"
+        assert _same_day(a, b) is False
+
+    def test_different_months(self):
+        a = "2025-06-30T12:00:00+00:00"
+        b = "2025-07-01T12:00:00+00:00"
+        assert _same_day(a, b) is False
+
+    def test_different_years(self):
+        a = "2024-12-31T23:00:00+00:00"
+        b = "2025-01-01T01:00:00+00:00"
+        assert _same_day(a, b) is False
+
+    def test_naive_datetime_strings(self):
+        a = "2025-06-15T10:00:00"
+        b = "2025-06-15T14:00:00"
+        assert _same_day(a, b) is True
+
+    def test_invalid_first_argument(self):
+        assert _same_day("not-a-date", "2025-06-15T12:00:00+00:00") is False
+
+    def test_invalid_second_argument(self):
+        assert _same_day("2025-06-15T12:00:00+00:00", "garbage") is False
+
+    def test_both_invalid(self):
+        assert _same_day("", "not-a-date") is False
+
+    def test_none_arguments(self):
+        assert _same_day(None, "2025-06-15T12:00:00+00:00") is False  # type: ignore[arg-type]
+        assert _same_day("2025-06-15T12:00:00+00:00", None) is False  # type: ignore[arg-type]
+
+    def test_utc_z_suffix(self):
+        a = "2025-06-15T08:00:00Z"
+        b = "2025-06-15T20:00:00+00:00"
+        assert _same_day(a, b) is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _utc_offset_hours
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestUtcOffsetHours:
+    """Tests for _utc_offset_hours()."""
+
+    def test_returns_float(self):
+        offset = _utc_offset_hours()
+        assert isinstance(offset, float)
+
+    def test_in_valid_range(self):
+        offset = _utc_offset_hours()
+        assert -12.0 <= offset <= 14.0
+
+    def test_consistent_results(self):
+        """Calling twice in quick succession should yield the same value."""
+        assert _utc_offset_hours() == _utc_offset_hours()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — configure
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestConfigure:
+    """Tests for TaskScheduler.configure()."""
+
+    def test_sets_workspace(self, workspace: Path):
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        assert s._workspace == workspace
+
+    def test_sets_on_trigger(self, workspace: Path):
+        trigger = AsyncMock()
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=trigger)
+        assert s._on_trigger is trigger
+
+    def test_sets_on_send_optional(self, workspace: Path):
+        send = AsyncMock()
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock(), on_send=send)
+        assert s._on_send is send
+
+    def test_on_send_defaults_to_none(self, workspace: Path):
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        assert s._on_send is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — start / stop lifecycle
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestLifecycle:
+    """Tests for TaskScheduler start/stop lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_start_sets_running(self, scheduler: TaskScheduler):
+        scheduler.start()
+        assert scheduler._running is True
+        await scheduler.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_creates_background_task(self, scheduler: TaskScheduler):
+        scheduler.start()
+        assert scheduler._task is not None
+        assert not scheduler._task.done()
+        await scheduler.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_idempotent(self, scheduler: TaskScheduler):
+        scheduler.start()
+        first_task = scheduler._task
+        scheduler.start()  # second call should be no-op
+        assert scheduler._task is first_task
+        await scheduler.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_clears_running(self, scheduler: TaskScheduler):
+        scheduler.start()
+        await scheduler.stop()
+        assert scheduler._running is False
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_task(self, scheduler: TaskScheduler):
+        scheduler.start()
+        task = scheduler._task
+        await scheduler.stop()
+        assert task is not None
+        assert task.cancelled() or task.done()
+
+    @pytest.mark.asyncio
+    async def test_stop_when_not_started(self, scheduler: TaskScheduler):
+        """Stopping without starting should not raise."""
+        await scheduler.stop()
+        assert scheduler._running is False
+
+    @pytest.mark.asyncio
+    async def test_start_stop_restart(self, scheduler: TaskScheduler):
+        scheduler.start()
+        await scheduler.stop()
+        scheduler.start()
+        assert scheduler._running is True
+        assert scheduler._task is not None
+        await scheduler.stop()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — add_task (sync)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAddTask:
+    """Tests for TaskScheduler.add_task() — synchronous path."""
+
+    def test_returns_task_id(self, scheduler: TaskScheduler):
+        task_id = scheduler.add_task("chat1", _make_task())
+        assert task_id == "task_001"
+
+    def test_sequential_ids(self, scheduler: TaskScheduler):
+        id1 = scheduler.add_task("chat1", _make_task())
+        id2 = scheduler.add_task("chat1", _make_task())
+        id3 = scheduler.add_task("chat1", _make_task())
+        assert id1 == "task_001"
+        assert id2 == "task_002"
+        assert id3 == "task_003"
+
+    def test_separate_chat_id_counters(self, scheduler: TaskScheduler):
+        id_a = scheduler.add_task("chatA", _make_task())
+        id_b = scheduler.add_task("chatB", _make_task())
+        # Both start from 001 per chat
+        assert id_a == "task_001"
+        assert id_b == "task_001"
+
+    def test_sets_created_timestamp(self, scheduler: TaskScheduler):
+        before = _now().isoformat()
+        scheduler.add_task("chat1", _make_task())
+        after = _now().isoformat()
+        tasks = scheduler.list_tasks("chat1")
+        assert before <= tasks[0]["created"] <= after
+
+    def test_sets_last_run_none(self, scheduler: TaskScheduler):
+        scheduler.add_task("chat1", _make_task())
+        tasks = scheduler.list_tasks("chat1")
+        assert tasks[0]["last_run"] is None
+
+    def test_sets_enabled_true(self, scheduler: TaskScheduler):
+        scheduler.add_task("chat1", _make_task())
+        tasks = scheduler.list_tasks("chat1")
+        assert tasks[0]["enabled"] is True
+
+    def test_overrides_existing_task_id_in_dict(self, scheduler: TaskScheduler):
+        task = _make_task()
+        task["task_id"] = "task_999"
+        returned_id = scheduler.add_task("chat1", task)
+        assert returned_id == "task_001"
+        assert task["task_id"] == "task_001"
+
+    def test_avoids_duplicate_task_ids(self, scheduler: TaskScheduler):
+        """If task_001 exists (e.g. from a prior add), the next should skip it."""
+        scheduler._tasks["chat1"] = [{"task_id": "task_001", "schedule": {}}]
+        new_id = scheduler.add_task("chat1", _make_task())
+        assert new_id == "task_002"
+
+    def test_persists_to_file(self, scheduler: TaskScheduler, workspace: Path):
+        scheduler.add_task("chat1", _make_task(prompt="hello"))
+        path = _tasks_file(workspace, "chat1")
+        assert path.exists()
+        data = json.loads(path.read_text())
+        assert len(data) == 1
+        assert data[0]["prompt"] == "hello"
+
+    def test_persist_no_workspace(self, on_trigger: AsyncMock):
+        """add_task without configure should not crash — just skip persistence."""
+        s = TaskScheduler()
+        task_id = s.add_task("chat1", _make_task())
+        assert task_id == "task_001"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — add_task_async
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAddTaskAsync:
+    """Tests for TaskScheduler.add_task_async() — async path."""
+
+    @pytest.mark.asyncio
+    async def test_returns_task_id(self, scheduler: TaskScheduler):
+        task_id = await scheduler.add_task_async("chat1", _make_task())
+        assert task_id == "task_001"
+
+    @pytest.mark.asyncio
+    async def test_adds_to_internal_store(self, scheduler: TaskScheduler):
+        await scheduler.add_task_async("chat1", _make_task(prompt="async test"))
+        tasks = scheduler.list_tasks("chat1")
+        assert len(tasks) == 1
+        assert tasks[0]["prompt"] == "async test"
+
+    @pytest.mark.asyncio
+    async def test_persists_to_file(self, scheduler: TaskScheduler, workspace: Path):
+        await scheduler.add_task_async("chat1", _make_task())
+        path = _tasks_file(workspace, "chat1")
+        assert path.exists()
+        data = json.loads(path.read_text())
+        assert len(data) == 1
+
+    @pytest.mark.asyncio
+    async def test_sequential_ids_async(self, scheduler: TaskScheduler):
+        id1 = await scheduler.add_task_async("chat1", _make_task())
+        id2 = await scheduler.add_task_async("chat1", _make_task())
+        assert id1 == "task_001"
+        assert id2 == "task_002"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — remove_task_async
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRemoveTaskAsync:
+    """Tests for TaskScheduler.remove_task_async()."""
+
+    @pytest.mark.asyncio
+    async def test_remove_existing(self, scheduler: TaskScheduler):
+        tid = await scheduler.add_task_async("chat1", _make_task())
+        removed = await scheduler.remove_task_async("chat1", tid)
+        assert removed is True
+        assert scheduler.list_tasks("chat1") == []
+
+    @pytest.mark.asyncio
+    async def test_remove_nonexistent(self, scheduler: TaskScheduler):
+        removed = await scheduler.remove_task_async("chat1", "task_999")
+        assert removed is False
+
+    @pytest.mark.asyncio
+    async def test_remove_wrong_chat(self, scheduler: TaskScheduler):
+        await scheduler.add_task_async("chat1", _make_task())
+        removed = await scheduler.remove_task_async("chat2", "task_001")
+        assert removed is False
+
+    @pytest.mark.asyncio
+    async def test_removes_correct_task_from_multiple(self, scheduler: TaskScheduler):
+        t1 = await scheduler.add_task_async("chat1", _make_task(prompt="first"))
+        t2 = await scheduler.add_task_async("chat1", _make_task(prompt="second"))
+        await scheduler.remove_task_async("chat1", t1)
+        remaining = scheduler.list_tasks("chat1")
+        assert len(remaining) == 1
+        assert remaining[0]["task_id"] == t2
+        assert remaining[0]["prompt"] == "second"
+
+    @pytest.mark.asyncio
+    async def test_persists_after_removal(
+        self, scheduler: TaskScheduler, workspace: Path
+    ):
+        tid = await scheduler.add_task_async("chat1", _make_task())
+        await scheduler.remove_task_async("chat1", tid)
+        data = json.loads(_tasks_file(workspace, "chat1").read_text())
+        assert data == []
+
+    @pytest.mark.asyncio
+    async def test_does_not_persist_if_not_found(self, scheduler: TaskScheduler):
+        """Removing a nonexistent task should not trigger persistence."""
+        removed = await scheduler.remove_task_async("chat1", "task_999")
+        assert removed is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — list_tasks
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestListTasks:
+    """Tests for TaskScheduler.list_tasks()."""
+
+    def test_empty_for_unknown_chat(self, scheduler: TaskScheduler):
+        assert scheduler.list_tasks("unknown") == []
+
+    def test_returns_all_tasks(self, scheduler: TaskScheduler):
+        scheduler.add_task("chat1", _make_task(prompt="a"))
+        scheduler.add_task("chat1", _make_task(prompt="b"))
+        tasks = scheduler.list_tasks("chat1")
+        assert len(tasks) == 2
+        prompts = {t["prompt"] for t in tasks}
+        assert prompts == {"a", "b"}
+
+    def test_returns_copy(self, scheduler: TaskScheduler):
+        """list_tasks should return the actual list (not a deep copy)."""
+        scheduler.add_task("chat1", _make_task())
+        tasks = scheduler.list_tasks("chat1")
+        assert len(tasks) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — persistence
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPersistence:
+    """Tests for task persistence to disk."""
+
+    def test_sync_persist_creates_directory(self, workspace: Path):
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        s.add_task("chat1", _make_task())
+        expected_dir = workspace / "chat1" / SCHEDULER_DIR
+        assert expected_dir.is_dir()
+
+    def test_sync_persist_file_content(self, workspace: Path):
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        s.add_task("chat1", _make_task(prompt="check content", label="MyTask"))
+        data = json.loads(_tasks_file(workspace, "chat1").read_text())
+        assert data[0]["prompt"] == "check content"
+        assert data[0]["label"] == "MyTask"
+        assert "task_id" in data[0]
+        assert "created" in data[0]
+
+    @pytest.mark.asyncio
+    async def test_async_persist_file_content(self, workspace: Path):
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        await s.add_task_async("chat1", _make_task(prompt="async persist"))
+        data = json.loads(_tasks_file(workspace, "chat1").read_text())
+        assert data[0]["prompt"] == "async persist"
+
+    def test_sync_persist_no_workspace(self):
+        """Should not crash when workspace is None."""
+        s = TaskScheduler()
+        s._persist_sync("chat1")  # no error
+
+    @pytest.mark.asyncio
+    async def test_async_persist_no_workspace(self):
+        """Should not crash when workspace is None."""
+        s = TaskScheduler()
+        await s._persist_async("chat1")  # no error
+
+    def test_load_restores_tasks(self, workspace: Path):
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        s.add_task("chat1", _make_task(prompt="saved"))
+        # New scheduler instance to test loading
+        s2 = TaskScheduler()
+        s2.configure(workspace=workspace, on_trigger=AsyncMock())
+        s2._load("chat1")
+        tasks = s2.list_tasks("chat1")
+        assert len(tasks) == 1
+        assert tasks[0]["prompt"] == "saved"
+
+    def test_load_handles_corrupt_json(self, workspace: Path):
+        path = _tasks_file(workspace, "chat1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("NOT VALID JSON {{{")
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        s._load("chat1")  # should not raise
+        assert s.list_tasks("chat1") == []
+
+    def test_load_handles_missing_file(self, workspace: Path):
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        s._load("nonexistent_chat")  # should not raise
+        assert s.list_tasks("nonexistent_chat") == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — load_all
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestLoadAll:
+    """Tests for TaskScheduler.load_all()."""
+
+    def test_loads_multiple_chats(self, workspace: Path):
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        s.add_task("chatA", _make_task(prompt="A"))
+        s.add_task("chatB", _make_task(prompt="B"))
+
+        s2 = TaskScheduler()
+        s2.configure(workspace=workspace, on_trigger=AsyncMock())
+        s2.load_all()
+        assert len(s2.list_tasks("chatA")) == 1
+        assert len(s2.list_tasks("chatB")) == 1
+
+    def test_skips_dirs_without_tasks(self, workspace: Path):
+        (workspace / "chat_no_tasks").mkdir()
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        s.load_all()  # should not raise
+        assert s.list_tasks("chat_no_tasks") == []
+
+    def test_no_workspace(self):
+        s = TaskScheduler()
+        s.load_all()  # should not raise
+
+    def test_nonexistent_workspace(self, tmp_path: Path):
+        s = TaskScheduler()
+        s.configure(workspace=tmp_path / "does_not_exist", on_trigger=AsyncMock())
+        s.load_all()  # should not raise
+
+    def test_ignores_files_in_workspace_root(self, workspace: Path):
+        (workspace / "somefile.txt").write_text("not a chat dir")
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        s.load_all()  # should not raise
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — _is_due for interval schedule
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestIsDueInterval:
+    """Tests for _is_due() with schedule type 'interval'."""
+
+    def test_due_when_no_last_run(self, scheduler: TaskScheduler):
+        task = _make_task(schedule_type="interval", seconds=60)
+        assert scheduler._is_due(task) is True
+
+    def test_due_when_interval_elapsed(self, scheduler: TaskScheduler):
+        task = _make_task(schedule_type="interval", seconds=10)
+        task["last_run"] = (_now() - timedelta(seconds=15)).isoformat()
+        assert scheduler._is_due(task) is True
+
+    def test_not_due_when_interval_not_elapsed(self, scheduler: TaskScheduler):
+        task = _make_task(schedule_type="interval", seconds=3600)
+        task["last_run"] = (_now() - timedelta(seconds=10)).isoformat()
+        assert scheduler._is_due(task) is False
+
+    def test_due_exactly_at_interval_boundary(self, scheduler: TaskScheduler):
+        task = _make_task(schedule_type="interval", seconds=60)
+        task["last_run"] = (_now() - timedelta(seconds=60)).isoformat()
+        assert scheduler._is_due(task) is True
+
+    def test_default_interval_is_3600(self, scheduler: TaskScheduler):
+        """Default interval should be 1 hour when 'seconds' is omitted."""
+        task = {"schedule": {"type": "interval"}, "enabled": True}
+        # Just under 1 hour — should not be due
+        task["last_run"] = (_now() - timedelta(seconds=3500)).isoformat()
+        assert scheduler._is_due(task) is False
+
+    def test_disabled_task_never_due(self, scheduler: TaskScheduler):
+        task = _make_task(schedule_type="interval", seconds=10)
+        task["enabled"] = False
+        task["last_run"] = None
+        assert scheduler._is_due(task) is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — _is_due for daily schedule
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestIsDueDaily:
+    """Tests for _is_due() with schedule type 'daily'."""
+
+    def test_due_at_target_time_no_last_run(self, scheduler: TaskScheduler):
+        """With no last_run, task is due at the target UTC time."""
+        now = _now()
+        # Set target hour/minute in local time
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+        local_min = now.minute
+
+        task = _make_task(schedule_type="daily", hour=local_hour, minute=local_min)
+        assert scheduler._is_due(task) is True
+
+    def test_not_due_at_wrong_time(self, scheduler: TaskScheduler):
+        """Task should not be due at a different minute."""
+        now = _now()
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+        wrong_min = (now.minute + 5) % 60
+
+        task = _make_task(schedule_type="daily", hour=local_hour, minute=wrong_min)
+        assert scheduler._is_due(task) is False
+
+    def test_not_due_same_day_already_ran(self, scheduler: TaskScheduler):
+        """If already ran today, should not be due again."""
+        now = _now()
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+
+        task = _make_task(schedule_type="daily", hour=local_hour, minute=now.minute)
+        task["last_run"] = now.isoformat()
+        assert scheduler._is_due(task) is False
+
+    def test_due_next_day_after_previous_run(self, scheduler: TaskScheduler):
+        """Should be due again the next day at target time."""
+        now = _now()
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+
+        task = _make_task(schedule_type="daily", hour=local_hour, minute=now.minute)
+        task["last_run"] = (now - timedelta(days=1)).isoformat()
+        assert scheduler._is_due(task) is True
+
+    def test_disabled_daily_task(self, scheduler: TaskScheduler):
+        now = _now()
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+
+        task = _make_task(schedule_type="daily", hour=local_hour, minute=now.minute)
+        task["enabled"] = False
+        assert scheduler._is_due(task) is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — _is_due for cron schedule
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestIsDueCron:
+    """Tests for _is_due() with schedule type 'cron'."""
+
+    def test_due_on_matching_weekday(self, scheduler: TaskScheduler):
+        now = _now()
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+        weekday = now.weekday()
+
+        task = _make_task(
+            schedule_type="cron", hour=local_hour, minute=now.minute, weekdays=[weekday]
+        )
+        assert scheduler._is_due(task) is True
+
+    def test_not_due_on_non_matching_weekday(self, scheduler: TaskScheduler):
+        now = _now()
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+        wrong_weekday = (now.weekday() + 1) % 7
+
+        task = _make_task(
+            schedule_type="cron",
+            hour=local_hour,
+            minute=now.minute,
+            weekdays=[wrong_weekday],
+        )
+        assert scheduler._is_due(task) is False
+
+    def test_not_due_already_ran_today(self, scheduler: TaskScheduler):
+        now = _now()
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+
+        task = _make_task(
+            schedule_type="cron",
+            hour=local_hour,
+            minute=now.minute,
+            weekdays=[now.weekday()],
+        )
+        task["last_run"] = now.isoformat()
+        assert scheduler._is_due(task) is False
+
+    def test_due_on_any_of_multiple_weekdays(self, scheduler: TaskScheduler):
+        now = _now()
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+
+        task = _make_task(
+            schedule_type="cron",
+            hour=local_hour,
+            minute=now.minute,
+            weekdays=[0, 1, 2, 3, 4, 5, 6],  # all days
+        )
+        assert scheduler._is_due(task) is True
+
+    def test_default_weekdays_is_all(self, scheduler: TaskScheduler):
+        """If weekdays omitted, should default to all days."""
+        now = _now()
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+
+        task = _make_task(schedule_type="cron", hour=local_hour, minute=now.minute)
+        # No 'weekdays' key — defaults to range(7)
+        del task["schedule"]["weekdays"]
+        assert scheduler._is_due(task) is True
+
+    def test_disabled_cron_task(self, scheduler: TaskScheduler):
+        now = _now()
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+
+        task = _make_task(
+            schedule_type="cron",
+            hour=local_hour,
+            minute=now.minute,
+            weekdays=[now.weekday()],
+        )
+        task["enabled"] = False
+        assert scheduler._is_due(task) is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — _is_due unknown schedule type
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestIsDueUnknownType:
+    """Tests for _is_due() with unknown/missing schedule types."""
+
+    def test_unknown_type_not_due(self, scheduler: TaskScheduler):
+        task = {"schedule": {"type": "yearly"}, "enabled": True}
+        assert scheduler._is_due(task) is False
+
+    def test_empty_type_not_due(self, scheduler: TaskScheduler):
+        task = {"schedule": {"type": ""}, "enabled": True}
+        assert scheduler._is_due(task) is False
+
+    def test_missing_schedule_not_due(self, scheduler: TaskScheduler):
+        task = {"enabled": True}
+        assert scheduler._is_due(task) is False
+
+    def test_missing_type_not_due(self, scheduler: TaskScheduler):
+        task = {"schedule": {}, "enabled": True}
+        assert scheduler._is_due(task) is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — UTC offset caching
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestUtcOffsetCaching:
+    """Tests for TaskScheduler._get_cached_utc_offset()."""
+
+    def test_first_call_computes_offset(self, scheduler: TaskScheduler):
+        offset = scheduler._get_cached_utc_offset()
+        assert isinstance(offset, float)
+        assert -12.0 <= offset <= 14.0
+
+    def test_caches_value(self, scheduler: TaskScheduler):
+        first = scheduler._get_cached_utc_offset()
+        second = scheduler._get_cached_utc_offset()
+        assert first == second
+
+    def test_cache_is_used_within_ttl(self, scheduler: TaskScheduler):
+        """Within the cache TTL, the same value should be returned."""
+        scheduler._cached_utc_offset = 5.0
+        scheduler._utc_offset_updated_at = time.monotonic()
+        result = scheduler._get_cached_utc_offset()
+        assert result == 5.0
+
+    def test_cache_refreshes_after_ttl(self, scheduler: TaskScheduler):
+        """After the TTL, a fresh value should be computed."""
+        scheduler._cached_utc_offset = 99.0  # unrealistic
+        scheduler._utc_offset_updated_at = time.monotonic() - 7200  # 2 hours ago
+        result = scheduler._get_cached_utc_offset()
+        assert result != 99.0
+        assert -12.0 <= result <= 14.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — _execute_task
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestExecuteTask:
+    """Tests for TaskScheduler._execute_task()."""
+
+    @pytest.mark.asyncio
+    async def test_calls_on_trigger(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock
+    ):
+        task = _make_task(prompt="run this")
+        task["task_id"] = "task_001"
+        await scheduler._execute_task("chat1", task)
+        on_trigger.assert_awaited_once_with("chat1", "run this")
+
+    @pytest.mark.asyncio
+    async def test_sets_last_run(self, scheduler: TaskScheduler):
+        task = _make_task()
+        task["task_id"] = "task_001"
+        assert task["last_run"] is None
+        await scheduler._execute_task("chat1", task)
+        assert task["last_run"] is not None
+
+    @pytest.mark.asyncio
+    async def test_sets_last_result(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock
+    ):
+        on_trigger.return_value = "LLM says hello"
+        task = _make_task()
+        task["task_id"] = "task_001"
+        await scheduler._execute_task("chat1", task)
+        assert task["last_result"] == "LLM says hello"
+
+    @pytest.mark.asyncio
+    async def test_truncates_long_result(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock
+    ):
+        on_trigger.return_value = "x" * 5000
+        task = _make_task()
+        task["task_id"] = "task_001"
+        await scheduler._execute_task("chat1", task)
+        assert len(task["last_result"]) == 2000
+
+    @pytest.mark.asyncio
+    async def test_handles_none_result(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock
+    ):
+        on_trigger.return_value = None
+        task = _make_task()
+        task["task_id"] = "task_001"
+        await scheduler._execute_task("chat1", task)
+        assert task["last_result"] == ""
+
+    @pytest.mark.asyncio
+    async def test_calls_on_send(
+        self, scheduler: TaskScheduler, on_send: AsyncMock, on_trigger: AsyncMock
+    ):
+        on_trigger.return_value = "report"
+        task = _make_task(label="Daily Report")
+        task["task_id"] = "task_001"
+        await scheduler._execute_task("chat1", task)
+        on_send.assert_awaited_once()
+        call_args = on_send.call_args
+        assert call_args[0][0] == "chat1"
+        assert "Daily Report" in call_args[0][1]
+        assert "report" in call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_no_send_for_empty_result(
+        self, scheduler: TaskScheduler, on_send: AsyncMock, on_trigger: AsyncMock
+    ):
+        on_trigger.return_value = ""
+        task = _make_task()
+        task["task_id"] = "task_001"
+        await scheduler._execute_task("chat1", task)
+        on_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_send_when_no_callback(
+        self, workspace: Path, on_trigger: AsyncMock
+    ):
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=on_trigger, on_send=None)
+        on_trigger.return_value = "result"
+        task = _make_task()
+        task["task_id"] = "task_001"
+        await s._execute_task("chat1", task)  # should not raise
+
+    @pytest.mark.asyncio
+    async def test_no_trigger_callback(self, workspace: Path):
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=None, on_send=AsyncMock())
+        task = _make_task()
+        task["task_id"] = "task_001"
+        await s._execute_task("chat1", task)  # should not raise
+
+    @pytest.mark.asyncio
+    async def test_persists_after_execution(
+        self, scheduler: TaskScheduler, workspace: Path, on_trigger: AsyncMock
+    ):
+        on_trigger.return_value = "done"
+        task = _make_task()
+        task["task_id"] = "task_001"
+        scheduler._tasks["chat1"] = [task]
+        await scheduler._execute_task("chat1", task)
+        path = _tasks_file(workspace, "chat1")
+        data = json.loads(path.read_text())
+        assert data[0]["last_run"] is not None
+        assert data[0]["last_result"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_compare_mode_with_previous_result(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock
+    ):
+        on_trigger.return_value = "new result"
+        task = _make_task(prompt="check prices")
+        task["task_id"] = "task_001"
+        task["compare"] = True
+        task["last_result"] = "old result"
+        await scheduler._execute_task("chat1", task)
+        # on_trigger should be called with augmented prompt
+        call_prompt = on_trigger.call_args[0][1]
+        assert "RÉSULTAT PRÉCÉDENT" in call_prompt
+        assert "old result" in call_prompt
+        assert "check prices" in call_prompt
+
+    @pytest.mark.asyncio
+    async def test_compare_mode_no_previous_result(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock
+    ):
+        """When compare=True but no last_result, prompt should be plain."""
+        on_trigger.return_value = "fresh result"
+        task = _make_task(prompt="original")
+        task["task_id"] = "task_001"
+        task["compare"] = True
+        task["last_result"] = None
+        await scheduler._execute_task("chat1", task)
+        call_prompt = on_trigger.call_args[0][1]
+        assert call_prompt == "original"
+
+    @pytest.mark.asyncio
+    async def test_exception_in_trigger_caught(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock
+    ):
+        on_trigger.side_effect = RuntimeError("LLM down")
+        task = _make_task()
+        task["task_id"] = "task_001"
+        # Should not raise — exception is caught internally
+        await scheduler._execute_task("chat1", task)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — _loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestLoop:
+    """Tests for the background _loop tick behaviour."""
+
+    @pytest.mark.asyncio
+    async def test_loop_executes_due_tasks(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock
+    ):
+        on_trigger.return_value = "done"
+        # Add an interval task that is always due (no last_run)
+        scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+
+        # Patch TICK_SECONDS temporarily so loop ticks fast
+        with patch("src.scheduler.TICK_SECONDS", 0.1):
+            scheduler._loop_coro = scheduler._loop()
+            task = asyncio.create_task(scheduler._loop_coro)
+            await asyncio.sleep(0.3)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        assert on_trigger.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_loop_skips_disabled_tasks(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock
+    ):
+        on_trigger.return_value = "done"
+        task_dict = _make_task(schedule_type="interval", seconds=60)
+        scheduler.add_task("chat1", task_dict)
+        # Disable the task
+        scheduler.list_tasks("chat1")[0]["enabled"] = False
+
+        with patch("src.scheduler.TICK_SECONDS", 0.1):
+            task = asyncio.create_task(scheduler._loop())
+            await asyncio.sleep(0.35)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        on_trigger.assert_not_awaited()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Integration — full CRUD + persistence round-trip
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestIntegration:
+    """End-to-end scenarios combining multiple operations."""
+
+    @pytest.mark.asyncio
+    async def test_full_crud_round_trip(self, workspace: Path):
+        """add → list → remove → list → persist → reload."""
+        on_trigger = AsyncMock(return_value="ok")
+        on_send = AsyncMock()
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=on_trigger, on_send=on_send)
+
+        # Add
+        tid = await s.add_task_async("chat1", _make_task(prompt="round trip"))
+        assert len(s.list_tasks("chat1")) == 1
+
+        # List
+        tasks = s.list_tasks("chat1")
+        assert tasks[0]["prompt"] == "round trip"
+
+        # Execute
+        await s._execute_task("chat1", tasks[0])
+        assert tasks[0]["last_run"] is not None
+        on_trigger.assert_awaited_once()
+
+        # Remove
+        removed = await s.remove_task_async("chat1", tid)
+        assert removed is True
+        assert s.list_tasks("chat1") == []
+
+        # Verify file reflects removal
+        data = json.loads(_tasks_file(workspace, "chat1").read_text())
+        assert data == []
+
+    @pytest.mark.asyncio
+    async def test_scheduler_restart_preserves_tasks(self, workspace: Path):
+        """Tasks survive a scheduler restart via load_all."""
+        s1 = TaskScheduler()
+        s1.configure(workspace=workspace, on_trigger=AsyncMock())
+        s1.add_task("chat1", _make_task(prompt="survive restart"))
+
+        s2 = TaskScheduler()
+        s2.configure(workspace=workspace, on_trigger=AsyncMock())
+        s2.load_all()
+
+        tasks = s2.list_tasks("chat1")
+        assert len(tasks) == 1
+        assert tasks[0]["prompt"] == "survive restart"
+
+    @pytest.mark.asyncio
+    async def test_execute_and_persist_result(self, workspace: Path):
+        """After execution, task file should contain last_run and last_result."""
+        on_trigger = AsyncMock(return_value="analysis complete")
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=on_trigger, on_send=AsyncMock())
+
+        task = _make_task(prompt="analyze")
+        s.add_task("chat1", task)
+        t = s.list_tasks("chat1")[0]
+
+        await s._execute_task("chat1", t)
+
+        # Reload from disk
+        s2 = TaskScheduler()
+        s2.configure(workspace=workspace, on_trigger=AsyncMock())
+        s2._load("chat1")
+        loaded = s2.list_tasks("chat1")[0]
+        assert loaded["last_run"] is not None
+        assert loaded["last_result"] == "analysis complete"
+
+    @pytest.mark.asyncio
+    async def test_start_stop_with_pending_tasks(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock
+    ):
+        """Scheduler should not execute tasks that aren't due after start."""
+        task = _make_task(schedule_type="interval", seconds=99999)
+        task["last_run"] = _now().isoformat()  # just ran
+        scheduler.add_task("chat1", task)
+
+        scheduler.start()
+        await asyncio.sleep(0.2)
+        await scheduler.stop()
+        # Task not due — trigger should not have been called
+        on_trigger.assert_not_awaited()

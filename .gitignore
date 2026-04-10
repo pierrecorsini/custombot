@@ -1,0 +1,31 @@
+# Runtime data — never commit these
+workspace/
+.workspace/
+.tmp/
+config.json
+*.db
+
+# Baileys auth state (WhatsApp session) - catches nested folders too
+src/baileys-bridge/**/auth/
+src/baileys-bridge/auth/
+src/baileys-bridge/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+
+# IDE / OS
+.vscode/settings.json
+.idea/
+*.swp
+nul
+
+# AI assistant context (internal, not for public repo)
+.opencode/
