@@ -77,6 +77,7 @@ class SkillRegistry:
         )
         from src.skills.builtin.planner import PlannerSkill
         from src.skills.builtin.task_scheduler import TaskSchedulerSkill
+        from src.skills.builtin.media import SendVoiceNote, GeneratePDFReport
 
         self.register(WebResearchSkill())
         self.register(ShellSkill())
@@ -85,6 +86,8 @@ class SkillRegistry:
         self.register(ListFilesSkill())
         self.register(PlannerSkill())
         self.register(TaskSchedulerSkill())
+        self.register(SendVoiceNote())
+        self.register(GeneratePDFReport())
 
         # Skills manager tools
         self.register(SkillsFindSkill())

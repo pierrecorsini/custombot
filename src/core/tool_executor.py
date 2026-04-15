@@ -6,6 +6,7 @@ Handles skill execution with:
 - Timeout management
 - Error formatting
 - Metrics tracking
+- Media callback injection for audio/PDF skills
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, Awaitable, Optional, TYPE_CHECKING
 
 from src.constants import DEFAULT_SKILL_TIMEOUT, SLOW_SKILL_THRESHOLD_SECONDS
 from src.exceptions import SkillError, get_user_friendly_message
@@ -27,6 +28,9 @@ if TYPE_CHECKING:
     from src.monitoring import PerformanceMetrics
 
 log = logging.getLogger(__name__)
+
+# Type alias matching channels.base.SendMediaCallback
+SendMediaCallback = Callable[[str, Path, str], Awaitable[None]]
 
 
 class ToolExecutor:
@@ -47,6 +51,7 @@ class ToolExecutor:
         chat_id: str,
         tool_call: Any,
         workspace_dir: Path,
+        send_media: Optional[SendMediaCallback] = None,
     ) -> str:
         """
         Execute a tool call with full error handling and rate limiting.
@@ -55,6 +60,8 @@ class ToolExecutor:
             chat_id: Chat identifier for logging.
             tool_call: The tool call object from LLM response.
             workspace_dir: Workspace directory for skill execution.
+            send_media: Optional async callback for media skills to send
+                audio/documents directly to the channel.
 
         Returns:
             Tool result as string (or formatted error message).
@@ -123,8 +130,12 @@ class ToolExecutor:
                 chat_id=chat_id,
                 slow_threshold=SLOW_SKILL_THRESHOLD_SECONDS,
             ) as timing_result:
+                # Build kwargs — inject send_media callback if the skill might use it
+                exec_kwargs = dict(args)
+                if send_media is not None:
+                    exec_kwargs["send_media"] = send_media
                 result = await asyncio.wait_for(
-                    skill.execute(workspace_dir=workspace_dir, **args),
+                    skill.execute(workspace_dir=workspace_dir, **exec_kwargs),
                     timeout=DEFAULT_SKILL_TIMEOUT,
                 )
                 if self._metrics:

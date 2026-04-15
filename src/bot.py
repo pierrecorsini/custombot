@@ -518,6 +518,7 @@ class Bot:
                 messages=messages,
                 tools=tools if tools else None,
                 workspace_dir=workspace_dir,
+                channel=channel,
             )
 
             # Parse topic META from response before persisting
@@ -641,6 +642,7 @@ class Bot:
             tools=tools if tools else None,
             workspace_dir=workspace_dir,
             stream_callback=stream_cb,
+            channel=channel,
         )
 
         # 6. Parse topic detection META from response
@@ -670,6 +672,7 @@ class Bot:
         tools: list[dict[str, Any]] | None,
         workspace_dir: Path,
         stream_callback: StreamCallback | None = None,
+        channel: "BaseChannel | None" = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         """
         Run the ReAct loop and return response text with tool execution log.
@@ -680,6 +683,7 @@ class Bot:
             tools: Available tool definitions.
             workspace_dir: Workspace directory for skill execution.
             stream_callback: Optional callback to stream tool executions in real-time.
+            channel: Optional channel for media-sending callback injection.
 
         Returns:
             Tuple of (response_text, tool_log) where tool_log contains
@@ -702,13 +706,23 @@ class Bot:
             match finish:
                 case "tool_calls":
                     iteration_log = await self._process_tool_calls(
-                        choice, messages, chat_id, workspace_dir, stream_callback
+                        choice,
+                        messages,
+                        chat_id,
+                        workspace_dir,
+                        stream_callback,
+                        channel,
                     )
                     tool_log.extend(iteration_log)
                 case _ if choice.message.tool_calls:
                     # Has tool calls but finish isn't "tool_calls" (edge case)
                     iteration_log = await self._process_tool_calls(
-                        choice, messages, chat_id, workspace_dir, stream_callback
+                        choice,
+                        messages,
+                        chat_id,
+                        workspace_dir,
+                        stream_callback,
+                        channel,
                     )
                     tool_log.extend(iteration_log)
                 case _:
@@ -721,7 +735,7 @@ class Bot:
             chat_id,
             extra={"chat_id": chat_id, "max_iterations": max_iter},
         )
-        return "(max tool iterations reached — please try again)", tool_log
+        return "(Max tool iterations reached, change configuration or try again)", tool_log
 
     async def _process_tool_calls(
         self,
@@ -730,6 +744,7 @@ class Bot:
         chat_id: str,
         workspace_dir: Path,
         stream_callback: StreamCallback | None = None,
+        channel: "BaseChannel | None" = None,
     ) -> list[dict[str, Any]]:
         """
         Process tool calls from an LLM response and append results to messages.
@@ -740,6 +755,7 @@ class Bot:
             chat_id: Chat identifier for logging.
             workspace_dir: Workspace directory for skill execution.
             stream_callback: Optional callback to stream tool executions in real-time.
+            channel: Optional channel for creating the send_media callback.
 
         Returns:
             List of dicts with 'name', 'args', and 'result' keys for logging.
@@ -749,12 +765,32 @@ class Bot:
         # Append the assistant's tool-call turn to context
         messages.append(self._llm.tool_call_to_dict(choice.message))
 
+        # Create send_media callback if channel is available
+        send_media = None
+        if channel is not None:
+            from src.channels.base import SendMediaCallback
+
+            async def _send_media(kind: str, path: "Path", caption: str = "") -> None:
+                """Route media to the appropriate channel send method."""
+                try:
+                    if kind == "audio":
+                        await channel.send_audio(chat_id, path, ptt=True)
+                    elif kind == "document":
+                        await channel.send_document(chat_id, path, caption=caption)
+                    else:
+                        log.warning("Unknown media kind: %s", kind)
+                except Exception as exc:
+                    log.error("send_media callback failed: %s", exc)
+
+            send_media = _send_media
+
         # Execute each requested tool
         for tool_call in choice.message.tool_calls or []:
             result = await self._tool_executor.execute(
                 chat_id=chat_id,
                 tool_call=tool_call,
                 workspace_dir=workspace_dir,
+                send_media=send_media,
             )
             messages.append(
                 {
