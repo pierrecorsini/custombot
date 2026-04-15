@@ -247,6 +247,14 @@ async def _run_bot(
             # Avoids revealing bot activity for messages that will be filtered
             preflight = await bot.preflight_check(msg)
             if not preflight:
+                log.debug(
+                    "Message %s rejected by preflight: %s (fromMe=%s, toMe=%s, chat=%s)",
+                    msg.message_id,
+                    preflight.reason,
+                    msg.fromMe,
+                    msg.toMe,
+                    msg.chat_id,
+                )
                 return
             # Show "typing..." indicator only for messages that pass filters
             await channel.send_typing(msg.chat_id)

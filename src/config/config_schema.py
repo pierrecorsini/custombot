@@ -98,7 +98,7 @@ CONFIG_SCHEMA: dict[str, Any] = {
                 "max_tool_iterations": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 100,
+                    "maximum": 1000,
                     "description": "Maximum tool call iterations in ReAct loop",
                 },
                 "embedding_model": {

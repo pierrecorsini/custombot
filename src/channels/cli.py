@@ -16,6 +16,7 @@ import logging
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
@@ -169,6 +170,28 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
         This method exists to satisfy the BaseChannel interface.
         """
         self._print_response(text)
+
+    async def send_audio(
+        self, chat_id: str, file_path: Path, *, ptt: bool = False
+    ) -> None:
+        """Print audio file info in CLI mode."""
+        kind = "voice note" if ptt else "audio"
+        console.print(
+            f"\n[bold magenta]🔊 {kind.title()}:[/bold magenta] {file_path}\n"
+        )
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: Path,
+        *,
+        caption: str = "",
+        filename: str = "",
+    ) -> None:
+        """Print document file info in CLI mode."""
+        label = filename or file_path.name
+        cap = f" — {caption}" if caption else ""
+        console.print(f"\n[bold magenta]📄 Document:[/bold magenta] {label}{cap}\n")
 
     async def send_typing(self, chat_id: str) -> None:
         """Show typing indicator (no-op for CLI)."""

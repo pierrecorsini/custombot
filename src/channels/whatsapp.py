@@ -31,6 +31,7 @@ from src.channels.stealth import (
 )
 from collections import OrderedDict
 from src.config import WhatsAppConfig
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -550,6 +551,73 @@ Always format your response for plain-text WhatsApp rendering. Your message must
 
     async def send_typing(self, chat_id: str) -> None:
         await self._backend.set_typing(chat_id, composing=True)
+
+    async def send_audio(
+        self, chat_id: str, file_path: Path, *, ptt: bool = False
+    ) -> None:
+        """Send an audio file as a WhatsApp voice note or audio message."""
+        if not self._backend.is_connected or self._backend._client is None:
+            log.warning("Cannot send audio — WhatsApp not connected")
+            return
+
+        # Show brief typing indicator before sending media
+        await self._backend.set_typing(chat_id, composing=True)
+        try:
+            from neonize.utils.jid import build_jid
+
+            user, server = _parse_jid(chat_id)
+            jid = build_jid(user, server)
+            result = await asyncio.to_thread(
+                self._backend._client.send_audio, jid, str(file_path), ptt
+            )
+            mark_sent(chat_id)
+            log.info(
+                "Sent audio to %s (ptt=%s, file=%s, msg_id=%s)",
+                chat_id,
+                ptt,
+                file_path.name,
+                getattr(result, "message_id", getattr(result, "ID", "?")),
+            )
+        except Exception as e:
+            log.error("Failed to send audio to %s: %s", chat_id, e)
+            raise
+        finally:
+            await self._backend.set_typing(chat_id, composing=False)
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: Path,
+        *,
+        caption: str = "",
+        filename: str = "",
+    ) -> None:
+        """Send a document file (PDF, etc.) via WhatsApp."""
+        if not self._backend.is_connected or self._backend._client is None:
+            log.warning("Cannot send document — WhatsApp not connected")
+            return
+
+        await self._backend.set_typing(chat_id, composing=True)
+        try:
+            from neonize.utils.jid import build_jid
+
+            user, server = _parse_jid(chat_id)
+            jid = build_jid(user, server)
+            fname = filename or file_path.name
+            await asyncio.to_thread(
+                self._backend._client.send_document,
+                jid,
+                str(file_path),
+                caption=caption or None,
+                filename=fname,
+            )
+            mark_sent(chat_id)
+            log.info("Sent document to %s (file=%s)", chat_id, file_path.name)
+        except Exception as e:
+            log.error("Failed to send document to %s: %s", chat_id, e)
+            raise
+        finally:
+            await self._backend.set_typing(chat_id, composing=False)
 
     def _is_allowed(self, sender_id: str) -> bool:
         if not self._cfg.allowed_numbers:

@@ -15,6 +15,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
@@ -72,6 +73,10 @@ class IncomingMessage:
 
 # Type alias for the callback the bot registers
 MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
+
+# Type alias for the media-sending callback injected into skills.
+# Callable(kind: "audio" | "document", path: Path, caption: str) -> Awaitable[None]
+SendMediaCallback = Callable[[str, Path, str], Awaitable[None]]
 
 
 _safe_mode_lock = asyncio.Lock()
@@ -166,6 +171,40 @@ class BaseChannel(ABC):
         Implementations may be a no-op.
         """
         ...
+
+    async def send_audio(
+        self, chat_id: str, file_path: Path, *, ptt: bool = False
+    ) -> None:
+        """Send an audio file to a chat.
+
+        Args:
+            chat_id: Target chat identifier.
+            file_path: Path to the audio file on disk.
+            ptt: If True, send as a voice note (push-to-talk) instead of a regular audio file.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support audio sending"
+        )
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: Path,
+        *,
+        caption: str = "",
+        filename: str = "",
+    ) -> None:
+        """Send a document file to a chat.
+
+        Args:
+            chat_id: Target chat identifier.
+            file_path: Path to the document file on disk.
+            caption: Optional caption shown below the document.
+            filename: Display filename for the document (defaults to file_path name).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support document sending"
+        )
 
 
 async def _confirm_send(chat_id: str) -> bool:
