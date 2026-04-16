@@ -65,19 +65,7 @@ MAX_MESSAGE_ID_INDEX = 100_000
 # Pattern for valid chat_id (safe for file paths)
 _CHAT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\.\@]+$")
 
-# Characters that need sanitization for file paths
-_SANITIZE_CHARS = {
-    "@": "_at_",
-    ":": "_col_",
-    "/": "_sl_",
-    "\\": "_bs_",
-    "|": "_pi_",
-    "?": "_qm_",
-    "*": "_as_",
-    "<": "_lt_",
-    ">": "_gt_",
-    '"': "_dq_",
-}
+from src.memory import _safe_name as _sanitize_chat_id_for_path
 
 
 def _validate_chat_id(chat_id: str) -> None:
@@ -97,25 +85,6 @@ def _validate_chat_id(chat_id: str) -> None:
             f"Invalid chat_id format: {chat_id!r}. "
             "Only alphanumeric characters, dash, underscore, dot, and @ are allowed."
         )
-
-
-def _sanitize_chat_id_for_path(chat_id: str) -> str:
-    """
-    Sanitize chat_id for use in file paths.
-
-    Replaces characters that are problematic on some file systems
-    (Windows, especially) with safe alternatives.
-
-    Args:
-        chat_id: The chat ID to sanitize.
-
-    Returns:
-        Sanitized chat_id safe for use in file paths.
-    """
-    sanitized = chat_id
-    for char, replacement in _SANITIZE_CHARS.items():
-        sanitized = sanitized.replace(char, replacement)
-    return sanitized
 
 
 # Re-export so ``from src.db import CorruptionResult`` keeps working
@@ -671,6 +640,26 @@ class Database:
         # Calculate checksum for corruption detection
         checksum = calculate_checksum(content, role, timestamp)
 
+        # Scan user messages for injection at save time — avoids re-scanning
+        # every history message on every LLM call (performance optimization)
+        _sanitized = False
+        if role == "user" and content:
+            from src.security.prompt_injection import (
+                detect_injection,
+                sanitize_user_input,
+            )
+
+            result = detect_injection(content)
+            if result.detected and result.confidence >= 0.8:
+                content = sanitize_user_input(content)
+                _sanitized = True
+                log.info(
+                    "Sanitized injection in user message %s (confidence=%.1f patterns=%s)",
+                    mid,
+                    result.confidence,
+                    result.matched_patterns,
+                )
+
         msg = {
             "id": mid,
             "role": role,
@@ -678,6 +667,7 @@ class Database:
             "name": name,
             "timestamp": timestamp,
             "_checksum": checksum,
+            "_sanitized": _sanitized,
         }
 
         msg_file = self._message_file(chat_id)
@@ -759,7 +749,10 @@ class Database:
             async with lock:
                 try:
                     # Run file I/O in thread pool to avoid blocking
-                    lines = await asyncio.to_thread(self._read_file_lines, msg_file)
+                    # Pass limit directly to avoid reading more lines than needed
+                    lines = await asyncio.to_thread(
+                        self._read_file_lines, msg_file, limit
+                    )
                 except Exception:
                     return []
             return lines
@@ -774,8 +767,8 @@ class Database:
             log.warning("Timeout reading messages for chat %s", chat_id)
             return []
 
-        # Get last N lines, then parse with checksum validation
-        recent_lines = lines[-limit:] if len(lines) > limit else lines
+        # Lines are already limited to the last N by _read_file_lines
+        recent_lines = lines
         messages = []
         corruption_detected = False
 
@@ -828,10 +821,17 @@ class Database:
         # Already in chronological order (oldest first) since we read from file
         return messages
 
-    def _read_file_lines(self, file_path: Path) -> List[str]:
-        """Synchronous helper to read file lines using deque for memory efficiency."""
+    def _read_file_lines(
+        self, file_path: Path, limit: int = MAX_MESSAGE_HISTORY
+    ) -> List[str]:
+        """Synchronous helper to read last N file lines efficiently.
+
+        Uses deque with maxlen to only retain the requested number of lines,
+        avoiding reading the entire file into memory for large chat histories.
+        """
         with file_path.open("r", encoding="utf-8") as f:
-            return list(deque(f, maxlen=MAX_MESSAGE_HISTORY))
+            # deque with maxlen discards old lines automatically — O(limit) memory
+            return list(deque(f, maxlen=limit))
 
     # ── chats ──────────────────────────────────────────────────────────────
 

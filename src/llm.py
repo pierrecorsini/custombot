@@ -10,6 +10,7 @@ Just set base_url + api_key in config.json.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -46,12 +47,15 @@ class TokenUsage:
             "request_count": self.request_count,
         }
 
+    _lock = threading.Lock()
+
     def add(self, prompt: int, completion: int) -> None:
-        """Add token usage from a single request."""
-        self.prompt_tokens += prompt
-        self.completion_tokens += completion
-        self.total_tokens += prompt + completion
-        self.request_count += 1
+        """Add token usage from a single request (thread-safe)."""
+        with self._lock:
+            self.prompt_tokens += prompt
+            self.completion_tokens += completion
+            self.total_tokens += prompt + completion
+            self.request_count += 1
 
 
 # Global token usage tracker for the session

@@ -68,6 +68,9 @@ def validate_path(workspace_dir: Path, user_path: str) -> Path:
     """
     Validate and resolve a user-provided path within the workspace.
 
+    Performs immediate validation to minimize TOCTOU window. The caller
+    should use the returned Path immediately without further resolution.
+
     Args:
         workspace_dir: The workspace root directory.
         user_path: User-provided path string (may be relative or absolute).
@@ -93,18 +96,35 @@ def validate_path(workspace_dir: Path, user_path: str) -> Path:
                 path=user_path,
                 reason="absolute_path_escape",
             )
-        return user_path_obj.resolve()
+        resolved = user_path_obj.resolve()
+    else:
+        # Resolve relative path
+        resolved = (workspace_dir / user_path).resolve()
 
-    # Resolve relative path
-    resolved = (workspace_dir / user_path).resolve()
-
-    # Verify it stays within workspace
+    # Verify it stays within workspace — re-resolve to catch symlinks
+    resolved = resolved.resolve()
     if not is_path_in_workspace(workspace_dir, resolved):
         raise PathSecurityError(
             f"Path escape attempt blocked: {user_path!r}",
             path=user_path,
             reason="path_traversal",
         )
+
+    # On POSIX, check for symlink escape (O_NOFOLLOW equivalent)
+    if platform.system() != "Windows" and resolved.exists():
+        try:
+            import os
+
+            # Verify no symlink in the path chain points outside workspace
+            real_resolved = Path(os.path.realpath(resolved))
+            if not is_path_in_workspace(workspace_dir, real_resolved):
+                raise PathSecurityError(
+                    f"Symlink escape blocked: {user_path!r} resolves outside workspace",
+                    path=user_path,
+                    reason="symlink_escape",
+                )
+        except OSError:
+            pass  # File may not exist yet
 
     return resolved
 

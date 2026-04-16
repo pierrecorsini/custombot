@@ -117,9 +117,10 @@ class VectorMemory(SqliteHelper):
 
         # Store in cache with LRU eviction (thread-safe)
         with self._lock:
-            self._embed_cache[cache_key] = embedding
-            if len(self._embed_cache) > self._embed_cache_max:
+            # Evict BEFORE insertion to maintain strict memory bounds
+            if len(self._embed_cache) >= self._embed_cache_max:
                 self._embed_cache.popitem(last=False)
+            self._embed_cache[cache_key] = embedding
 
         return embedding
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, TypeVar
@@ -397,10 +398,13 @@ class WhatsAppConfig:
     neonize: NeonizeConfig = field(default_factory=NeonizeConfig)
     # If non-empty, only these numbers (e164, no +) will be answered
     allowed_numbers: List[str] = field(default_factory=list)
+    # Must be explicitly set to False to reject messages when allowed_numbers is empty.
+    # Defaults to True for backward compatibility (original behavior: accept all when list is empty).
+    allow_all: bool = True
 
     def __repr__(self) -> str:
         nums = f"{len(self.allowed_numbers)} numbers" if self.allowed_numbers else "all"
-        return f"WhatsAppConfig(provider={self.provider!r}, allowed={nums}, neonize={self.neonize!r})"
+        return f"WhatsAppConfig(provider={self.provider!r}, allowed={nums}, allow_all={self.allow_all}, neonize={self.neonize!r})"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -531,11 +535,24 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     # Manually handle nested dataclasses because type annotations are strings
     # at runtime when using `from __future__ import annotations`.
     llm = _from_dict(LLMConfig, data.get("llm", {}))
+
+    # Environment variable overrides for sensitive values
+    env_api_key = os.environ.get("OPENAI_API_KEY")
+    if env_api_key:
+        llm.api_key = env_api_key
+        log.debug("Using OPENAI_API_KEY from environment variable")
+
+    env_base_url = os.environ.get("OPENAI_BASE_URL")
+    if env_base_url:
+        llm.base_url = env_base_url
+        log.debug("Using OPENAI_BASE_URL from environment variable")
+
     wa_data = data.get("whatsapp", {})
     whatsapp = WhatsAppConfig(
         provider=wa_data.get("provider", "neonize"),
         neonize=_from_dict(NeonizeConfig, wa_data.get("neonize", {})),
         allowed_numbers=wa_data.get("allowed_numbers", []),
+        allow_all=wa_data.get("allow_all", True),
     )
     config = Config(
         llm=llm,

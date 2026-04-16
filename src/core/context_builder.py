@@ -147,14 +147,13 @@ def db_rows_to_messages(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _sanitize_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sanitize user messages in history for injection prevention.
 
-    Scans only user-role messages. If an injection is detected with
-    high confidence (>0.8), the message content is sanitized.
-    Medium-confidence detections are logged but not modified to avoid
-    false positives disrupting normal conversations.
+    Messages flagged with _sanitized=True were already scanned at save time
+    (see db.py save_message). Only scan unflagged messages here (e.g. messages
+    saved before this optimization was added).
     """
     sanitized = []
     for msg in messages:
-        if msg.get("role") == "user":
+        if msg.get("role") == "user" and not msg.get("_sanitized"):
             result = detect_injection(msg["content"])
             if result.detected and result.confidence >= 0.8:
                 log.warning(

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 import contextvars
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,8 +56,10 @@ from src.core.tool_formatter import (
     format_single_tool_execution,
 )
 from src.core.instruction_loader import InstructionLoader
-from src.core.project_context import ProjectContextLoader
+from src.core.project_context import ProjectContextLoader as _ProjectContextLoaderImpl
+from src.utils.protocols import ProjectStore, ProjectContextLoader, MemoryMonitor
 from src.core.topic_cache import TopicCache, parse_meta
+from src.security.prompt_injection import filter_response_content
 
 log = logging.getLogger(__name__)
 
@@ -100,8 +103,8 @@ class Bot:
         routing: RoutingEngine | None = None,
         instructions_dir: str = "",
         message_queue: MessageQueue | None = None,
-        project_store: Any = None,
-        project_ctx: Any = None,
+        project_store: ProjectStore | None = None,
+        project_ctx: ProjectContextLoader | None = None,
     ) -> None:
         self._cfg = config
         self._db = db
@@ -119,7 +122,7 @@ class Bot:
         # Per-chat message rate limiter
         self._chat_rate_limiter = RateLimiter()
         # Memory monitor for tracking resource usage
-        self._memory_monitor: Any = None
+        self._memory_monitor: MemoryMonitor | None = None
         # Performance metrics collector
         self._metrics: PerformanceMetrics = get_metrics_collector()
         # Tool executor (delegates to skill registry with rate limiting and error handling)
@@ -131,7 +134,7 @@ class Bot:
         # Instruction file loader (mtime-cached)
         self._instruction_loader = InstructionLoader(self._instructions_dir)
         # Project context loader — prefer injected shared instance
-        self._project_ctx = project_ctx or ProjectContextLoader(project_store)
+        self._project_ctx = project_ctx or _ProjectContextLoaderImpl(project_store)
         # Per-chat topic summary cache
         self._topic_cache = TopicCache(WORKSPACE_DIR)
 
@@ -191,7 +194,9 @@ class Bot:
     # ── crash recovery ────────────────────────────────────────────────────────
 
     async def recover_pending_messages(
-        self, timeout_seconds: int | None = None
+        self,
+        timeout_seconds: int | None = None,
+        channel: "BaseChannel | None" = None,
     ) -> dict:
         """
         Recover and process stale pending messages from previous crash.
@@ -201,6 +206,7 @@ class Bot:
 
         Args:
             timeout_seconds: Custom timeout for stale detection (uses queue default if not provided).
+            channel: Optional channel for sender ACL validation during recovery.
 
         Returns:
             dict with keys:
@@ -221,8 +227,26 @@ class Bot:
 
         recovered_count = 0
         failures = []
+        skipped_acl = 0
         for queued_msg in stale_messages:
             try:
+                # Validate sender against current ACL before reprocessing
+                if channel is not None and hasattr(channel, "_is_allowed"):
+                    # Use sender_name as fallback since queued messages may not store sender_id
+                    sender_id = (
+                        getattr(queued_msg, "sender_id", None)
+                        or queued_msg.sender_name
+                        or ""
+                    )
+                    if not channel._is_allowed(sender_id):
+                        log.warning(
+                            "Skipping recovery of message %s — sender %s not in allowed_numbers",
+                            queued_msg.message_id,
+                            sender_id,
+                        )
+                        skipped_acl += 1
+                        continue
+
                 # Reconstruct IncomingMessage from queued data
                 from src.channels.base import IncomingMessage as IM
 
@@ -258,10 +282,11 @@ class Bot:
 
         # Log recovery summary
         log.info(
-            "Recovery complete: %d/%d messages recovered, %d failed",
+            "Recovery complete: %d/%d messages recovered, %d failed, %d skipped (ACL)",
             recovered_count,
             len(stale_messages),
             len(failures),
+            skipped_acl,
         )
 
         return {
@@ -361,11 +386,9 @@ class Bot:
             extra={"chat_id": msg.chat_id, "message_id": msg.message_id},
         )
 
-        # Deduplicate
-        if await self._db.message_exists(msg.message_id):
-            log.debug("Duplicate message %s, skipping.", msg.message_id)
-            clear_correlation_id()
-            return None
+        # Note: Dedup check is already performed in preflight_check() which
+        # is always called before handle_message() in the message pipeline.
+        # Skipping the redundant check here saves one async dict lookup per message.
 
         # Check per-chat message rate limit (30 messages per minute)
         rate_result = self._chat_rate_limiter.check_message_rate(
@@ -533,7 +556,7 @@ class Bot:
                 role="user",
                 content=prompt,
                 name="Scheduler",
-                message_id=f"sched_{int(time.time() * 1000)}",
+                message_id=f"sched_{uuid.uuid4().hex[:8]}",
             )
             await self._db.save_message(
                 chat_id=chat_id,
@@ -650,6 +673,19 @@ class Bot:
         if meta:
             self._handle_topic_meta(msg.chat_id, meta)
 
+        # 6b. Filter sensitive content (PII, secrets, API keys) from LLM response
+        filter_result = filter_response_content(response_text)
+        if filter_result.flagged:
+            response_text = filter_result.sanitized_content
+            log.warning(
+                "Filtered sensitive content from LLM response: %s",
+                filter_result.categories,
+                extra={
+                    "chat_id": msg.chat_id,
+                    "filter_categories": filter_result.categories,
+                },
+            )
+
         # 7. Append tool summary if skillExecVerbose == "summary"
         if verbose == "summary" and tool_log:
             response_text = format_response_with_tool_log(response_text, tool_log)
@@ -727,7 +763,13 @@ class Bot:
                     tool_log.extend(iteration_log)
                 case _:
                     # LLM is done — return the final text
-                    return choice.message.content or "(no response)", tool_log
+                    content = choice.message.content
+                    if not content or not content.strip():
+                        return (
+                            "(The assistant generated an empty response. Please try rephrasing your request.)",
+                            tool_log,
+                        )
+                    return content, tool_log
 
         log.warning(
             "Reached max tool iterations (%d) for chat %s",
@@ -735,7 +777,20 @@ class Bot:
             chat_id,
             extra={"chat_id": chat_id, "max_iterations": max_iter},
         )
-        return "(Max tool iterations reached, change configuration or try again)", tool_log
+        # Build informative truncation message with tool summary
+        tool_summary = ""
+        if tool_log:
+            tool_names = [entry["name"] for entry in tool_log]
+            unique_tools = dict.fromkeys(tool_names)  # preserve order, deduplicate
+            tool_summary = (
+                f"\n\n🔧 Tools used ({len(tool_log)} calls): {', '.join(unique_tools)}"
+            )
+        return (
+            f"⚠️ Reached maximum tool iterations ({max_iter}). "
+            f"The task may be too complex for a single request. "
+            f"Try breaking it into smaller steps.{tool_summary}",
+            tool_log,
+        )
 
     async def _process_tool_calls(
         self,
