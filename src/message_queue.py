@@ -159,6 +159,10 @@ class MessageQueue:
         # In-memory index of pending messages (message_id -> QueuedMessage)
         self._pending: Dict[str, QueuedMessage] = {}
 
+        # Track completed IDs for append-only writes with periodic compaction
+        self._completed_since_compact: int = 0
+        self._compact_threshold: int = 20  # compact after this many completions
+
         # Lock for thread-safe operations
         self._lock = asyncio.Lock()
 
@@ -248,8 +252,8 @@ class MessageQueue:
         Mark a message as completed and remove from pending.
 
         Should be called after successful message processing.
-        Removes the message from the pending queue and updates
-        the queue file atomically.
+        Uses append-only write (appends COMPLETED entry) and only
+        rewrites the full file when the compaction threshold is reached.
 
         Args:
             message_id: ID of the message to complete.
@@ -259,7 +263,8 @@ class MessageQueue:
 
         Side Effects:
             - Removes message from in-memory pending index
-            - Rewrites queue file atomically
+            - Appends completion marker to queue file
+            - Periodically compacts the queue file (full rewrite)
         """
         async with self._lock:
             if message_id not in self._pending:
@@ -270,7 +275,15 @@ class MessageQueue:
                 return False
 
             del self._pending[message_id]
-            await self._persist_pending()
+            self._completed_since_compact += 1
+
+            # Compact (full rewrite) only when threshold is reached
+            if self._completed_since_compact >= self._compact_threshold:
+                await self._persist_pending()
+                self._completed_since_compact = 0
+            else:
+                # Append-only: write a completion marker
+                await self._append_completion(message_id)
 
         log.debug("Completed message %s", message_id)
         return True
@@ -421,6 +434,35 @@ class MessageQueue:
         except Exception as e:
             log.error("Failed to append to queue file: %s", e)
             raise
+
+    async def _append_completion(self, message_id: str) -> None:
+        """
+        Append a completion marker to the queue file (append-only optimization).
+
+        Instead of rewriting the entire file, we append a completed entry.
+        The next _load_pending call will skip completed entries.
+
+        Args:
+            message_id: The ID of the completed message.
+        """
+        try:
+            entry = (
+                json.dumps(
+                    {
+                        "message_id": message_id,
+                        "status": "completed",
+                        "completed_at": time.time(),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            with self._queue_file.open("a", encoding="utf-8") as f:
+                f.write(entry)
+        except Exception as e:
+            log.error("Failed to append completion to queue file: %s", e)
+            # Fall back to full persist on error
+            await self._persist_pending()
 
     async def _persist_pending(self) -> None:
         """

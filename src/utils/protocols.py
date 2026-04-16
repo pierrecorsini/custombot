@@ -306,4 +306,50 @@ __all__ = [
     "Channel",
     "Skill",
     "Storage",
+    "ProjectStore",
+    "ProjectContextLoader",
+    "MemoryMonitor",
 ]
+
+
+@runtime_checkable
+class ProjectStore(Protocol):
+    """
+    Protocol for project/knowledge persistence.
+
+    Provides CRUD operations for projects and knowledge entries.
+    """
+
+    def close(self) -> None:
+        """Flush and close the store."""
+        ...
+
+
+@runtime_checkable
+class ProjectContextLoader(Protocol):
+    """
+    Protocol for loading project context for LLM injection.
+    """
+
+    async def get(self, chat_id: str) -> Optional[str]:
+        """Load project context for a chat. Returns None if no context."""
+        ...
+
+
+@runtime_checkable
+class MemoryMonitor(Protocol):
+    """
+    Protocol for system memory monitoring.
+    """
+
+    def register_cache(self, name: str, size_fn: Callable[[], int]) -> None:
+        """Register a cache for size tracking."""
+        ...
+
+    def start_periodic_check(self, interval_seconds: float) -> None:
+        """Start periodic memory checks."""
+        ...
+
+    async def stop(self) -> None:
+        """Stop monitoring."""
+        ...

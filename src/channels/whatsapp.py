@@ -255,7 +255,15 @@ class NeonizeBackend:
         try:
             user, server = _parse_jid(chat_id)
             jid = build_jid(user, server)
-            await asyncio.to_thread(self._client.send_message, jid, text)
+            result = await asyncio.to_thread(self._client.send_message, jid, text)
+            # Log server confirmation to distinguish "queued" from "delivered"
+            msg_id = getattr(getattr(result, "key", None), "ID", "?")
+            log.info(
+                "Message sent to %s (server_msg_id=%s, chat_id=%s)",
+                chat_id,
+                msg_id,
+                chat_id,
+            )
             mark_sent(chat_id)
         except Exception as send_exc:
             # Connection stale (usync timeout, device list failure, etc.) → reconnect & retry once
@@ -268,9 +276,15 @@ class NeonizeBackend:
                     # Wait for background device sync to settle before retrying
                     await asyncio.sleep(5)
                     jid2 = build_jid(user, server)
-                    await asyncio.to_thread(self._client.send_message, jid2, text)
+                    result2 = await asyncio.to_thread(
+                        self._client.send_message, jid2, text
+                    )
+                    msg_id2 = getattr(getattr(result2, "key", None), "ID", "?")
                     mark_sent(chat_id)
-                    log.info("Send succeeded after reconnection")
+                    log.info(
+                        "Send succeeded after reconnection (server_msg_id=%s)",
+                        msg_id2,
+                    )
                     return
                 except Exception as retry_exc:
                     log.error("Send failed after reconnection: %s", retry_exc)
@@ -438,10 +452,13 @@ Always format your response for plain-text WhatsApp rendering. Your message must
         self._cfg = cfg
         self._backend = NeonizeBackend(cfg)
         self._shutdown_requested = False
-        self._last_incoming_len: OrderedDict[str, int] = (
-            OrderedDict()
-        )  # chat_id -> length of last received msg (bounded LRU)
-        self._MAX_TRACKED_INCOMING = 500  # LRU cap for incoming length tracking
+        # Per-chat incoming message length tracking (bounded OrderedDict LRU)
+        self._last_incoming_len: OrderedDict[str, int] = OrderedDict()
+        self._MAX_TRACKED_INCOMING = 500
+        # Backpressure: track active handler tasks and consecutive failures
+        self._active_tasks: set[asyncio.Task] = set()
+        self._consecutive_failures: int = 0
+        self._MAX_CONSECUTIVE_FAILURES: int = 10
 
     def get_channel_prompt(self) -> str | None:
         return self._CHANNEL_PROMPT
@@ -521,14 +538,20 @@ Always format your response for plain-text WhatsApp rendering. Your message must
                         continue
 
             if self._is_allowed(incoming.sender_id):
+                # Backpressure: stop accepting if too many consecutive failures
+                if self._consecutive_failures >= self._MAX_CONSECUTIVE_FAILURES:
+                    log.error(
+                        "Too many consecutive handler failures (%d), dropping message from %s",
+                        self._consecutive_failures,
+                        incoming.sender_id,
+                    )
+                    continue
+
                 # Track incoming message length for humanized send timing (LRU)
-                self._last_incoming_len[incoming.chat_id] = len(incoming.text or "")
-                self._last_incoming_len.move_to_end(incoming.chat_id)
-                # Evict oldest entries if tracking dict grows too large
-                while len(self._last_incoming_len) > self._MAX_TRACKED_INCOMING:
-                    self._last_incoming_len.popitem(last=False)
+                self._track_incoming_len(incoming.chat_id, len(incoming.text or ""))
                 task = asyncio.create_task(handler(incoming))
-                task.add_done_callback(_handle_task_error)
+                self._active_tasks.add(task)
+                task.add_done_callback(self._make_task_callback())
             else:
                 log.debug(
                     "Ignored message from %s (not in allowed_numbers)",
@@ -538,6 +561,36 @@ Always format your response for plain-text WhatsApp rendering. Your message must
     async def close(self) -> None:
         self._shutdown_requested = True
         await self._backend.disconnect()
+
+    def _make_task_callback(self):
+        """Create a done callback that tracks failures and provides backpressure."""
+
+        def _on_task_done(task: asyncio.Task) -> None:
+            self._active_tasks.discard(task)
+            if task.cancelled():
+                return
+            if exc := task.exception():
+                self._consecutive_failures += 1
+                log.error(
+                    "Handler task failed (%d consecutive): %s",
+                    self._consecutive_failures,
+                    exc,
+                    exc_info=exc,
+                )
+            else:
+                # Reset failure counter on success
+                self._consecutive_failures = 0
+
+        return _on_task_done
+
+    def _track_incoming_len(self, chat_id: str, length: int) -> None:
+        """Store incoming message length with LRU eviction."""
+        if chat_id in self._last_incoming_len:
+            self._last_incoming_len.move_to_end(chat_id)
+        self._last_incoming_len[chat_id] = length
+        # Evict oldest if over cap
+        while len(self._last_incoming_len) > self._MAX_TRACKED_INCOMING:
+            self._last_incoming_len.popitem(last=False)
 
     async def _send_message(
         self, chat_id: str, text: str, *, skip_delays: bool = False
@@ -620,10 +673,11 @@ Always format your response for plain-text WhatsApp rendering. Your message must
             await self._backend.set_typing(chat_id, composing=False)
 
     def _is_allowed(self, sender_id: str) -> bool:
-        if not self._cfg.allowed_numbers:
-            return True
-        # sender_id is already stripped of @server by _extract_message
-        return sender_id in self._cfg.allowed_numbers
+        if self._cfg.allowed_numbers:
+            # sender_id is already stripped of @server by _extract_message
+            return sender_id in self._cfg.allowed_numbers
+        # Default-deny: only allow all senders if allow_all is explicitly True
+        return self._cfg.allow_all
 
 
 # ─────────────────────────────────────────────────────────────────────────────

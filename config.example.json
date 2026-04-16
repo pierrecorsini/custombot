@@ -13,7 +13,8 @@
     "neonize": {
       "db_path": "workspace/whatsapp_session.db"
     },
-    "allowed_numbers": []
+    "allowed_numbers": [],
+    "allow_all": false
   },
   "memory_max_history": 50,
   "load_history": false,

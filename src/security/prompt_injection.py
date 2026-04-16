@@ -138,6 +138,54 @@ _MEDIUM_CONFIDENCE_PATTERNS: list[tuple[str, str]] = [
     (r"(?i)\bDAN\s+mode\b", "dan_mode"),
     (r"(?i)developer\s+mode\b", "developer_mode"),
     (r"(?i)god\s+mode\b", "god_mode"),
+    # --- Multi-language injection patterns ---
+    # German
+    (
+        r"(?i)ignoriere\s+(alle\s+)?vorherigen\s+(anweisungen|befehle|regeln)",
+        "ignore_previous_de",
+    ),
+    (
+        r"(?i)vergiss\s+(alle\s+)?vorherigen\s+(anweisungen|befehle)",
+        "forget_previous_de",
+    ),
+    (
+        r"(?i)missachte\s+(alle\s+)?vorherigen\s+(anweisungen|regeln)",
+        "disregard_previous_de",
+    ),
+    # French
+    (
+        r"(?i)ignore?s?\s+(toutes?\s+)?les?\s+(instructions?|consignes?|r[èe]gles?)\s+(pr[ée]c[ée]dentes?)",
+        "ignore_previous_fr",
+    ),
+    (
+        r"(?i)oublie?s?\s+(toutes?\s+)?les?\s+(instructions?|consignes?)\s+(pr[ée]c[ée]dentes?)",
+        "forget_previous_fr",
+    ),
+    # Spanish
+    (
+        r"(?i)ignora\s+(todas?\s+)?las?\s+(instrucciones?|reglas?)\s+(anteriores)",
+        "ignore_previous_es",
+    ),
+    (
+        r"(?i)olvida\s+(todas?\s+)?las?\s+(instrucciones?)\s+(anteriores)",
+        "forget_previous_es",
+    ),
+    # Russian (transliterated)
+    (
+        r"(?i)ignoriruj(?:te)?\s+(vse\s+)?predyduw(?:ie|ie)\s+(instrukcii|komandy|pravila)",
+        "ignore_previous_ru",
+    ),
+    # Chinese (simplified/traditional common phrases)
+    ("忽略(?:所有)?之前的(?:指令|规则|提示)", "ignore_previous_zh"),
+    ("忘记(?:所有)?之前的(?:指令|规则)", "forget_previous_zh"),
+    ("无视(?:所有)?之前的(?:指令|规则)", "disregard_previous_zh"),
+    # Portuguese
+    (
+        r"(?i)ignor[ae]\s+(tod[oa]s?\s+)?[oa]s?\s+(instru[cç][õo]es|regras)\s+(anteriores)",
+        "ignore_previous_pt",
+    ),
+    # Japanese (romaji + hiragana common forms)
+    (r"(?i)muk[ōo]shi?te\s+(subete\s+)?no\s+(shiji|meirei)", "ignore_previous_ja"),
 ]
 
 # Compiled regex patterns for efficiency
@@ -206,6 +254,13 @@ def detect_injection(text: str) -> InjectionDetectionResult:
 
     Checks against high and medium confidence pattern sets.
     Returns a result with detection status, confidence score, and matched patterns.
+
+    IMPORTANT: This detection is heuristic-only and can be bypassed by
+    creative attackers. It should not be the sole defense against prompt
+    injection. Use it as a layer in a defense-in-depth strategy.
+
+    Supports English, German, French, Spanish, Russian, Chinese,
+    Portuguese, and Japanese injection patterns.
 
     Args:
         text: The user message text to check.

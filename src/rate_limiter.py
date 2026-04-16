@@ -213,8 +213,8 @@ class RateLimiter:
         """
         self._config = config or RateLimitConfig.from_env()
 
-        # Per-chat rate limiters (keyed by chat_id)
-        self._chat_limiters: Dict[str, SlidingWindowTracker] = {}
+        # Per-chat rate limiters (keyed by chat_id) — OrderedDict for LRU eviction
+        self._chat_limiters: OrderedDict[str, SlidingWindowTracker] = OrderedDict()
 
         # Per-skill rate limiters for expensive skills (keyed by skill_name)
         self._skill_limiters: Dict[str, SlidingWindowTracker] = {}
@@ -223,17 +223,21 @@ class RateLimiter:
         self._limiters_lock = Lock()
 
     def _get_or_create_chat_limiter(self, chat_id: str) -> SlidingWindowTracker:
-        """Get or create a rate limiter for a chat."""
+        """Get or create a rate limiter for a chat (LRU: move to end on access)."""
         with self._limiters_lock:
-            if chat_id not in self._chat_limiters:
-                # Prune old limiters if we have too many
-                if len(self._chat_limiters) >= MAX_TRACKED_CHATS:
-                    self._prune_inactive_chats()
+            if chat_id in self._chat_limiters:
+                # Move to end (most recently used) for LRU eviction
+                self._chat_limiters.move_to_end(chat_id)
+                return self._chat_limiters[chat_id]
 
-                self._chat_limiters[chat_id] = SlidingWindowTracker(
-                    window_size_seconds=self._config.window_size_seconds,
-                    max_limit=self._config.chat_rate_limit,
-                )
+            # Prune old limiters if we have too many (evict least recently used)
+            if len(self._chat_limiters) >= MAX_TRACKED_CHATS:
+                self._prune_inactive_chats()
+
+            self._chat_limiters[chat_id] = SlidingWindowTracker(
+                window_size_seconds=self._config.window_size_seconds,
+                max_limit=self._config.chat_rate_limit,
+            )
             return self._chat_limiters[chat_id]
 
     def _get_or_create_skill_limiter(self, skill_name: str) -> SlidingWindowTracker:
@@ -247,16 +251,15 @@ class RateLimiter:
             return self._skill_limiters[skill_name]
 
     def _prune_inactive_chats(self) -> None:
-        """Remove inactive chat limiters to prevent memory growth."""
-        # Simple approach: remove half of the limiters
-        # A more sophisticated approach would track last access time
-        if len(self._chat_limiters) > MAX_TRACKED_CHATS // 2:
-            keys_to_remove = list(self._chat_limiters.keys())[
-                : len(self._chat_limiters) // 2
-            ]
-            for key in keys_to_remove:
-                del self._chat_limiters[key]
-            log.debug("Pruned %d inactive chat rate limiters", len(keys_to_remove))
+        """Remove least recently used chat limiters to prevent memory growth.
+
+        Evicts from the front of the OrderedDict (oldest/least recently accessed).
+        """
+        # Remove oldest half (least recently used — front of OrderedDict)
+        prune_count = len(self._chat_limiters) // 2
+        for _ in range(prune_count):
+            self._chat_limiters.popitem(last=False)
+        log.debug("Pruned %d inactive chat rate limiters (LRU eviction)", prune_count)
 
     def is_expensive_skill(self, skill_name: str) -> bool:
         """Check if a skill is considered expensive."""

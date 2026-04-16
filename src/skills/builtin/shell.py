@@ -63,6 +63,15 @@ _BLOCKED_PATTERNS = [
     r"\bchown\b",  # change ownership
     r"\bnc\s+.*-e\b",  # netcat reverse shell
     r"\bpython\b.*-c\b.*\b(import|exec|eval|os|subprocess|sys)\b",  # python one-liners
+    # --- Additional blocked patterns for bypass prevention ---
+    r"`[^`]*`",  # backtick command substitution
+    r"\$\(",  # $() subshell / command substitution
+    r"\bsource\b",  # source command (execute arbitrary files)
+    r"\bcurl\b.*\|\s*\w+",  # curl pipe to any command
+    r"\bwget\b.*\|\s*\w+",  # wget pipe to any command
+    r";\s*(rm|sudo|chmod|chown|dd|mkfs|shutdown|reboot|format)\b",  # semicolon chaining of dangerous commands
+    r"&&\s*(rm|sudo|chmod|chown|dd|mkfs|shutdown|reboot|format)\b",  # && chaining of dangerous commands
+    r"\|\|\s*(rm|sudo|chmod|chown|dd|mkfs|shutdown|reboot|format)\b",  # || chaining of dangerous commands
 ]
 
 # Security: Sensitive environment variable patterns to block reading
@@ -164,7 +173,12 @@ def _get_sanitized_env() -> Dict[str, str]:
     Get a sanitized copy of environment variables for command execution.
 
     Removes sensitive variables that could be leaked.
+    Result is cached for the lifetime of the process since os.environ
+    rarely changes between command executions.
     """
+    if _get_sanitized_env._cache is not None:
+        return _get_sanitized_env._cache
+
     sanitized = dict(os.environ)
 
     # Remove sensitive variables
@@ -172,7 +186,11 @@ def _get_sanitized_env() -> Dict[str, str]:
         if _SENSITIVE_ENV_REGEX.search(key):
             del sanitized[key]
 
+    _get_sanitized_env._cache = sanitized
     return sanitized
+
+
+_get_sanitized_env._cache = None  # type: ignore[attr-defined]
 
 
 def _get_shell_env_info() -> str:

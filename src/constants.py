@@ -13,6 +13,18 @@ Categories:
     - LLM: Token limits and iteration bounds
     - WhatsApp: Client configuration
     - Memory: History and storage limits
+
+Threading / Asyncio Model:
+    This project uses both threading.Lock and asyncio.Lock. The rule is:
+    - asyncio.Lock: Use in async code paths (bot.py, db.py, message_queue.py)
+      where the lock guards async operations and the code runs on the event loop.
+    - threading.Lock: Use in code that may be called from asyncio.to_thread()
+      or from background daemon threads (vector_memory.py, rate_limiter.py,
+      whatsapp.py NeonizeBackend). These modules use sync I/O that runs in
+      thread pools where asyncio locks would deadlock.
+    - Never mix: Do not acquire a threading.Lock inside an async function
+      without asyncio.to_thread(), and do not use asyncio.Lock in code that
+      runs in daemon threads (no event loop available).
 """
 
 from __future__ import annotations

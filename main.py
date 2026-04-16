@@ -264,6 +264,7 @@ async def _run_bot(
                     msg, channel=channel, stream_callback=stream_tool_update
                 )
                 if response:
+                    await channel.send_message(msg.chat_id, response)
                     log_message_flow(
                         direction="OUT",
                         channel=msg.channel_type or "unknown",
@@ -273,7 +274,6 @@ async def _run_bot(
                         from_me=True,
                         to_me=False,
                     )
-                    await channel.send_message(msg.chat_id, response)
             except Exception as exc:
                 session_metrics["errors_count"] += 1
                 from src.logging import get_correlation_id
@@ -313,7 +313,7 @@ async def _run_bot(
         _log_shutdown_begin(session_metrics)
         cli_output.warning("Initiating graceful shutdown...")
 
-        total_cleanup_steps = 8
+        total_cleanup_steps = 6
 
         # 1. Stop accepting new messages
         _log_cleanup_step(
@@ -337,51 +337,60 @@ async def _run_bot(
             log.warning("Force proceeding after timeout")
             cli_output.warning("Timed out waiting for operations, forcing shutdown")
 
-        # 3. Stop scheduler
-        _log_cleanup_step(3, total_cleanup_steps, "Stopping task scheduler")
-        cli_output.dim("  Stopping task scheduler...")
-        try:
-            await scheduler.stop()
-        except Exception as e:
-            log.warning("Error stopping scheduler: %s", e)
+        # 3. Stop scheduler and health server in parallel
+        _log_cleanup_step(
+            3, total_cleanup_steps, "Stopping scheduler, health server, and channel"
+        )
+        cli_output.dim("  Stopping background services...")
 
-        # 4. Stop health check server
-        if health_server:
-            _log_cleanup_step(4, total_cleanup_steps, "Stopping health check server")
-            cli_output.dim("  Stopping health check server...")
+        async def _stop_scheduler():
             try:
-                await health_server.stop()
+                await scheduler.stop()
             except Exception as e:
-                log.warning("Error stopping health server: %s", e)
-        else:
-            _log_cleanup_step(
-                4, total_cleanup_steps, "Health check server not running, skipping"
-            )
+                log.warning("Error stopping scheduler: %s", e)
 
-        # 5. Close channel
-        _log_cleanup_step(5, total_cleanup_steps, "Closing channel connections")
+        async def _stop_health():
+            if health_server:
+                try:
+                    await health_server.stop()
+                except Exception as e:
+                    log.warning("Error stopping health server: %s", e)
+
+        await asyncio.gather(_stop_scheduler(), _stop_health())
+
+        # 4. Close channel
+        _log_cleanup_step(4, total_cleanup_steps, "Closing channel connections")
         cli_output.dim("  Closing channel connections...")
         try:
             await channel.close()
         except Exception as e:
             log.warning("Error closing channel: %s", e)
 
-        # 6. Close project store (flush WAL)
-        _log_cleanup_step(6, total_cleanup_steps, "Closing project store")
-        try:
-            project_store.close()
-        except Exception as e:
-            log.warning("Error closing project store: %s", e)
+        # 5. Close project store and vector memory in parallel
+        _log_cleanup_step(
+            5, total_cleanup_steps, "Closing project store and vector memory"
+        )
+        cli_output.dim("  Closing storage backends...")
 
-        # 7. Close vector memory (flush WAL)
-        _log_cleanup_step(7, total_cleanup_steps, "Closing vector memory")
-        try:
-            vector_memory.close()
-        except Exception as e:
-            log.warning("Error closing vector memory: %s", e)
+        def _close_project_store():
+            try:
+                project_store.close()
+            except Exception as e:
+                log.warning("Error closing project store: %s", e)
 
-        # 8. Close database
-        _log_cleanup_step(8, total_cleanup_steps, "Closing database connections")
+        def _close_vector_memory():
+            try:
+                vector_memory.close()
+            except Exception as e:
+                log.warning("Error closing vector memory: %s", e)
+
+        await asyncio.gather(
+            asyncio.to_thread(_close_project_store),
+            asyncio.to_thread(_close_vector_memory),
+        )
+
+        # 6. Close database (must be last — other closers may still write)
+        _log_cleanup_step(6, total_cleanup_steps, "Closing database connections")
         cli_output.dim("  Closing database connections...")
         try:
             await db.close()
@@ -515,14 +524,23 @@ def start(ctx, config_path, health_port, log_llm, safe_mode):
     log.debug("Configuration file: %s", config_path)
     log.info("CustomBot starting...")
 
-    # Warn if allowed_numbers is empty — bot will respond to anyone
-    if not cfg.whatsapp.allowed_numbers:
+    # Warn if allowed_numbers is empty and allow_all is not set — bot won't respond
+    if not cfg.whatsapp.allowed_numbers and not cfg.whatsapp.allow_all:
         log.warning(
-            "whatsapp.allowed_numbers is empty — bot will respond to ALL numbers. "
-            "Set allowed_numbers in config.json to restrict access."
+            "whatsapp.allowed_numbers is empty AND allow_all is False — "
+            "bot will NOT respond to any numbers. "
+            "Set allowed_numbers in config.json or set allow_all=true for development."
         )
         cli_output.dim(
-            "  ⚠ No allowed_numbers set — bot responds to all numbers. "
+            "  ⚠ No allowed_numbers set and allow_all=false — bot will NOT respond. "
+            "Add numbers to config.json or set allow_all=true."
+        )
+    elif not cfg.whatsapp.allowed_numbers and cfg.whatsapp.allow_all:
+        log.warning(
+            "whatsapp.allowed_numbers is empty but allow_all=True — bot will respond to ALL numbers."
+        )
+        cli_output.dim(
+            "  ⚠ No allowed_numbers set — bot responds to ALL numbers (allow_all=true). "
             "Restrict by adding numbers to config.json."
         )
 

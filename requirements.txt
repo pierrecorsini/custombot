@@ -19,8 +19,3 @@ duckduckgo-search>=6.1.0
 
 # Vector memory (sqlite-vec extension for semantic search)
 sqlite-vec>=0.1.6
-
-# Testing (for E2E tests)
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-pytest-cov>=4.1.0

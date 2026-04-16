@@ -111,10 +111,12 @@ class Memory:
 
     # ── public API ─────────────────────────────────────────────────────────
 
+    ORIGIN_ID_FILENAME = ".chat_id"
+
     def ensure_workspace(self, chat_id: str) -> Path:
         """
         Create the per-chat workspace directory and seed initial files
-        (AGENTS.md) if they don't exist yet.
+        (AGENTS.md, .chat_id) if they don't exist yet.
         Returns the workspace Path.
         """
         d = self._ensure_chat_dir(chat_id)
@@ -123,6 +125,10 @@ class Memory:
             agents_path.write_text(_DEFAULT_AGENTS_MD, encoding="utf-8")
             self._agents_cache.pop(chat_id, None)
             log.debug("Seeded %s", agents_path)
+        # Store original chat_id for reverse lookup (JID reconstruction)
+        origin_path = d / self.ORIGIN_ID_FILENAME
+        if not origin_path.exists():
+            origin_path.write_text(chat_id, encoding="utf-8")
         return d
 
     async def read_memory(self, chat_id: str) -> Optional[str]:
@@ -442,5 +448,26 @@ class Memory:
 
 
 def _safe_name(chat_id: str) -> str:
-    """Strip characters that are unsafe in filesystem paths."""
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in chat_id)
+    """Strip characters that are unsafe in filesystem paths.
+
+    Uses the same replacement map as db._sanitize_chat_id_for_path()
+    to ensure workspace directories and message files use consistent names.
+    """
+    _SANITIZE_MAP = {
+        "@": "_at_",
+        ":": "_col_",
+        "/": "_sl_",
+        "\\": "_bs_",
+        "|": "_pi_",
+        "?": "_qm_",
+        "*": "_as_",
+        "<": "_lt_",
+        ">": "_gt_",
+        '"': "_dq_",
+    }
+    result = chat_id
+    for char, replacement in _SANITIZE_MAP.items():
+        result = result.replace(char, replacement)
+    # Replace any remaining non-alphanumeric characters (except -_. and the replacements above)
+    result = "".join(c if c.isalnum() or c in "-_." else "_" for c in result)
+    return result
