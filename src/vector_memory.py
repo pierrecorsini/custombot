@@ -7,30 +7,51 @@ filtering on KNN queries.
 
 Uses sqlite-vec (pure C, no Faiss) with cosine distance metric.
 Embeddings are generated via the OpenAI embeddings API.
+
+Lock model: WAL mode allows concurrent reads from multiple threads.
+Write operations (insert, delete) are serialized via _write_lock.
+Embedding cache access is protected by _cache_lock.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import sqlite3
 import struct
-import time
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import sqlite_vec
 from openai import AsyncOpenAI
 
-import sqlite_vec
-
 from src.db.sqlite_utils import SqliteHelper
+from src.exceptions import DiskSpaceError
+from src.utils import DEFAULT_MIN_DISK_SPACE, check_disk_space
 from src.utils.retry import retry_with_backoff
 
+# TTL for the embedding API health cache.  When the embeddings endpoint is
+# confirmed unreachable, subsequent calls short-circuit for this many seconds
+# instead of waiting for the full API timeout on every attempt.
+_EMBED_HEALTH_TTL = 60.0
+
 log = logging.getLogger(__name__)
+
+# Bump this when the schema changes.  Migrations in _MIGRATIONS below will
+# bring older databases up to this version incrementally.
+_SCHEMA_VERSION = 1
+
+# Ordered list of migrations: (target_version, [sql, ...]).
+# Each entry runs ALTER/CREATE statements to move the schema from
+# (target_version - 1) → target_version.
+_MIGRATIONS: list[tuple[int, list[str]]] = [
+    # Example for a future migration:
+    # (2, ["ALTER TABLE memory_entries ADD COLUMN tags TEXT DEFAULT ''"]),
+]
 
 
 def _serialize_f32(vector: list[float]) -> bytes:
@@ -49,26 +70,142 @@ class VectorMemory(SqliteHelper):
         embedding_dimensions: int = 1536,
     ) -> None:
         self._db_path = Path(db_path)
-        self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._cache_lock = threading.Lock()
+        # Alias for SqliteHelper mixin methods (_execute, _commit, etc.)
+        self._lock = self._write_lock
         self._client = openai_client
         self._embedding_model = embedding_model
         self._dimensions = embedding_dimensions
         # LRU cache for embeddings — avoids redundant API calls for identical text
-        # Protected by _lock since asyncio.to_thread can interleave access
         self._embed_cache: OrderedDict[str, list[float]] = OrderedDict()
         self._embed_cache_max = 256
+        # In-flight deduplication: tracks pending embedding requests so
+        # concurrent calls for the same text share one API call
+        self._inflight: dict[str, asyncio.Future[list[float]]] = {}
+        # Per-thread read connection pool — each thread reuses one read-only
+        # connection instead of opening/closing per query, eliminating
+        # ~5ms sqlite-vec extension loading overhead on every read.
+        self._thread_local = threading.local()
+        self._read_connections: list[sqlite3.Connection] = []
+        self._read_pool_lock = threading.Lock()
+        # Embedding API health cache — avoids repeated full-timeout waits when
+        # the endpoint is down.  Protected by _cache_lock (already used for
+        # the embed LRU cache, so no additional lock needed).
+        self._embed_api_healthy: bool = True
+        self._embed_api_last_check: float = 0.0
 
     # ── lifecycle ───────────────────────────────────────────────────────
 
     def connect(self) -> None:
-        """Open (or create) the SQLite database and ensure schema exists."""
+        """Open (or create) the SQLite database and ensure schema exists.
+
+        Uses WAL journal mode (via SqliteHelper defaults) so that reads
+        can proceed concurrently while writes are serialized by _write_lock.
+        """
         self._open_connection(load_extension=False)
-        # Load sqlite-vec extension
         assert self._db is not None
+        # Load sqlite-vec extension (extension loading was NOT enabled by
+        # _open_connection when load_extension=False)
         self._db.enable_load_extension(True)
         sqlite_vec.load(self._db)
         self._db.enable_load_extension(False)
         self._ensure_schema()
+
+    def close(self) -> None:
+        """Release all resources: embed cache, in-flight futures, read pool, and DB connection."""
+        with self._cache_lock:
+            self._embed_cache.clear()
+        # Cancel any pending in-flight embedding futures
+        for key, future in list(self._inflight.items()):
+            if not future.done():
+                future.cancel()
+        self._inflight.clear()
+        self._close_read_connections()
+        super().close()
+        log.debug("VectorMemory closed (cache cleared, read pool released, DB connection released)")
+
+    async def probe_embedding_model(self, timeout: float = 10.0) -> tuple[bool, str]:
+        """Probe the embedding API to validate the configured model is reachable.
+
+        Returns ``(success, message)``.  Embeds a short test string to catch
+        misconfigured model names, invalid API keys, or unreachable endpoints
+        before the bot starts accepting messages.
+        """
+        try:
+            resp = await asyncio.wait_for(
+                self._client.embeddings.create(
+                    model=self._embedding_model,
+                    input="health",
+                ),
+                timeout=timeout,
+            )
+            if not resp.data:
+                return False, "Empty response from embedding API"
+            actual_dims = len(resp.data[0].embedding)
+            self._mark_embedding_api_healthy()
+            return True, f"dims={actual_dims}"
+        except asyncio.TimeoutError:
+            return False, f"Timeout after {timeout}s"
+        except Exception as exc:
+            self._mark_embedding_api_unhealthy()
+            return False, f"{type(exc).__name__}: {exc}"
+
+    # ── disk safety ──────────────────────────────────────────────────────
+
+    def _check_disk_space_before_write(self) -> None:
+        """Raise DiskSpaceError if the database volume is too full."""
+        try:
+            result = check_disk_space(self._db_path, min_bytes=DEFAULT_MIN_DISK_SPACE)
+            if not result.has_sufficient_space:
+                raise DiskSpaceError(
+                    "Insufficient disk space for vector memory write",
+                    path=str(self._db_path),
+                    free_mb=round(result.free_mb, 2),
+                    required_mb=round(DEFAULT_MIN_DISK_SPACE / (1024 * 1024), 2),
+                )
+        except OSError as e:
+            log.warning("Could not verify disk space for %s: %s", self._db_path, e)
+
+    # ── read connections ────────────────────────────────────────────────
+
+    def _get_read_connection(self) -> sqlite3.Connection:
+        """Return a per-thread pooled read-only connection.
+
+        Each thread gets exactly one read connection that is reused across
+        calls, eliminating the sqlite-vec extension loading overhead (~5ms)
+        on every read.  Uses URI mode with ``?mode=ro`` so the connection
+        cannot write.  WAL mode allows concurrent reads with writes.
+        """
+        conn: sqlite3.Connection | None = getattr(self._thread_local, "read_conn", None)
+        if conn is not None:
+            return conn
+
+        assert self._db is not None, "VectorMemory not connected — call connect() first"
+        resolved = self._db_path.resolve()
+        uri = f"file:{resolved}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+
+        self._thread_local.read_conn = conn
+        with self._read_pool_lock:
+            self._read_connections.append(conn)
+        return conn
+
+    def _close_read_connections(self) -> None:
+        """Close all pooled read connections across every thread."""
+        with self._read_pool_lock:
+            for conn in self._read_connections:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._read_connections.clear()
+        # Reset thread-local so next access on any thread creates a fresh conn
+        self._thread_local = threading.local()
 
     # ── schema ──────────────────────────────────────────────────────────
 
@@ -92,37 +229,238 @@ class VectorMemory(SqliteHelper):
                 embedding float[{dim}] distance_metric=cosine
             )
         """)
+        # Schema version tracking table
+        self._db.execute("""
+            CREATE TABLE IF NOT EXISTS _schema_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
         self._db.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """Apply incremental schema migrations up to _SCHEMA_VERSION."""
+        assert self._db is not None
+        row = self._db.execute(
+            "SELECT value FROM _schema_meta WHERE key = 'version'"
+        ).fetchone()
+        current = int(row[0]) if row else 0
+
+        if current >= _SCHEMA_VERSION:
+            return
+
+        for target_version, statements in _MIGRATIONS:
+            if current < target_version:
+                for sql in statements:
+                    self._db.execute(sql)
+                self._db.execute(
+                    "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('version', ?)",
+                    (str(target_version),),
+                )
+                self._db.commit()
+                log.info("VectorMemory schema migrated to version %d", target_version)
+
+        # Record final version (covers fresh databases where _MIGRATIONS is empty)
+        self._db.execute(
+            "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('version', ?)",
+            (str(_SCHEMA_VERSION),),
+        )
+        self._db.commit()
+
+    # ── embedding API health ────────────────────────────────────────────
+
+    def _check_embedding_api_health(self) -> None:
+        """Raise immediately if the embedding API was recently confirmed down.
+
+        When the API is unreachable every ``_embed()`` / ``_embed_batch()``
+        call would block for the full HTTP timeout (potentially 120 s).  After
+        a failure we record the timestamp and short-circuit subsequent calls
+        for ``_EMBED_HEALTH_TTL`` seconds so the event loop is not blocked.
+        """
+        with self._cache_lock:
+            if self._embed_api_healthy:
+                return
+            elapsed = time.monotonic() - self._embed_api_last_check
+            if elapsed >= _EMBED_HEALTH_TTL:
+                # TTL expired — allow a fresh probe
+                return
+        remaining = round(_EMBED_HEALTH_TTL - elapsed, 1)
+        raise ConnectionError(
+            f"Embedding API unreachable (last failure {elapsed:.0f}s ago, "
+            f"retrying in ~{remaining}s)"
+        )
+
+    def _mark_embedding_api_healthy(self) -> None:
+        """Record that the embedding API is reachable."""
+        with self._cache_lock:
+            self._embed_api_healthy = True
+            self._embed_api_last_check = time.monotonic()
+
+    def _mark_embedding_api_unhealthy(self) -> None:
+        """Record that the embedding API is unreachable."""
+        with self._cache_lock:
+            self._embed_api_healthy = False
+            self._embed_api_last_check = time.monotonic()
 
     # ── embeddings ──────────────────────────────────────────────────────
 
     @retry_with_backoff(max_retries=2, initial_delay=0.5)
     async def _embed(self, text: str) -> list[float]:
-        """Generate embedding for a single text string, with LRU caching.
+        """Generate embedding for a single text string, with LRU caching
+        and in-flight deduplication.
 
-        Uses self._lock for thread safety since _embed_cache is shared
-        with _insert_entry / _search_sync which run in thread pool.
+        If two concurrent calls request the same text, the second one
+        awaits the first's result instead of making a duplicate API call.
+
+        Cache access is protected by _cache_lock; DB writes use _write_lock.
         """
         cache_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        with self._lock:
+
+        # 1. Check LRU cache (fast path)
+        with self._cache_lock:
             if cache_key in self._embed_cache:
                 self._embed_cache.move_to_end(cache_key)
                 return self._embed_cache[cache_key]
 
-        resp = await self._client.embeddings.create(
-            model=self._embedding_model,
-            input=text,
-        )
-        embedding = resp.data[0].embedding
+        # 2. Check in-flight requests (dedup concurrent calls)
+        loop = asyncio.get_running_loop()
+        if cache_key in self._inflight:
+            return await self._inflight[cache_key]
 
-        # Store in cache with LRU eviction (thread-safe)
-        with self._lock:
-            # Evict BEFORE insertion to maintain strict memory bounds
-            if len(self._embed_cache) >= self._embed_cache_max:
-                self._embed_cache.popitem(last=False)
-            self._embed_cache[cache_key] = embedding
+        # 3. This is the first request for this key — create a Future
+        future: asyncio.Future[list[float]] = loop.create_future()
+        self._inflight[cache_key] = future
 
-        return embedding
+        try:
+            resp = await self._client.embeddings.create(
+                model=self._embedding_model,
+                input=text,
+            )
+            embedding = resp.data[0].embedding
+
+            self._mark_embedding_api_healthy()
+
+            # Store in cache with LRU eviction
+            with self._cache_lock:
+                if len(self._embed_cache) >= self._embed_cache_max:
+                    self._embed_cache.popitem(last=False)
+                self._embed_cache[cache_key] = embedding
+
+            # Resolve the future so waiters get the result
+            future.set_result(embedding)
+            return embedding
+        except Exception as exc:
+            self._mark_embedding_api_unhealthy()
+            # Propagate error to waiters
+            if not future.done():
+                future.set_exception(exc)
+            raise
+        finally:
+            # Clean up in-flight entry
+            self._inflight.pop(cache_key, None)
+
+    # ── batch embeddings ─────────────────────────────────────────────────
+
+    @retry_with_backoff(max_retries=2, initial_delay=0.5)
+    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings for multiple texts in a single API call.
+
+        Checks the LRU cache and in-flight deduplication for each text first.
+        Only texts that miss both caches are sent to the API in one batched
+        ``embeddings.create(input=[...])`` call, significantly reducing API
+        overhead when multiple memories are saved in quick succession.
+
+        Returns embeddings in the same order as *texts*.
+        """
+        results: list[list[float] | None] = [None] * len(texts)
+        # Map: position index → cache_key for texts that need an API call
+        pending: dict[int, str] = {}
+        # Map: cache_key → position indices (a single text may appear multiple times)
+        key_to_indices: dict[str, list[int]] = {}
+
+        for i, text in enumerate(texts):
+            cache_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+            # 1. Check LRU cache
+            with self._cache_lock:
+                if cache_key in self._embed_cache:
+                    self._embed_cache.move_to_end(cache_key)
+                    results[i] = self._embed_cache[cache_key]
+                    continue
+
+            # 2. Check in-flight dedup
+            if cache_key in self._inflight:
+                results[i] = await self._inflight[cache_key]
+                continue
+
+            # 3. Needs API call — track by cache key
+            pending[i] = cache_key
+            key_to_indices.setdefault(cache_key, []).append(i)
+
+        if not pending:
+            # All embeddings resolved from cache / in-flight
+            return results  # type: ignore[return-value]
+
+        # 4. Build the batch input: one entry per unique cache key
+        unique_keys = list(key_to_indices.keys())
+        # Use the first position index for each unique key to get the text
+        unique_texts = [texts[key_to_indices[k][0]] for k in unique_keys]
+        # Map position in batch request → cache_key
+        key_for_batch_pos: dict[int, str] = {
+            batch_pos: key for batch_pos, key in enumerate(unique_keys)
+        }
+
+        # Register in-flight futures for deduplication of concurrent callers
+        loop = asyncio.get_running_loop()
+        futures: dict[str, asyncio.Future[list[float]]] = {}
+        for key in unique_keys:
+            future: asyncio.Future[list[float]] = loop.create_future()
+            self._inflight[key] = future
+            futures[key] = future
+
+        try:
+            resp = await self._client.embeddings.create(
+                model=self._embedding_model,
+                input=unique_texts,
+            )
+
+            if len(resp.data) != len(unique_texts):
+                raise ValueError(
+                    f"Embeddings API returned {len(resp.data)} results "
+                    f"for {len(unique_texts)} inputs — possible content "
+                    f"filtering or API error"
+                )
+
+            self._mark_embedding_api_healthy()
+
+            # Populate cache and resolve futures
+            for batch_pos, item in enumerate(resp.data):
+                embedding = item.embedding
+                cache_key = key_for_batch_pos[batch_pos]
+
+                with self._cache_lock:
+                    if len(self._embed_cache) >= self._embed_cache_max:
+                        self._embed_cache.popitem(last=False)
+                    self._embed_cache[cache_key] = embedding
+
+                futures[cache_key].set_result(embedding)
+
+            # Fill results for all pending positions
+            for idx, cache_key in pending.items():
+                results[idx] = self._embed_cache[cache_key]  # already populated above
+
+            return results  # type: ignore[return-value]
+        except Exception as exc:
+            self._mark_embedding_api_unhealthy()
+            # Propagate error to all waiters
+            for key, future in futures.items():
+                if not future.done():
+                    future.set_exception(exc)
+            raise
+        finally:
+            for key in unique_keys:
+                self._inflight.pop(key, None)
 
     # ── public API ──────────────────────────────────────────────────────
 
@@ -130,6 +468,7 @@ class VectorMemory(SqliteHelper):
         """Insert a memory entry with its embedding. Returns the row ID."""
         assert self._db is not None
 
+        self._check_embedding_api_health()
         embedding = await self._embed(text)
         now = time.time()
 
@@ -141,6 +480,37 @@ class VectorMemory(SqliteHelper):
         log.debug("Saved vector memory id=%d chat=%s", row_id, chat_id)
         return row_id
 
+    async def save_batch(
+        self,
+        chat_id: str,
+        items: list[tuple[str, str]],
+    ) -> list[int]:
+        """Insert multiple memory entries using a single batched embedding call.
+
+        Args:
+            chat_id: Chat identifier for all entries.
+            items: List of ``(text, category)`` tuples to save.
+
+        Returns:
+            List of row IDs in the same order as *items*.
+        """
+        assert self._db is not None
+
+        if not items:
+            return []
+
+        self._check_embedding_api_health()
+        texts = [text for text, _ in items]
+        embeddings = await self._embed_batch(texts)
+        now = time.time()
+
+        rows = await asyncio.to_thread(
+            self._insert_entries, chat_id, items, now, embeddings
+        )
+
+        log.debug("Batch-saved %d vector memories chat=%s", len(rows), chat_id)
+        return rows
+
     def _insert_entry(
         self,
         chat_id: str,
@@ -151,7 +521,8 @@ class VectorMemory(SqliteHelper):
     ) -> int:
         """Synchronous DB insert (run in thread pool)."""
         assert self._db is not None
-        with self._lock:
+        self._check_disk_space_before_write()
+        with self._write_lock:
             cur = self._db.execute(
                 "INSERT INTO memory_entries (chat_id, text, category, created_at) VALUES (?, ?, ?, ?)",
                 (chat_id, text, category, created_at),
@@ -164,34 +535,66 @@ class VectorMemory(SqliteHelper):
             self._db.commit()
             return row_id
 
-    async def search(
-        self, chat_id: str, query: str, limit: int = 5
-    ) -> List[Dict[str, Any]]:
+    def _insert_entries(
+        self,
+        chat_id: str,
+        items: list[tuple[str, str]],
+        created_at: float,
+        embeddings: list[list[float]],
+    ) -> list[int]:
+        """Synchronous batch DB insert (run in thread pool).
+
+        All inserts are committed in a single transaction for efficiency.
+        """
+        assert self._db is not None
+        self._check_disk_space_before_write()
+        row_ids: list[int] = []
+        with self._write_lock:
+            for (text, category), embedding in zip(items, embeddings):
+                cur = self._db.execute(
+                    "INSERT INTO memory_entries (chat_id, text, category, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (chat_id, text, category, created_at),
+                )
+                row_id = cur.lastrowid
+                self._db.execute(
+                    "INSERT INTO memory_vec (rowid, embedding) VALUES (?, ?)",
+                    (row_id, _serialize_f32(embedding)),
+                )
+                row_ids.append(row_id)
+            self._db.commit()
+        return row_ids
+
+    async def search(self, chat_id: str, query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """Semantic search within a chat's memories."""
         assert self._db is not None
 
+        if not query.strip():
+            return []
+
+        self._check_embedding_api_health()
         query_vec = _serialize_f32(await self._embed(query))
 
         return await asyncio.to_thread(self._search_sync, chat_id, query_vec, limit)
 
-    def _search_sync(
-        self, chat_id: str, query_vec: bytes, limit: int
-    ) -> List[Dict[str, Any]]:
-        """Synchronous DB search (run in thread pool)."""
-        assert self._db is not None
-        with self._lock:
-            rows = self._db.execute(
-                """
-                SELECT e.id, e.text, e.category, e.created_at, v.distance
-                FROM memory_vec v
-                JOIN memory_entries e ON e.id = v.rowid
-                WHERE v.embedding MATCH ?
-                  AND v.k = ?
-                  AND e.chat_id = ?
-                ORDER BY v.distance
-                """,
-                (query_vec, limit, chat_id),
-            ).fetchall()
+    def _search_sync(self, chat_id: str, query_vec: bytes, limit: int) -> List[Dict[str, Any]]:
+        """Synchronous DB search using the per-thread pooled read connection.
+
+        WAL mode guarantees snapshot isolation across concurrent reads and writes.
+        """
+        conn = self._get_read_connection()
+        rows = conn.execute(
+            """
+            SELECT e.id, e.text, e.category, e.created_at, v.distance
+            FROM memory_vec v
+            JOIN memory_entries e ON e.id = v.rowid
+            WHERE v.embedding MATCH ?
+              AND v.k = ?
+              AND e.chat_id = ?
+            ORDER BY v.distance
+            """,
+            (query_vec, limit, chat_id),
+        ).fetchall()
         return [
             {
                 "id": r[0],
@@ -204,41 +607,37 @@ class VectorMemory(SqliteHelper):
         ]
 
     def list_recent(self, chat_id: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Return the N most recent memories for a chat (no embedding). Runs synchronously — wrap in asyncio.to_thread() if calling from async code."""
-        assert self._db is not None
-        with self._lock:
-            rows = self._db.execute(
-                """
-                SELECT id, text, category, created_at
-                FROM memory_entries
-                WHERE chat_id = ?
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (chat_id, limit),
-            ).fetchall()
-        return [
-            {"id": r[0], "text": r[1], "category": r[2], "created_at": r[3]}
-            for r in rows
-        ]
+        """Return the N most recent memories for a chat (no embedding).
+
+        Uses the per-thread pooled read connection for true concurrency.
+        """
+        conn = self._get_read_connection()
+        rows = conn.execute(
+            """
+            SELECT id, text, category, created_at
+            FROM memory_entries
+            WHERE chat_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (chat_id, limit),
+        ).fetchall()
+        return [{"id": r[0], "text": r[1], "category": r[2], "created_at": r[3]} for r in rows]
 
     def delete(self, memory_id: int) -> bool:
         """Delete a memory entry by ID."""
         assert self._db is not None
-        with self._lock:
-            cur = self._db.execute(
-                "DELETE FROM memory_entries WHERE id = ?", (memory_id,)
-            )
+        with self._write_lock:
+            cur = self._db.execute("DELETE FROM memory_entries WHERE id = ?", (memory_id,))
             self._db.execute("DELETE FROM memory_vec WHERE rowid = ?", (memory_id,))
             self._db.commit()
             return cur.rowcount > 0
 
     def count(self, chat_id: str) -> int:
-        """Count memories for a chat."""
-        assert self._db is not None
-        with self._lock:
-            row = self._db.execute(
-                "SELECT COUNT(*) FROM memory_entries WHERE chat_id = ?",
-                (chat_id,),
-            ).fetchone()
-            return row[0] if row else 0
+        """Count memories for a chat. Uses the per-thread pooled read connection."""
+        conn = self._get_read_connection()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM memory_entries WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+        return row[0] if row else 0

@@ -15,11 +15,11 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from src.skills.base import BaseSkill, validate_input
-from src.project.store import ProjectStore
+from src.project.dates import fmt_ts
 from src.project.graph import ProjectGraph
 from src.project.recall import ProjectRecall
-from src.project.dates import fmt_ts
+from src.project.store import ProjectStore
+from src.skills.base import BaseSkill, validate_input
 
 log = logging.getLogger(__name__)
 
@@ -519,10 +519,7 @@ class KnowledgeListSkill(_ProjectSkillBase):
         ]
         for e in entries:
             title = e.get("title") or e["text"][:60]
-            lines.append(
-                f"- [id:{e['id']}] [{e['category']}] {title}\n"
-                f"  {fmt_ts(e['created_at'])}"
-            )
+            lines.append(f"- [id:{e['id']}] [{e['category']}] {title}\n  {fmt_ts(e['created_at'])}")
             if e.get("title"):
                 lines.append(f"  {e['text'][:150]}")
         return "\n".join(lines)

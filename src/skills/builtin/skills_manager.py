@@ -23,7 +23,6 @@ from src.constants import WORKSPACE_DIR
 from src.skills.base import BaseSkill
 from src.utils.async_executor import AsyncExecutor
 
-
 # Directory where user skills are installed (relative to project root)
 USER_SKILLS_DIR = Path(__file__).parent.parent.parent / WORKSPACE_DIR / "skills"
 
@@ -186,9 +185,7 @@ class SkillsListSkill(BaseSkill):
                     if isinstance(item, ast.Assign):
                         for target in item.targets:
                             if isinstance(target, ast.Name):
-                                if target.id == "name" and isinstance(
-                                    item.value, ast.Constant
-                                ):
+                                if target.id == "name" and isinstance(item.value, ast.Constant):
                                     name_val = item.value.value
                                 elif target.id == "description" and isinstance(
                                     item.value, ast.Constant

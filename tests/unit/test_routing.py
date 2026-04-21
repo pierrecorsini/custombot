@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 import textwrap
-from dataclasses import dataclass, FrozenInstanceError
+from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
@@ -30,7 +30,6 @@ from src.routing import (
     _match_compiled,
     _rule_from_dict,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers — lightweight factory functions
@@ -184,9 +183,7 @@ class TestMatchingContext:
 
     def test_repr_long_text_truncated(self):
         long_text = "A" * 50
-        ctx = MatchingContext(
-            sender_id="s", chat_id="c", channel_type="ch", text=long_text
-        )
+        ctx = MatchingContext(sender_id="s", chat_id="c", channel_type="ch", text=long_text)
         r = repr(ctx)
         assert "..." in r
         assert "text=" in r
@@ -235,7 +232,7 @@ class TestCompilePattern:
         assert _compile_pattern(r"(unclosed") is None
 
     def test_complex_valid_regex(self):
-        compiled = _compile_pattern(r"^55\d{10}$")
+        compiled = _compile_pattern(r"^55\d{11}$")
         assert compiled is not None
         assert compiled.match("5511999990000") is not None
         assert compiled.match("123") is None
@@ -434,6 +431,40 @@ class TestRoutingRule:
         )
         assert rule._compiled_sender is None
 
+    # ── _is_wildcard pre-computation ────────────────────────────────────
+
+    def test_is_wildcard_true_when_all_wildcards(self):
+        rule = make_rule(sender="*", recipient="*", channel="*", content_regex="*")
+        assert rule._is_wildcard is True
+
+    def test_is_wildcard_false_when_sender_not_wildcard(self):
+        rule = make_rule(sender="5511999990000")
+        assert rule._is_wildcard is False
+
+    def test_is_wildcard_false_when_recipient_not_wildcard(self):
+        rule = make_rule(recipient="group-001")
+        assert rule._is_wildcard is False
+
+    def test_is_wildcard_false_when_channel_not_wildcard(self):
+        rule = make_rule(channel="whatsapp")
+        assert rule._is_wildcard is False
+
+    def test_is_wildcard_false_when_content_not_wildcard(self):
+        rule = make_rule(content_regex=r"^hello")
+        assert rule._is_wildcard is False
+
+    def test_is_wildcard_false_when_empty_pattern(self):
+        """Empty string patterns are not wildcards — they match only empty values."""
+        rule = RoutingRule(
+            id="t", priority=0, sender="", recipient="*",
+            channel="*", content_regex="*", instruction="t.md",
+        )
+        assert rule._is_wildcard is False
+
+    def test_is_wildcard_not_in_repr(self):
+        rule = make_rule()
+        assert "_is_wildcard" not in repr(rule)
+
     # ── __repr__ ────────────────────────────────────────────────────────
 
     def test_repr_enabled_rule(self):
@@ -615,10 +646,9 @@ class TestRoutingEngineLoadRules:
     def test_rules_property_is_read_only(self, tmp_path: Path):
         engine = RoutingEngine(tmp_path)
         assert engine.rules == []
-        # Attempting to assign should not affect internal state
-        # (the property returns a reference, but _rules is private)
+        # The rules property returns the internal list (read-only view)
         original = engine.rules
-        assert original is engine._rules
+        assert original is engine._rules_list
 
     def test_instructions_dir_property(self, tmp_path: Path):
         engine = RoutingEngine(tmp_path)
@@ -1268,3 +1298,1033 @@ class TestParametrizedPatternMatching:
             assert result is not None
         else:
             assert result is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RoutingEngine — match cache (TTL-bounded LRU) tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRoutingMatchCache:
+    """Tests for the TTL-bounded LRU match cache in RoutingEngine."""
+
+    def test_cache_hit_returns_same_result(self):
+        """Repeated match() with same message returns cached result."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(instruction="cached.md")]
+        msg = make_msg(text="hello")
+
+        result1 = engine.match(msg)
+        result2 = engine.match(msg)
+        assert result1 == "cached.md"
+        assert result2 == "cached.md"
+        assert len(engine._match_cache) == 1
+
+    def test_cache_miss_for_different_messages(self):
+        """Different messages produce separate cache entries."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(instruction="catch.md")]
+        msg_a = make_msg(sender_id="alice", text="hi")
+        msg_b = make_msg(sender_id="bob", text="hi")
+
+        engine.match(msg_a)
+        engine.match(msg_b)
+        assert len(engine._match_cache) == 2
+
+    def test_cache_expired_entry_not_returned(self):
+        """Expired cache entries are evicted on next access."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(instruction="exp.md")]
+        msg = make_msg(text="test")
+
+        engine.match(msg)
+        assert len(engine._match_cache) == 1
+
+        # Manually age the cache entry to simulate TTL expiry
+        key = list(engine._match_cache.keys())[0]
+        old_ts = engine._match_cache[key][0]
+        engine._match_cache[key] = (old_ts - 100.0, engine._match_cache[key][1])
+
+        # Next match should re-evaluate (cache miss)
+        result = engine.match(msg)
+        assert result == "exp.md"
+        # The expired entry was removed and a fresh one inserted
+        assert len(engine._match_cache) == 1
+        assert engine._match_cache[key][0] != old_ts
+
+    def test_cache_cleared_on_load_rules(self, tmp_path: Path):
+        """load_rules() clears the match cache."""
+        engine = RoutingEngine(tmp_path)
+        engine._rules = [make_rule(instruction="tmp.md")]
+        engine.match(make_msg())
+        assert len(engine._match_cache) == 1
+
+        engine.load_rules()
+        assert len(engine._match_cache) == 0
+
+    def test_cache_cleared_on_refresh_rules(self, tmp_path: Path):
+        """refresh_rules() clears the match cache."""
+        engine = RoutingEngine(tmp_path)
+        engine._rules = [make_rule()]
+        engine.match(make_msg())
+        assert len(engine._match_cache) == 1
+
+        engine.refresh_rules()
+        assert len(engine._match_cache) == 0
+
+    def test_cache_key_uses_text_prefix(self):
+        """Cache key only uses first 100 chars of text."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(content_regex="*", instruction="prefix.md")]
+
+        # Two messages with same first 100 chars but different tails
+        short_text = "A" * 100
+        msg_a = make_msg(text=short_text)
+        msg_b = make_msg(text=short_text + "B" * 100)
+
+        engine.match(msg_a)
+        engine.match(msg_b)
+        # Same cache key since first 100 chars match
+        assert len(engine._match_cache) == 1
+
+    def test_cache_key_includes_fromMe_toMe_sender_channel(self):
+        """Cache key differentiates on fromMe, toMe, sender, channel, chat_id."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(instruction="all.md")]
+
+        base = dict(text="hi")
+        msgs = [
+            make_msg(fromMe=False, toMe=False, sender_id="a", chat_id="c1", channel_type="wa", **base),
+            make_msg(fromMe=True, toMe=False, sender_id="a", chat_id="c1", channel_type="wa", **base),
+            make_msg(fromMe=False, toMe=True, sender_id="a", chat_id="c1", channel_type="wa", **base),
+            make_msg(fromMe=False, toMe=False, sender_id="b", chat_id="c1", channel_type="wa", **base),
+            make_msg(fromMe=False, toMe=False, sender_id="a", chat_id="c1", channel_type="tg", **base),
+            make_msg(fromMe=False, toMe=False, sender_id="a", chat_id="c2", channel_type="wa", **base),
+        ]
+        for m in msgs:
+            engine.match(m)
+        assert len(engine._match_cache) == 6
+
+    def test_cache_no_match_result_still_cached(self):
+        """Cache also stores (None, None) results for no-match queries."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(sender="nonexistent")]
+        msg = make_msg(sender_id="other")
+
+        result = engine.match(msg)
+        assert result is None
+        assert len(engine._match_cache) == 1
+
+        # Second call returns cached None
+        result2 = engine.match(msg)
+        assert result2 is None
+
+    def test_cache_lru_eviction_at_max_size(self):
+        """Cache evicts LRU entries when exceeding max size."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(instruction="evict.md")]
+
+        # Fill cache beyond capacity
+        from src.constants import ROUTING_MATCH_CACHE_MAX_SIZE
+
+        for i in range(ROUTING_MATCH_CACHE_MAX_SIZE + 10):
+            engine.match(make_msg(sender_id=f"sender-{i}", text=f"msg-{i}"))
+
+        assert len(engine._match_cache) <= ROUTING_MATCH_CACHE_MAX_SIZE
+
+    def test_match_with_rule_cache_returns_same_rule_object(self):
+        """Cached match_with_rule() returns the same rule object."""
+        engine = RoutingEngine(Path("/dummy"))
+        rule = make_rule(id="cached-rule", instruction="cached.md")
+        engine._rules = [rule]
+        msg = make_msg()
+
+        rule1, inst1 = engine.match_with_rule(msg)
+        rule2, inst2 = engine.match_with_rule(msg)
+        assert rule1 is rule
+        assert rule2 is rule
+        assert inst1 == "cached.md"
+        assert inst2 == "cached.md"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RoutingEngine — auto-reload (mtime-based lazy loading) tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRoutingEngineAutoReload:
+    """Tests for mtime-based auto-reload of routing rules."""
+
+    def test_auto_reload_on_file_change(self, tmp_path: Path):
+        """match() picks up new rules when an instruction file changes."""
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+        assert engine.rules == []
+
+        # Add a new instruction file
+        (tmp_path / "new.md").write_text(
+            "---\nrouting:\n  id: new-rule\n  priority: 1\n---\n\n# New\n"
+        )
+
+        # Reset debounce so the next match triggers a stale check
+        engine._last_stale_check = 0.0
+
+        msg = make_msg()
+        assert engine.match(msg) == "new.md"
+        assert len(engine.rules) == 1
+        assert engine.rules[0].id == "new-rule"
+
+    def test_auto_reload_on_file_deletion(self, tmp_path: Path):
+        """match() drops rules when an instruction file is deleted."""
+        md = tmp_path / "temp.md"
+        md.write_text(
+            "---\nrouting:\n  id: temp-rule\n  priority: 1\n---\n\n# Temp\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+        assert len(engine.rules) == 1
+
+        # Delete the instruction file
+        md.unlink()
+
+        # Reset debounce
+        engine._last_stale_check = 0.0
+
+        msg = make_msg()
+        assert engine.match(msg) is None
+        assert engine.rules == []
+
+    def test_auto_reload_on_file_content_change(self, tmp_path: Path):
+        """match() picks up changed content when an instruction file is rewritten."""
+        md = tmp_path / "change.md"
+        md.write_text(
+            "---\nrouting:\n  id: original\n  priority: 1\n---\n\n# Original\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+        assert engine.rules[0].id == "original"
+
+        # Overwrite the file with new content
+        md.write_text(
+            "---\nrouting:\n  id: updated\n  priority: 1\n---\n\n# Updated\n"
+        )
+
+        # Reset debounce
+        engine._last_stale_check = 0.0
+
+        msg = make_msg()
+        assert engine.match(msg) == "change.md"
+        assert engine.rules[0].id == "updated"
+
+    def test_no_reload_when_files_unchanged(self, tmp_path: Path):
+        """No reload happens when files have not changed."""
+        (tmp_path / "stable.md").write_text(
+            "---\nrouting:\n  id: stable\n  priority: 1\n---\n\n# Stable\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        # Access internal state before match
+        rules_before = engine.rules
+        mtimes_before = engine._file_mtimes.copy()
+
+        # match() should not trigger a reload
+        msg = make_msg()
+        engine._last_stale_check = 0.0  # Allow stale check
+        result = engine.match(msg)
+        assert result == "stable.md"
+
+        # Rules list should be the same object (no reload)
+        assert engine.rules is rules_before
+        assert engine._file_mtimes == mtimes_before
+
+    def test_debounce_prevents_rapid_stale_checks(self, tmp_path: Path):
+        """Successive match() calls within the debounce window skip stale checks."""
+        (tmp_path / "a.md").write_text(
+            "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        # First match triggers stale check
+        engine._last_stale_check = 0.0
+        engine.match(make_msg())
+        first_check_time = engine._last_stale_check
+
+        # Second match within debounce window should NOT update stale check time
+        engine.match(make_msg())
+        assert engine._last_stale_check == first_check_time
+
+    def test_scan_file_mtimes_returns_current_mtimes(self, tmp_path: Path):
+        """_scan_file_mtimes returns mtimes for all .md files."""
+        (tmp_path / "a.md").write_text("# A")
+        (tmp_path / "b.md").write_text("# B")
+        (tmp_path / "c.txt").write_text("# Not markdown")
+
+        engine = RoutingEngine(tmp_path)
+        mtimes = engine._scan_file_mtimes()
+
+        assert "a.md" in mtimes
+        assert "b.md" in mtimes
+        assert "c.txt" not in mtimes
+
+    def test_scan_file_mtimes_empty_dir(self, tmp_path: Path):
+        """_scan_file_mtimes returns empty dict for empty directory."""
+        engine = RoutingEngine(tmp_path)
+        assert engine._scan_file_mtimes() == {}
+
+    def test_scan_file_mtimes_nonexistent_dir(self, tmp_path: Path):
+        """_scan_file_mtimes returns empty dict for missing directory."""
+        engine = RoutingEngine(tmp_path / "missing")
+        assert engine._scan_file_mtimes() == {}
+
+    def test_is_stale_detects_new_file(self, tmp_path: Path):
+        """_is_stale returns True when a new .md file appears."""
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        (tmp_path / "new.md").write_text(
+            "---\nrouting:\n  id: new\n  priority: 1\n---\n\n# New\n"
+        )
+
+        engine._last_stale_check = 0.0
+        assert engine._is_stale() is True
+
+    def test_is_stale_returns_false_when_unchanged(self, tmp_path: Path):
+        """_is_stale returns False when files have not changed."""
+        (tmp_path / "same.md").write_text("# Same")
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        engine._last_stale_check = 0.0
+        assert engine._is_stale() is False
+
+    def test_load_rules_populates_file_mtimes(self, tmp_path: Path):
+        """load_rules caches mtimes after loading."""
+        (tmp_path / "x.md").write_text(
+            "---\nrouting:\n  id: x\n  priority: 1\n---\n\n# X\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        assert engine._file_mtimes == {}
+
+        engine.load_rules()
+        assert "x.md" in engine._file_mtimes
+        assert engine._file_mtimes["x.md"] > 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Property-based tests (Hypothesis)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from hypothesis import given, settings, assume
+from hypothesis import strategies as st
+
+
+# -- Strategies for generating routing inputs --
+
+# Simple alphanumeric strings for IDs, channels, etc.
+simple_text = st.text(
+    alphabet=st.characters(whitelist_categories=("L", "N"), whitelist_characters="-_@."),
+    min_size=1,
+    max_size=30,
+)
+
+# Printable text (avoids null/control chars that complicate regex)
+printable_text = st.text(
+    alphabet=st.characters(whitelist_categories=("L", "N", "P", "Z", "S")),
+    min_size=0,
+    max_size=100,
+)
+
+# Strategy for a valid regex pattern that won't error on compile
+# Uses from_regex to generate strings that are themselves valid regex
+valid_regex = st.one_of(
+    st.just("*"),
+    st.just(""),
+    st.from_regex(r"[a-zA-Z0-9]{1,10}", fullmatch=True),
+    st.from_regex(r"\d{1,5}", fullmatch=True),
+    st.sampled_from(["*", "", r"\d+", r"[a-z]+", r"^hello", r".*world.*"]),
+)
+
+# Strategy for the boolean-or-None filter (fromMe / toMe)
+bool_or_none = st.one_of(st.none(), st.booleans())
+
+
+class TestPropertyMatchCompiled:
+    """Property-based invariants for _match_compiled."""
+
+    @given(value=printable_text)
+    @settings(max_examples=200)
+    def test_wildcard_always_matches(self, value: str):
+        """Invariant: pattern '*' matches any string value."""
+        assert _match_compiled(None, "*", value) is True
+
+    @given(value=printable_text)
+    @settings(max_examples=200)
+    def test_empty_pattern_only_matches_empty(self, value: str):
+        """Invariant: pattern '' matches iff value is also empty."""
+        expected = value == ""
+        assert _match_compiled(None, "", value) is expected
+
+    @given(pattern=st.text(min_size=1, max_size=50), value=printable_text)
+    @settings(max_examples=300)
+    def test_compiled_vs_manual_equivalence(self, pattern: str, value: str):
+        """Invariant: _match_compiled result equals manual check of the same logic."""
+        compiled = _compile_pattern(pattern)
+        result = _match_compiled(compiled, pattern, value)
+
+        # Manually compute expected result
+        if pattern == "*":
+            expected = True
+        elif pattern == "":
+            expected = value == ""
+        elif compiled is not None and compiled.match(value):
+            expected = True
+        else:
+            expected = pattern == value
+
+        assert result is expected
+
+    @given(pattern=valid_regex, value=printable_text)
+    @settings(max_examples=200)
+    def test_match_compiled_is_pure(self, pattern: str, value: str):
+        """Invariant: calling _match_compiled twice with same inputs gives same result."""
+        compiled = _compile_pattern(pattern)
+        result1 = _match_compiled(compiled, pattern, value)
+        result2 = _match_compiled(compiled, pattern, value)
+        assert result1 is result2
+
+    @given(pattern=valid_regex, value=printable_text)
+    @settings(max_examples=200)
+    def test_match_result_is_bool(self, pattern: str, value: str):
+        """Invariant: _match_compiled always returns a bool."""
+        compiled = _compile_pattern(pattern)
+        result = _match_compiled(compiled, pattern, value)
+        assert isinstance(result, bool)
+
+
+class TestPropertyRoutingRule:
+    """Property-based invariants for RoutingRule construction."""
+
+    @given(
+        sender=valid_regex,
+        recipient=valid_regex,
+        channel=valid_regex,
+        content_regex=valid_regex,
+    )
+    @settings(max_examples=100)
+    def test_wildcard_fields_compile_to_none(
+        self, sender: str, recipient: str, channel: str, content_regex: str
+    ):
+        """Invariant: _compile_pattern('*') and _compile_pattern('') return None,
+        so compiled fields for wildcard/empty patterns should be None."""
+        rule = RoutingRule(
+            id="t", priority=0, sender=sender, recipient=recipient,
+            channel=channel, content_regex=content_regex, instruction="t.md",
+        )
+        if sender in ("*", ""):
+            assert rule._compiled_sender is None
+        if recipient in ("*", ""):
+            assert rule._compiled_recipient is None
+        if channel in ("*", ""):
+            assert rule._compiled_channel is None
+        if content_regex in ("*", ""):
+            assert rule._compiled_content is None
+
+    @given(
+        sender=st.from_regex(r"[a-zA-Z]{3,10}", fullmatch=True),
+        recipient=st.from_regex(r"[a-zA-Z]{3,10}", fullmatch=True),
+        channel=st.from_regex(r"[a-zA-Z]{3,10}", fullmatch=True),
+        content_regex=st.from_regex(r"[a-zA-Z]{3,10}", fullmatch=True),
+    )
+    @settings(max_examples=50)
+    def test_valid_regex_fields_compile_to_pattern(
+        self, sender: str, recipient: str, channel: str, content_regex: str
+    ):
+        """Invariant: valid regex patterns always compile to non-None Pattern."""
+        rule = RoutingRule(
+            id="t", priority=0, sender=sender, recipient=recipient,
+            channel=channel, content_regex=content_regex, instruction="t.md",
+        )
+        assert rule._compiled_sender is not None
+        assert rule._compiled_recipient is not None
+        assert rule._compiled_channel is not None
+        assert rule._compiled_content is not None
+
+    @given(
+        sender=valid_regex,
+        recipient=valid_regex,
+        channel=valid_regex,
+        content_regex=valid_regex,
+    )
+    @settings(max_examples=100)
+    def test_is_wildcard_invariant(
+        self, sender: str, recipient: str, channel: str, content_regex: str
+    ):
+        """Invariant: _is_wildcard is True iff all four patterns are exactly '*'."""
+        rule = RoutingRule(
+            id="t", priority=0, sender=sender, recipient=recipient,
+            channel=channel, content_regex=content_regex, instruction="t.md",
+        )
+        expected = sender == "*" and recipient == "*" and channel == "*" and content_regex == "*"
+        assert rule._is_wildcard == expected
+
+
+class TestPropertyEngineMatching:
+    """Property-based invariants for RoutingEngine.match() behavior."""
+
+    @given(
+        text=printable_text,
+        sender_id=simple_text,
+        chat_id=simple_text,
+        channel_type=simple_text,
+        fromMe=st.booleans(),
+        toMe=st.booleans(),
+    )
+    @settings(max_examples=200)
+    def test_catch_all_rule_matches_every_message(
+        self, text: str, sender_id: str, chat_id: str,
+        channel_type: str, fromMe: bool, toMe: bool,
+    ):
+        """Invariant: a single catch-all rule (all '*') matches any message."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule()]
+        msg = make_msg(
+            text=text, sender_id=sender_id, chat_id=chat_id,
+            channel_type=channel_type, fromMe=fromMe, toMe=toMe,
+        )
+        assert engine.match(msg) == "chat.agent.md"
+
+    @given(
+        text=printable_text,
+        sender_id=simple_text,
+        chat_id=simple_text,
+        channel_type=simple_text,
+        fromMe=st.booleans(),
+        toMe=st.booleans(),
+    )
+    @settings(max_examples=100)
+    def test_disabled_rule_never_matches(
+        self, text: str, sender_id: str, chat_id: str,
+        channel_type: str, fromMe: bool, toMe: bool,
+    ):
+        """Invariant: disabled rules never match, regardless of patterns or message."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(enabled=False)]
+        msg = make_msg(
+            text=text, sender_id=sender_id, chat_id=chat_id,
+            channel_type=channel_type, fromMe=fromMe, toMe=toMe,
+        )
+        assert engine.match(msg) is None
+
+    @given(
+        rules=st.lists(
+            st.builds(
+                make_rule,
+                enabled=st.just(False),
+                id=st.integers(min_value=0, max_value=999).map(lambda i: f"r-{i}"),
+            ),
+            min_size=1,
+            max_size=10,
+        ),
+        fromMe=st.booleans(),
+        toMe=st.booleans(),
+    )
+    @settings(max_examples=50)
+    def test_all_disabled_returns_none(self, rules: list, fromMe: bool, toMe: bool):
+        """Invariant: when all rules are disabled, match always returns None."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = rules
+        msg = make_msg(fromMe=fromMe, toMe=toMe)
+        assert engine.match(msg) is None
+
+    @given(fromMe_val=st.booleans(), toMe_val=st.booleans())
+    @settings(max_examples=50)
+    def test_none_filters_pass_all(self, fromMe_val: bool, toMe_val: bool):
+        """Invariant: fromMe=None and toMe=None match both True and False."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(fromMe=None, toMe=None)]
+        msg = make_msg(fromMe=fromMe_val, toMe=toMe_val)
+        assert engine.match(msg) == "chat.agent.md"
+
+    @given(fromMe_val=st.booleans())
+    @settings(max_examples=50)
+    def test_fromMe_true_only_matches_bot_messages(self, fromMe_val: bool):
+        """Invariant: fromMe=True only matches when message fromMe is True."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(fromMe=True)]
+        msg = make_msg(fromMe=fromMe_val)
+        result = engine.match(msg)
+        if fromMe_val:
+            assert result == "chat.agent.md"
+        else:
+            assert result is None
+
+    @given(fromMe_val=st.booleans())
+    @settings(max_examples=50)
+    def test_fromMe_false_only_matches_non_bot_messages(self, fromMe_val: bool):
+        """Invariant: fromMe=False only matches when message fromMe is False."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(fromMe=False)]
+        msg = make_msg(fromMe=fromMe_val)
+        result = engine.match(msg)
+        if not fromMe_val:
+            assert result == "chat.agent.md"
+        else:
+            assert result is None
+
+    @given(toMe_val=st.booleans())
+    @settings(max_examples=50)
+    def test_toMe_true_only_matches_direct_messages(self, toMe_val: bool):
+        """Invariant: toMe=True only matches when message toMe is True."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(toMe=True)]
+        msg = make_msg(toMe=toMe_val)
+        result = engine.match(msg)
+        if toMe_val:
+            assert result == "chat.agent.md"
+        else:
+            assert result is None
+
+    @given(toMe_val=st.booleans())
+    @settings(max_examples=50)
+    def test_toMe_false_only_matches_group_messages(self, toMe_val: bool):
+        """Invariant: toMe=False only matches when message toMe is False."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(toMe=False)]
+        msg = make_msg(toMe=toMe_val)
+        result = engine.match(msg)
+        if not toMe_val:
+            assert result == "chat.agent.md"
+        else:
+            assert result is None
+
+    @given(
+        text=printable_text,
+        sender_id=simple_text,
+        chat_id=simple_text,
+        channel_type=simple_text,
+        fromMe=st.booleans(),
+        toMe=st.booleans(),
+    )
+    @settings(max_examples=100)
+    def test_matching_is_deterministic(
+        self, text: str, sender_id: str, chat_id: str,
+        channel_type: str, fromMe: bool, toMe: bool,
+    ):
+        """Invariant: same inputs always produce same outputs (pure function)."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule()]
+        msg = make_msg(
+            text=text, sender_id=sender_id, chat_id=chat_id,
+            channel_type=channel_type, fromMe=fromMe, toMe=toMe,
+        )
+        result1 = engine.match(msg)
+        result2 = engine.match(msg)
+        assert result1 == result2
+
+    @given(
+        priorities=st.lists(st.integers(min_value=0, max_value=100), min_size=2, max_size=5),
+    )
+    @settings(max_examples=100)
+    def test_first_matching_rule_has_lowest_priority(self, priorities: list):
+        """Invariant: among multiple matching rules, the one with lowest priority wins."""
+        engine = RoutingEngine(Path("/dummy"))
+        rules = [
+            make_rule(
+                id=f"r-{i}",
+                priority=p,
+                instruction=f"rule-{p}.md",
+            )
+            for i, p in enumerate(priorities)
+        ]
+        engine._rules = sorted(rules, key=lambda r: r.priority)
+        msg = make_msg()
+        result = engine.match(msg)
+        assert result is not None
+        # The winning instruction should correspond to the minimum priority
+        min_pri = min(priorities)
+        assert result == f"rule-{min_pri}.md"
+
+    @given(
+        text=printable_text,
+        sender_id=simple_text,
+        fromMe=st.booleans(),
+        toMe=st.booleans(),
+    )
+    @settings(max_examples=100)
+    def test_disabled_rule_before_enabled_falls_through(
+        self, text: str, sender_id: str, fromMe: bool, toMe: bool,
+    ):
+        """Invariant: disabled rule at lower priority falls through to next enabled rule."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [
+            make_rule(id="disabled", priority=1, enabled=False, instruction="disabled.md"),
+            make_rule(id="enabled", priority=10, enabled=True, instruction="enabled.md"),
+        ]
+        msg = make_msg(text=text, sender_id=sender_id, fromMe=fromMe, toMe=toMe)
+        assert engine.match(msg) == "enabled.md"
+
+    @given(
+        text=printable_text,
+        sender_id=simple_text,
+        chat_id=simple_text,
+        channel_type=simple_text,
+        fromMe=st.booleans(),
+        toMe=st.booleans(),
+    )
+    @settings(max_examples=100)
+    def test_empty_rules_always_returns_none(
+        self, text: str, sender_id: str, chat_id: str,
+        channel_type: str, fromMe: bool, toMe: bool,
+    ):
+        """Invariant: no rules → match always returns None."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = []
+        msg = make_msg(
+            text=text, sender_id=sender_id, chat_id=chat_id,
+            channel_type=channel_type, fromMe=fromMe, toMe=toMe,
+        )
+        assert engine.match(msg) is None
+
+    @given(
+        specific_sender=simple_text,
+        other_sender=simple_text,
+        fromMe=st.booleans(),
+        toMe=st.booleans(),
+    )
+    @settings(max_examples=200)
+    def test_specific_sender_matches_exactly(
+        self, specific_sender: str, other_sender: str, fromMe: bool, toMe: bool,
+    ):
+        """Invariant: specific sender pattern only matches that exact sender."""
+        assume(specific_sender != other_sender)
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(sender=specific_sender)]
+        matching_msg = make_msg(sender_id=specific_sender, fromMe=fromMe, toMe=toMe)
+        non_matching_msg = make_msg(sender_id=other_sender, fromMe=fromMe, toMe=toMe)
+        assert engine.match(matching_msg) == "chat.agent.md"
+        assert engine.match(non_matching_msg) is None
+
+    @given(
+        specific_channel=simple_text,
+        other_channel=simple_text,
+    )
+    @settings(max_examples=200)
+    def test_specific_channel_matches_exactly(
+        self, specific_channel: str, other_channel: str,
+    ):
+        """Invariant: specific channel pattern only matches that exact channel."""
+        assume(specific_channel != other_channel)
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(channel=specific_channel)]
+        assert engine.match(make_msg(channel_type=specific_channel)) == "chat.agent.md"
+        assert engine.match(make_msg(channel_type=other_channel)) is None
+
+    @given(
+        specific_recipient=simple_text,
+        other_recipient=simple_text,
+    )
+    @settings(max_examples=200)
+    def test_specific_recipient_matches_exactly(
+        self, specific_recipient: str, other_recipient: str,
+    ):
+        """Invariant: specific recipient pattern only matches that exact recipient."""
+        assume(specific_recipient != other_recipient)
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(recipient=specific_recipient)]
+        assert engine.match(make_msg(chat_id=specific_recipient)) == "chat.agent.md"
+        assert engine.match(make_msg(chat_id=other_recipient)) is None
+
+    @given(
+        fromMe_filter=bool_or_none,
+        toMe_filter=bool_or_none,
+        msg_fromMe=st.booleans(),
+        msg_toMe=st.booleans(),
+    )
+    @settings(max_examples=200)
+    def test_boolean_filter_invariant(
+        self, fromMe_filter, toMe_filter, msg_fromMe: bool, msg_toMe: bool,
+    ):
+        """Invariant: fromMe/toMe filters work correctly for all combinations."""
+        engine = RoutingEngine(Path("/dummy"))
+        engine._rules = [make_rule(fromMe=fromMe_filter, toMe=toMe_filter)]
+        msg = make_msg(fromMe=msg_fromMe, toMe=msg_toMe)
+        result = engine.match(msg)
+
+        # Compute expected: None = pass-through, True/False = must match exactly
+        fromMe_pass = fromMe_filter is None or fromMe_filter == msg_fromMe
+        toMe_pass = toMe_filter is None or toMe_filter == msg_toMe
+        expected = fromMe_pass and toMe_pass
+        assert (result is not None) == expected
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cache invalidation on file modification — end-to-end integration tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCacheInvalidationOnFileModification:
+    """
+    End-to-end tests verifying that match_with_rule() correctly invalidates
+    its cached results when instruction files change on disk.
+
+    These tests exercise the full pipeline:
+        match_with_rule() → _is_stale() → load_rules() → _rules setter →
+        _match_cache.clear() → fresh rule evaluation → new cache entry
+    """
+
+    def test_cache_invalidated_when_file_modified(self, tmp_path: Path):
+        """(a) Cached result is cleared and new rule is returned after file modification."""
+        md = tmp_path / "route.md"
+        md.write_text(
+            "---\nrouting:\n  id: original\n  priority: 1\n---\n\n# Original\n"
+        )
+
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        msg = make_msg(text="hello")
+
+        # First match — populates cache
+        rule1, inst1 = engine.match_with_rule(msg)
+        assert inst1 == "route.md"
+        assert rule1 is not None
+        assert rule1.id == "original"
+        assert len(engine._match_cache) == 1
+
+        # Modify the file with a different rule id
+        md.write_text(
+            "---\nrouting:\n  id: modified\n  priority: 1\n---\n\n# Modified\n"
+        )
+
+        # Allow stale check to run
+        engine._last_stale_check = 0.0
+
+        # Second match — cache should be cleared, fresh result returned
+        rule2, inst2 = engine.match_with_rule(msg)
+        assert inst2 == "route.md"
+        assert rule2 is not None
+        assert rule2.id == "modified"
+
+        # Cache was rebuilt (cleared by load_rules, then repopulated)
+        assert len(engine._match_cache) == 1
+        # The old rule object should NOT be in the cache anymore
+        cached_result = list(engine._match_cache.values())[0][1]
+        assert cached_result[0].id == "modified"
+
+    def test_new_rule_appears_after_file_creation(self, tmp_path: Path):
+        """(b) Creating a new .md file causes new rules to appear in match results."""
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        msg = make_msg(text="hello")
+
+        # Initially no rules
+        assert engine.match(msg) is None
+        assert len(engine._match_cache) == 1  # (None, None) cached
+
+        # Create a new instruction file
+        (tmp_path / "new_rule.md").write_text(
+            "---\nrouting:\n  id: new-rule\n  priority: 1\n---\n\n# New\n"
+        )
+
+        # Allow stale check
+        engine._last_stale_check = 0.0
+
+        # New rule should now match
+        rule, inst = engine.match_with_rule(msg)
+        assert inst == "new_rule.md"
+        assert rule is not None
+        assert rule.id == "new-rule"
+
+        # Cache was rebuilt with new result
+        assert len(engine._match_cache) == 1
+        cached_result = list(engine._match_cache.values())[0][1]
+        assert cached_result[0].id == "new-rule"
+
+    def test_removed_rule_disappears_after_file_deletion(self, tmp_path: Path):
+        """(c) Deleting an .md file causes its rules to disappear from match results."""
+        md = tmp_path / "gone.md"
+        md.write_text(
+            "---\nrouting:\n  id: temporary\n  priority: 1\n---\n\n# Temp\n"
+        )
+
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        msg = make_msg(text="hello")
+
+        # Rule matches
+        rule1, inst1 = engine.match_with_rule(msg)
+        assert inst1 == "gone.md"
+        assert rule1 is not None
+        assert rule1.id == "temporary"
+        assert len(engine._match_cache) == 1
+
+        # Delete the file
+        md.unlink()
+
+        # Allow stale check
+        engine._last_stale_check = 0.0
+
+        # No rules should match now
+        rule2, inst2 = engine.match_with_rule(msg)
+        assert rule2 is None
+        assert inst2 is None
+
+        # Cache was rebuilt
+        assert len(engine._match_cache) == 1
+        cached_result = list(engine._match_cache.values())[0][1]
+        assert cached_result == (None, None)
+
+    def test_debounce_prevents_excessive_reloads(self, tmp_path: Path):
+        """(d) Multiple match calls within the debounce window skip stale checks,
+        preserving the cached result even if files changed on disk."""
+        md = tmp_path / "stable.md"
+        md.write_text(
+            "---\nrouting:\n  id: v1\n  priority: 1\n---\n\n# V1\n"
+        )
+
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        msg = make_msg(text="hello")
+
+        # First match — triggers stale check, populates cache
+        engine._last_stale_check = 0.0
+        rule1, inst1 = engine.match_with_rule(msg)
+        assert rule1 is not None
+        assert rule1.id == "v1"
+        assert len(engine._match_cache) == 1
+        first_check_time = engine._last_stale_check
+
+        # Modify the file on disk (this would normally trigger reload)
+        md.write_text(
+            "---\nrouting:\n  id: v2\n  priority: 1\n---\n\n# V2\n"
+        )
+
+        # Second match — within debounce window, should NOT detect stale
+        # and should return cached v1 result
+        rule2, inst2 = engine.match_with_rule(msg)
+        assert engine._last_stale_check == first_check_time  # debounce blocked re-check
+        assert rule2 is not None
+        assert rule2.id == "v1"  # Still returns cached result
+        assert len(engine._match_cache) == 1
+
+    def test_end_to_end_cache_lifecycle(self, tmp_path: Path):
+        """Full lifecycle: load → cache → modify → auto-reload → new cache → delete → empty."""
+        # Step 1: Create initial file and load
+        md = tmp_path / "lifecycle.md"
+        md.write_text(
+            "---\nrouting:\n  id: step1\n  priority: 1\n---\n\n# Step1\n"
+        )
+
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        msg = make_msg(text="hello")
+
+        # Step 2: First match — cache populated
+        rule, _ = engine.match_with_rule(msg)
+        assert rule is not None
+        assert rule.id == "step1"
+        assert len(engine._match_cache) == 1
+
+        # Step 3: Modify file — cache invalidated, new result cached
+        md.write_text(
+            "---\nrouting:\n  id: step2\n  priority: 1\n---\n\n# Step2\n"
+        )
+        engine._last_stale_check = 0.0
+
+        rule, _ = engine.match_with_rule(msg)
+        assert rule is not None
+        assert rule.id == "step2"
+        assert len(engine._match_cache) == 1
+
+        # Step 4: Delete file — cache invalidated, (None, None) cached
+        md.unlink()
+        engine._last_stale_check = 0.0
+
+        rule, inst = engine.match_with_rule(msg)
+        assert rule is None
+        assert inst is None
+        assert len(engine._match_cache) == 1
+        cached_result = list(engine._match_cache.values())[0][1]
+        assert cached_result == (None, None)
+
+        # Step 5: Recreate file — cache invalidated, new result cached
+        md.write_text(
+            "---\nrouting:\n  id: step5\n  priority: 1\n---\n\n# Step5\n"
+        )
+        engine._last_stale_check = 0.0
+
+        rule, inst = engine.match_with_rule(msg)
+        assert rule is not None
+        assert rule.id == "step5"
+        assert inst == "lifecycle.md"
+
+    def test_cache_not_invalidated_when_content_unchanged(self, tmp_path: Path):
+        """Rewriting the same content should not cause cache invalidation."""
+        md = tmp_path / "same.md"
+        content = "---\nrouting:\n  id: same-rule\n  priority: 1\n---\n\n# Same\n"
+        md.write_text(content)
+
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        msg = make_msg(text="hello")
+
+        # First match
+        engine._last_stale_check = 0.0
+        rule1, _ = engine.match_with_rule(msg)
+        assert rule1 is not None
+        assert rule1.id == "same-rule"
+        rules_obj_before = engine._rules  # identity check
+
+        # Rewrite the same content (mtime changes but rule is logically identical)
+        md.write_text(content)
+        engine._last_stale_check = 0.0
+
+        # Even though mtime changed, load_rules will re-scan and set _rules
+        # which clears cache. The new rule should be functionally identical.
+        rule2, _ = engine.match_with_rule(msg)
+        assert rule2 is not None
+        assert rule2.id == "same-rule"
+
+    def test_multiple_files_invalidation(self, tmp_path: Path):
+        """Modifying one of multiple instruction files invalidates the entire cache."""
+        (tmp_path / "first.md").write_text(
+            "---\nrouting:\n  id: first\n  priority: 1\n---\n\n# First\n"
+        )
+        (tmp_path / "second.md").write_text(
+            "---\nrouting:\n  id: second\n  priority: 10\n---\n\n# Second\n"
+        )
+
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        msg_low = make_msg(text="hello")
+        msg_high = make_msg(sender_id="special-sender")
+
+        # Populate cache with two entries
+        engine._last_stale_check = 0.0
+        engine.match_with_rule(msg_low)
+        engine.match_with_rule(msg_high)
+        assert len(engine._match_cache) == 2
+
+        # Modify the first file (higher priority) to change its rule
+        (tmp_path / "first.md").write_text(
+            "---\nrouting:\n  id: first-updated\n  priority: 1\n---\n\n# Updated\n"
+        )
+        engine._last_stale_check = 0.0
+
+        # One match should clear the ENTIRE cache (both entries)
+        engine.match_with_rule(msg_low)
+        assert len(engine._match_cache) == 1  # Only msg_low's new result
+
+        # The other message must be re-evaluated (not stale cached)
+        rule, inst = engine.match_with_rule(msg_high)
+        assert rule is not None
+        assert rule.id == "first-updated"  # Still matches the catch-all first rule
+        assert len(engine._match_cache) == 2  # Now both are cached again

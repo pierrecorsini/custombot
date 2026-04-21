@@ -16,13 +16,13 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from src.core.instruction_loader import InstructionLoader
 from src.routing import RoutingEngine, RoutingRule
 from src.skills.base import BaseSkill, validate_input
-from src.core.instruction_loader import InstructionLoader
 from src.utils.frontmatter import (
-    parse_frontmatter,
     dump_frontmatter,
     extract_routing_rules,
+    parse_frontmatter,
 )
 
 
@@ -55,19 +55,9 @@ class RoutingListSkill(BaseSkill):
         for rule in rules:
             status = "✅" if rule.enabled else "❌"
             from_me_str = (
-                "true"
-                if rule.fromMe is True
-                else "false"
-                if rule.fromMe is False
-                else "any"
+                "true" if rule.fromMe is True else "false" if rule.fromMe is False else "any"
             )
-            to_me_str = (
-                "true"
-                if rule.toMe is True
-                else "false"
-                if rule.toMe is False
-                else "any"
-            )
+            to_me_str = "true" if rule.toMe is True else "false" if rule.toMe is False else "any"
             lines.append(
                 f"{status} **{rule.id}** (priority: {rule.priority})\n"
                 f"   • sender: `{rule.sender}`\n"
@@ -140,8 +130,7 @@ class RoutingAddSkill(BaseSkill):
             "rule_id": {
                 "type": "string",
                 "description": (
-                    "Optional unique ID for the rule. If not provided, "
-                    "a UUID will be generated."
+                    "Optional unique ID for the rule. If not provided, a UUID will be generated."
                 ),
             },
             "fromMe": {
@@ -279,18 +268,10 @@ class RoutingAddSkill(BaseSkill):
             self._engine.refresh_rules()
 
             from_me_str = (
-                "true"
-                if from_me_value is True
-                else "false"
-                if from_me_value is False
-                else "any"
+                "true" if from_me_value is True else "false" if from_me_value is False else "any"
             )
             to_me_str = (
-                "true"
-                if to_me_value is True
-                else "false"
-                if to_me_value is False
-                else "any"
+                "true" if to_me_value is True else "false" if to_me_value is False else "any"
             )
             return (
                 f"✅ Routing rule created successfully.\n"
@@ -313,9 +294,7 @@ class RoutingDeleteSkill(BaseSkill):
     """Delete a routing rule by ID from instruction file frontmatter."""
 
     name = "routing_delete"
-    description = (
-        "Delete a routing rule by its unique ID. This action cannot be undone."
-    )
+    description = "Delete a routing rule by its unique ID. This action cannot be undone."
     parameters = {
         "type": "object",
         "properties": {

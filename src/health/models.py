@@ -28,6 +28,7 @@ class ComponentHealth:
     status: HealthStatus
     message: str = ""
     latency_ms: Optional[float] = None
+    details: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -36,6 +37,8 @@ class ComponentHealth:
         }
         if self.latency_ms is not None:
             result["latency_ms"] = round(self.latency_ms, 2)
+        if self.details is not None:
+            result["details"] = self.details
         return result
 
 

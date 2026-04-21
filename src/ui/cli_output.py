@@ -186,9 +186,7 @@ class CLIOutput:
     def header(self, title: str, style: str = "header") -> None:
         """Print a styled header with optional box characters."""
         if self._is_tty:
-            self.console.print(
-                f"\n[bold]── {title} ──[/bold]", style=style, justify="left"
-            )
+            self.console.print(f"\n[bold]── {title} ──[/bold]", style=style, justify="left")
         else:
             self.console.print(f"\n=== {title} ===")
 
@@ -211,9 +209,7 @@ class CLIOutput:
         expand: bool = False,
     ) -> None:
         """Print content in a styled panel with border."""
-        self.console.print(
-            Panel(content, title=title, border_style=style, expand=expand)
-        )
+        self.console.print(Panel(content, title=title, border_style=style, expand=expand))
 
     def banner(self, title: str, subtitle: Optional[str] = None) -> None:
         """Print a large banner/header with box drawing characters."""
@@ -265,11 +261,14 @@ class CLIOutput:
         preview = text.replace("\n", "\\n")[:MSG_PREVIEW_LENGTH]
         dir_tag = "IN" if is_in else "OUT"
 
+        flags = "/".join(name for name, val in (("fromMe", from_me), ("toMe", to_me)) if val)
+
         if self._is_tty:
             dir_style = "msg.direction_in" if is_in else "msg.direction_out"
             arrow_style = "msg.arrow_in" if is_in else "msg.arrow_out"
             text_style = "msg.text_in" if is_in else "msg.text_out"
 
+            flag_part = f" [msg.flags]({flags})[/]:" if flags else ":"
             self.console.print(
                 f"[msg.timestamp][{timestamp}][/]"
                 f"[msg.channel][{channel}][/]"
@@ -277,14 +276,15 @@ class CLIOutput:
                 f" [msg.source]{source}[/]"
                 f" [{arrow_style}]{arrow}[/]"
                 f" [msg.destination]{destination}[/]"
-                f" [msg.flags](fromMe={from_me}/toMe={to_me})[/]:"
+                f"{flag_part}"
                 f" [{text_style}]{preview}[/]"
             )
         else:
+            flag_part = f" ({flags}):" if flags else ":"
             self.console.print(
                 f"[{timestamp}][{channel}][{dir_tag}] "
-                f"{source} {arrow} {destination} "
-                f"(fromMe={from_me}/toMe={to_me}): {preview}"
+                f"{source} {arrow} {destination}"
+                f"{flag_part} {preview}"
             )
 
     def print(self, message: str, style: Optional[str] = None) -> None:

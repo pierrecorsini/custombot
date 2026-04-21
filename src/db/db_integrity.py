@@ -8,13 +8,14 @@ Database thin wrappers to keep db.py focused on core CRUD operations.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from src.utils import JSONDecodeError, json_loads
 
 log = logging.getLogger(__name__)
 
@@ -112,14 +113,14 @@ def detect_corruption_sync(msg_file: Path) -> CorruptionResult:
             if not line.strip():
                 continue
             try:
-                msg = json.loads(line)
+                msg = json_loads(line)
                 result.valid_lines += 1
 
                 is_valid, error = validate_checksum(msg)
                 if not is_valid:
                     result.checksum_mismatches.append(line_num)
                     result.error_details.append(f"Line {line_num}: {error}")
-            except json.JSONDecodeError as e:
+            except JSONDecodeError as e:
                 result.corrupted_lines.append(line_num)
                 result.error_details.append(f"Line {line_num}: JSON parse error - {e}")
 
@@ -133,7 +134,7 @@ def detect_corruption_sync(msg_file: Path) -> CorruptionResult:
                 len(result.checksum_mismatches),
             )
 
-    except Exception as e:
+    except OSError as e:
         result.is_corrupted = True
         result.error_details.append(f"Failed to read file: {e}")
         log.error("Failed to read message file %s: %s", msg_file.name, e)
@@ -164,7 +165,7 @@ def backup_file_sync(msg_file: Path, data_dir: Path) -> Optional[str]:
         shutil.copy2(msg_file, backup_file)
         log.info("Created backup: %s", backup_file)
         return str(backup_file)
-    except Exception as e:
+    except OSError as e:
         log.error("Failed to create backup: %s", e)
         return None
 
@@ -191,9 +192,7 @@ def repair_file_sync(
     if not msg_file.exists():
         return False
 
-    skip_lines = set(detection_result.corrupted_lines) | set(
-        detection_result.checksum_mismatches
-    )
+    skip_lines = set(detection_result.corrupted_lines) | set(detection_result.checksum_mismatches)
     if not skip_lines:
         return True  # Nothing to repair
 
@@ -201,9 +200,7 @@ def repair_file_sync(
         content = msg_file.read_text(encoding="utf-8")
         lines = content.splitlines()
 
-        valid_lines = [
-            line for line_num, line in enumerate(lines, 1) if line_num not in skip_lines
-        ]
+        valid_lines = [line for line_num, line in enumerate(lines, 1) if line_num not in skip_lines]
 
         new_content = "\n".join(valid_lines)
         if valid_lines:
@@ -218,7 +215,7 @@ def repair_file_sync(
         )
         return True
 
-    except Exception as e:
+    except OSError as e:
         log.error("Failed to repair file %s: %s", msg_file.name, e)
         return False
 

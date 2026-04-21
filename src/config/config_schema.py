@@ -145,6 +145,10 @@ CONFIG_SCHEMA: dict[str, Any] = {
                     },
                     "description": "Allowed phone numbers (E164 format, no +)",
                 },
+                "allow_all": {
+                    "type": "boolean",
+                    "description": "Allow all senders (no ACL filtering)",
+                },
             },
             "required": ["provider", "neonize"],
             "additionalProperties": False,
@@ -212,6 +216,29 @@ CONFIG_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": "Enable per-file logging of each LLM request and response (default: false)",
         },
+        "shell": {
+            "type": "object",
+            "description": "Shell skill security configuration — command allowlist/denylist",
+            "properties": {
+                "command_denylist": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "description": "Additional command patterns to block beyond built-in denylist (regex patterns)",
+                },
+                "command_allowlist": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "description": "Command patterns that bypass the denylist (regex patterns, allowlist takes precedence)",
+                },
+            },
+            "additionalProperties": False,
+        },
     },
     "required": ["llm", "whatsapp"],
     "additionalProperties": False,
@@ -239,9 +266,7 @@ def _format_path(path: List[str | int]) -> str:
     return result
 
 
-def _validate_type(
-    value: Any, expected_type: str, path: str
-) -> Optional[ValidationError]:
+def _validate_type(value: Any, expected_type: str, path: str) -> Optional[ValidationError]:
     """Validate that a value matches the expected type."""
     type_checks = {
         "string": lambda v: isinstance(v, str),
@@ -262,9 +287,7 @@ def _validate_type(
     return None
 
 
-def _validate_string_constraints(
-    value: str, schema: dict, path: str
-) -> List[ValidationError]:
+def _validate_string_constraints(value: str, schema: dict, path: str) -> List[ValidationError]:
     """Validate string-specific constraints."""
     errors: List[ValidationError] = []
 
@@ -333,8 +356,7 @@ def _validate_against_schema(
         if isinstance(expected_type, list):
             type_checks = {
                 "string": lambda v: isinstance(v, str),
-                "number": lambda v: isinstance(v, (int, float))
-                and not isinstance(v, bool),
+                "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
                 "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
                 "boolean": lambda v: isinstance(v, bool),
                 "array": lambda v: isinstance(v, list),
@@ -492,9 +514,7 @@ class ConfigValidationError(Exception):
         schema_version: Version of the schema that was validated against.
     """
 
-    def __init__(
-        self, errors: List[ValidationError], schema_version: str = SCHEMA_VERSION
-    ) -> None:
+    def __init__(self, errors: List[ValidationError], schema_version: str = SCHEMA_VERSION) -> None:
         self.errors = errors
         self.schema_version = schema_version
         self.message = format_validation_errors(errors)

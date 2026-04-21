@@ -6,14 +6,15 @@ and better type checking without requiring explicit inheritance.
 
 Protocols:
     - Channel: Interface for messaging channel implementations
+    - MemoryProtocol: Interface for per-chat memory operations
     - Skill: Interface for executable tool-skills
     - Storage: Interface for database operations
 
 Usage:
-    from src.utils.protocols import Channel, Skill, Storage
+    from src.utils.protocols import Channel, MemoryProtocol, Skill, Storage
 
-    def process_messages(channel: Channel) -> None:
-        # Accepts any object with Channel protocol methods
+    def process_messages(channel: Channel, memory: MemoryProtocol) -> None:
+        # Accepts any object with the respective protocol methods
         ...
 
     # Runtime check (limited - only checks method existence)
@@ -35,7 +36,6 @@ from typing import (
     runtime_checkable,
 )
 
-
 # Type alias for message handlers (re-exported for convenience)
 MessageHandler = Callable[..., Awaitable[None]]
 
@@ -55,6 +55,7 @@ class Channel(Protocol):
         start: Initialize and run the channel (polling or webhook)
         send_message: Send a text message to a chat
         send_typing: Send typing indicator (optional, may be no-op)
+        get_channel_prompt: Return channel-specific prompt instructions (optional)
 
     Example:
         class WhatsAppChannel:
@@ -102,6 +103,18 @@ class Channel(Protocol):
 
         Args:
             chat_id: Target chat/conversation identifier.
+        """
+        ...
+
+    def get_channel_prompt(self) -> Optional[str]:
+        """
+        Return channel-specific prompt instructions to inject before other prompts.
+
+        Override this method to provide formatting or behavioral instructions
+        specific to this channel (e.g., WhatsApp formatting, Telegram markdown).
+
+        Returns:
+            Channel-specific prompt content, or None if no prompt needed.
         """
         ...
 
@@ -263,9 +276,7 @@ class Storage(Protocol):
         """
         ...
 
-    async def get_recent_messages(
-        self, chat_id: str, limit: int = 50
-    ) -> List[Dict[str, Any]]:
+    async def get_recent_messages(self, chat_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         """
         Retrieve recent messages for a chat.
 
@@ -304,6 +315,8 @@ class Storage(Protocol):
 __all__ = [
     "MessageHandler",
     "Channel",
+    "LockProvider",
+    "MemoryProtocol",
     "Skill",
     "Storage",
     "ProjectStore",
@@ -333,6 +346,124 @@ class ProjectContextLoader(Protocol):
 
     async def get(self, chat_id: str) -> Optional[str]:
         """Load project context for a chat. Returns None if no context."""
+        ...
+
+
+@runtime_checkable
+class MemoryProtocol(Protocol):
+    """
+    Protocol for per-chat memory operations.
+
+    Decouples Bot from the concrete Memory class so alternative
+    implementations (e.g., Redis-backed, database-backed) can be
+    swapped in without touching Bot.
+
+    Methods:
+        ensure_workspace: Create per-chat workspace directory and seed files
+        read_memory: Read the MEMORY.md file for a chat
+        read_agents_md: Read the AGENTS.md file for a chat
+
+    Example:
+        class RedisMemory:
+            def __init__(self, redis_url: str) -> None:
+                self._redis = redis.asyncio.from_url(redis_url)
+
+            def ensure_workspace(self, chat_id: str) -> Path:
+                # Create workspace dir and return Path
+                ...
+
+            async def read_memory(self, chat_id: str) -> Optional[str]:
+                content = await self._redis.get(f"memory:{chat_id}")
+                return content
+
+            async def read_agents_md(self, chat_id: str) -> str:
+                content = await self._redis.get(f"agents:{chat_id}")
+                return content or "Default instructions"
+
+        # RedisMemory satisfies MemoryProtocol
+        memory: MemoryProtocol = RedisMemory("redis://localhost")
+    """
+
+    def ensure_workspace(self, chat_id: str) -> Path:
+        """
+        Create the per-chat workspace directory and seed initial files.
+
+        Args:
+            chat_id: Chat/conversation identifier.
+
+        Returns:
+            Path to the chat's workspace directory.
+        """
+        ...
+
+    async def read_memory(self, chat_id: str) -> Optional[str]:
+        """
+        Read the MEMORY.md content for a chat.
+
+        Args:
+            chat_id: Chat/conversation identifier.
+
+        Returns:
+            Memory content string, or None if no memory exists.
+        """
+        ...
+
+    async def read_agents_md(self, chat_id: str) -> str:
+        """
+        Read the AGENTS.md content for a chat.
+
+        Args:
+            chat_id: Chat/conversation identifier.
+
+        Returns:
+            Agent instructions content string.
+
+        Raises:
+            FileNotFoundError: If AGENTS.md has not been seeded yet.
+        """
+        ...
+
+
+@runtime_checkable
+class LockProvider(Protocol):
+    """
+    Protocol for per-chat lock management.
+
+    Decouples Bot from the concrete LRULockCache so alternative
+    implementations (e.g., distributed lock backends, shared lock
+    state for multi-process deployments) can be swapped in without
+    touching Bot.
+
+    Methods:
+        get_or_create: Get an existing lock or create a new one for the key
+        __len__: Return the current number of active locks
+
+    Example:
+        class RedisLockProvider:
+            def __init__(self, redis_url: str) -> None:
+                self._redis = redis.asyncio.from_url(redis_url)
+
+            async def get_or_create(self, key: str) -> asyncio.Lock:
+                return asyncio.Lock()
+
+            def __len__(self) -> int:
+                return 0
+    """
+
+    async def get_or_create(self, key: str) -> "asyncio.Lock":
+        """
+        Get an existing lock for the key or create a new one.
+
+        Args:
+            key: Unique identifier for the lock (e.g., chat_id).
+
+        Returns:
+            An asyncio.Lock for the given key.
+        """
+        ...
+
+    def __len__(self) -> int:
+        """Return the current number of managed locks."""
         ...
 
 

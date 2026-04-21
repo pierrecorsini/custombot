@@ -328,8 +328,7 @@ class ProgressBar:
 
         # Always update on description change, otherwise throttle
         should_update = (
-            description is not None
-            or (now - self._last_update) >= self._config.min_update_interval
+            description is not None or (now - self._last_update) >= self._config.min_update_interval
         )
 
         if should_update:

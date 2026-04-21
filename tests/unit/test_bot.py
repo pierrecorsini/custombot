@@ -21,12 +21,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.bot import Bot, PreflightResult
+from src.bot import Bot, BotConfig, PreflightResult
 from src.channels.base import IncomingMessage
-from src.config import Config, LLMConfig, WhatsAppConfig, NeonizeConfig
 from src.rate_limiter import RateLimitResult
 from src.routing import RoutingRule
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -66,9 +64,11 @@ def _make_bot(
     tool_definitions: list | None = None,
 ) -> Bot:
     """Create a Bot with fully mocked dependencies."""
-    cfg = MagicMock(spec=Config)
-    cfg.llm = MagicMock(spec=LLMConfig)
-    cfg.llm.max_tool_iterations = max_tool_iterations
+    cfg = BotConfig(
+        max_tool_iterations=max_tool_iterations,
+        memory_max_history=50,
+        system_prompt_prefix="",
+    )
 
     db = AsyncMock()
     db.message_exists = AsyncMock(return_value=False)
@@ -193,7 +193,7 @@ class TestPreflightResult:
 
     def test_frozen_raises_on_new_attribute(self):
         result = PreflightResult(passed=True)
-        with pytest.raises(AttributeError):
+        with pytest.raises((AttributeError, TypeError)):
             result.extra = "nope"  # type: ignore[attr-defined]
 
     def test_used_in_if_statement(self):
@@ -222,7 +222,11 @@ class TestBotInit:
     """Tests for Bot constructor."""
 
     def test_stores_all_dependencies(self):
-        cfg = MagicMock(spec=Config)
+        cfg = BotConfig(
+            max_tool_iterations=10,
+            memory_max_history=50,
+            system_prompt_prefix="",
+        )
         db = AsyncMock()
         llm = AsyncMock()
         memory = AsyncMock()
@@ -265,6 +269,31 @@ class TestBotInit:
         bot = _make_bot()
         assert hasattr(bot, "_chat_locks")
         assert len(bot._chat_locks) == 0
+
+    def test_chat_locks_injected(self):
+        """Bot accepts an external LockProvider for shared lock state."""
+        import asyncio
+        from src.utils import LRULockCache
+
+        custom_locks = LRULockCache(max_size=50)
+        bot = _make_bot()
+        # Re-create with injected locks
+        cfg = BotConfig(
+            max_tool_iterations=10,
+            memory_max_history=50,
+            system_prompt_prefix="",
+        )
+        db = AsyncMock()
+        llm = AsyncMock()
+        memory = AsyncMock()
+        memory.ensure_workspace = MagicMock(return_value=Path("/tmp/workspace/chat_123"))
+        skills = MagicMock()
+        skills.all = MagicMock(return_value=[])
+        bot = Bot(
+            config=cfg, db=db, llm=llm, memory=memory, skills=skills,
+            chat_locks=custom_locks,
+        )
+        assert bot._chat_locks is custom_locks
 
     def test_rate_limiter_initialized(self):
         bot = _make_bot()
@@ -388,20 +417,24 @@ class TestPreflightCheck:
         assert result
         assert not PreflightResult(passed=False, reason="test")
 
-    async def test_message_with_empty_sender_id_still_valid_for_preflight(self):
-        """is_incoming_message requires non-empty sender_id."""
+    async def test_message_with_empty_sender_id_passes_preflight_isinstance(self):
+        """isinstance(msg, IncomingMessage) accepts messages with empty sender_id.
+
+        The duck-type guard previously rejected empty-string fields, but since
+        IncomingMessage is a frozen @dataclass(slots=True), isinstance is
+        sufficient — the dataclass guarantees field existence and types.
+        """
         bot = _make_bot()
         msg = IncomingMessage(
             message_id="msg_001",
             chat_id="chat_123",
-            sender_id="",  # empty — should fail type guard
+            sender_id="",  # empty — still a valid IncomingMessage instance
             sender_name="Alice",
             text="Hello",
             timestamp=time.time(),
         )
         result = await bot.preflight_check(msg)
-        assert result.passed is False
-        assert result.reason == "invalid"
+        assert result.passed is True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -504,10 +537,7 @@ class TestHandleMessageRateLimiting:
         assert result is None
         channel.send_message.assert_awaited_once()
         call_args = channel.send_message.call_args
-        assert (
-            "too quickly" in call_args[0][1].lower()
-            or "wait" in call_args[0][1].lower()
-        )
+        assert "too quickly" in call_args[0][1].lower() or "wait" in call_args[0][1].lower()
 
     async def test_rate_limit_not_triggered_passes(self):
         bot = _make_bot()
@@ -541,7 +571,9 @@ class TestHandleMessageQueue:
 
     async def test_enqueues_before_processing(self):
         queue = AsyncMock()
+        queue.get_pending_count = AsyncMock(return_value=0)
         bot = _make_bot(message_queue=queue)
+        bot._metrics = MagicMock()
         msg = _make_message()
         routing = MagicMock()
         rule = _make_routing_rule()
@@ -695,6 +727,8 @@ class TestHandleMessageMetrics:
         rule = _make_routing_rule()
         routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
+        mock_metrics = MagicMock()
+        bot._metrics = mock_metrics
 
         response = _make_llm_response(content="ok")
         bot._llm.chat = AsyncMock(return_value=response)
@@ -705,7 +739,7 @@ class TestHandleMessageMetrics:
             patch.object(bot, "_load_instruction", return_value="prompt"),
         ):
             await bot.handle_message(msg)
-            bot._metrics.track_message_latency.assert_called_once()
+            mock_metrics.track_message_latency.assert_called_once()
 
     async def test_updates_queue_depth_with_queue(self):
         queue = AsyncMock()
@@ -716,6 +750,8 @@ class TestHandleMessageMetrics:
         rule = _make_routing_rule()
         routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
+        mock_metrics = MagicMock()
+        bot._metrics = mock_metrics
 
         response = _make_llm_response(content="ok")
         bot._llm.chat = AsyncMock(return_value=response)
@@ -726,7 +762,7 @@ class TestHandleMessageMetrics:
             patch.object(bot, "_load_instruction", return_value="prompt"),
         ):
             await bot.handle_message(msg)
-            bot._metrics.update_queue_depth.assert_called_once_with(5)
+            mock_metrics.update_queue_depth.assert_called_once_with(5)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -755,6 +791,7 @@ class TestReactLoop:
     async def test_null_content_returns_default(self):
         """LLM returns stop with None content — fallback to default."""
         bot = _make_bot()
+        bot._metrics = MagicMock()
         response = _make_llm_response(content=None, finish_reason="stop")
         bot._llm.chat = AsyncMock(return_value=response)
 
@@ -764,7 +801,7 @@ class TestReactLoop:
             tools=None,
             workspace_dir=Path("/tmp/ws"),
         )
-        assert text == "(no response)"
+        assert "empty response" in text.lower()
         assert tool_log == []
 
     async def test_tool_calls_then_stop(self):
@@ -800,7 +837,7 @@ class TestReactLoop:
         )
         bot._tool_executor.execute = AsyncMock(return_value="search results")
 
-        text, tool_log = await bot._react_loop(
+        text, tool_log, buffered = await bot._react_loop(
             chat_id="chat_123",
             messages=[],
             tools=[],
@@ -809,10 +846,15 @@ class TestReactLoop:
         assert text == "Done!"
         assert len(tool_log) == 1
         assert tool_log[0]["name"] == "web_search"
+        # Buffered persist should contain assistant tool-call turn + tool result
+        assert len(buffered) == 2
+        assert buffered[0]["role"] == "assistant"
+        assert buffered[1]["role"] == "tool"
 
     async def test_max_iterations_reached(self):
         """LLM keeps calling tools until max iterations reached."""
         bot = _make_bot(max_tool_iterations=3)
+        bot._metrics = MagicMock()
 
         tool_call = _make_tool_call()
         # Every iteration returns tool_calls (never stops)
@@ -831,17 +873,19 @@ class TestReactLoop:
         )
         bot._tool_executor.execute = AsyncMock(return_value="result")
 
-        text, tool_log = await bot._react_loop(
+        text, tool_log, buffered = await bot._react_loop(
             chat_id="chat_123",
             messages=[],
             tools=[],
             workspace_dir=Path("/tmp/ws"),
         )
-        assert "max tool iterations" in text.lower()
+        assert "maximum tool iterations" in text.lower()
         assert len(tool_log) == 3  # one per iteration
+        assert len(buffered) == 6  # 3 iterations × (1 assistant + 1 tool result)
 
     async def test_tracks_llm_latency(self):
         bot = _make_bot()
+        bot._metrics = MagicMock()
         response = _make_llm_response(content="hi", finish_reason="stop")
         bot._llm.chat = AsyncMock(return_value=response)
 
@@ -942,9 +986,7 @@ class TestProcessToolCalls:
         bot._tool_executor.execute = AsyncMock(return_value="search results here")
 
         messages = []
-        result = await bot._process_tool_calls(
-            choice, messages, "chat_123", Path("/tmp/ws")
-        )
+        result = await bot._process_tool_calls(choice, messages, "chat_123", Path("/tmp/ws"))
 
         assert len(result) == 1
         assert result[0]["name"] == "web_search"
@@ -972,9 +1014,7 @@ class TestProcessToolCalls:
         bot._tool_executor.execute = AsyncMock(side_effect=["result1", "result2"])
 
         messages = []
-        result = await bot._process_tool_calls(
-            choice, messages, "chat_123", Path("/tmp/ws")
-        )
+        result = await bot._process_tool_calls(choice, messages, "chat_123", Path("/tmp/ws"))
 
         assert len(result) == 2
         assert result[0]["name"] == "web_search"
@@ -1000,9 +1040,7 @@ class TestProcessToolCalls:
         bot._tool_executor.execute = AsyncMock(return_value="ok")
 
         messages = []
-        result = await bot._process_tool_calls(
-            choice, messages, "chat_123", Path("/tmp/ws")
-        )
+        result = await bot._process_tool_calls(choice, messages, "chat_123", Path("/tmp/ws"))
 
         assert result[0]["args"] == {}  # fallback to empty dict
 
@@ -1024,9 +1062,7 @@ class TestProcessToolCalls:
         bot._tool_executor.execute = AsyncMock(return_value="ok")
 
         messages = []
-        result = await bot._process_tool_calls(
-            choice, messages, "chat_123", Path("/tmp/ws")
-        )
+        result = await bot._process_tool_calls(choice, messages, "chat_123", Path("/tmp/ws"))
 
         assert result[0]["args"] == {}
 
@@ -1103,9 +1139,7 @@ class TestProcessToolCalls:
         )
 
         messages = []
-        result = await bot._process_tool_calls(
-            choice, messages, "chat_123", Path("/tmp/ws")
-        )
+        result = await bot._process_tool_calls(choice, messages, "chat_123", Path("/tmp/ws"))
         assert result == []
         # Only the assistant message dict was appended
         assert len(messages) == 1
@@ -1126,9 +1160,7 @@ class TestProcessToolCalls:
         )
 
         messages = []
-        result = await bot._process_tool_calls(
-            choice, messages, "chat_123", Path("/tmp/ws")
-        )
+        result = await bot._process_tool_calls(choice, messages, "chat_123", Path("/tmp/ws"))
         assert result == []
 
     async def test_tool_result_appended_to_messages(self):
@@ -1156,6 +1188,80 @@ class TestProcessToolCalls:
         assert tool_msg["role"] == "tool"
         assert tool_msg["tool_call_id"] == "tc_999"
         assert tool_msg["content"] == "executed result"
+
+    async def test_multiple_tool_calls_execute_in_parallel(self):
+        """Multiple tool calls run concurrently, not sequentially."""
+        bot = _make_bot()
+        tc1 = _make_tool_call(call_id="c1", name="web_search", arguments='{"q": "a"}')
+        tc2 = _make_tool_call(call_id="c2", name="bash", arguments='{"cmd": "ls"}')
+
+        choice = MagicMock()
+        choice.message.tool_calls = [tc1, tc2]
+        choice.message.content = None
+
+        bot._llm.tool_call_to_dict = MagicMock(
+            return_value={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [],
+            }
+        )
+
+        execution_order: list[str] = []
+
+        async def _mock_execute(**kwargs):
+            name = kwargs["tool_call"].function.name
+            execution_order.append(f"start:{name}")
+            await asyncio.sleep(0)
+            execution_order.append(f"end:{name}")
+            return f"result_{name}"
+
+        bot._tool_executor.execute = _mock_execute
+
+        messages = []
+        result = await bot._process_tool_calls(choice, messages, "chat_123", Path("/tmp/ws"))
+
+        # Both tools should have started before either finished (parallel)
+        assert execution_order[0].startswith("start:")
+        assert execution_order[1].startswith("start:")
+        # Results preserved in original order
+        assert len(result) == 2
+        assert result[0]["name"] == "web_search"
+        assert result[1]["name"] == "bash"
+        assert messages[1]["tool_call_id"] == "c1"
+        assert messages[2]["tool_call_id"] == "c2"
+
+    async def test_parallel_malformed_tool_does_not_block_siblings(self):
+        """A malformed tool call (missing function) doesn't block other tool calls."""
+        bot = _make_bot()
+        tc1 = _make_tool_call(call_id="c1", name="web_search", arguments='{"q": "a"}')
+        tc2 = MagicMock()
+        tc2.id = "c2"
+        tc2.function = None
+
+        choice = MagicMock()
+        choice.message.tool_calls = [tc1, tc2]
+        choice.message.content = None
+
+        bot._llm.tool_call_to_dict = MagicMock(
+            return_value={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [],
+            }
+        )
+        bot._tool_executor.execute = AsyncMock(return_value="search result")
+
+        messages = []
+        result = await bot._process_tool_calls(choice, messages, "chat_123", Path("/tmp/ws"))
+
+        assert len(result) == 2
+        assert result[0]["name"] == "web_search"
+        assert result[0]["result"] == "search result"
+        assert result[1]["name"] == "unknown"
+        assert "Malformed" in result[1]["result"]
+        assert messages[1]["tool_call_id"] == "c1"
+        assert messages[2]["tool_call_id"] == "c2"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1225,9 +1331,7 @@ class TestProcess:
         bot._routing = routing
 
         tool_call = _make_tool_call()
-        tool_response = _make_llm_response(
-            finish_reason="tool_calls", tool_calls=[tool_call]
-        )
+        tool_response = _make_llm_response(finish_reason="tool_calls", tool_calls=[tool_call])
         stop_response = _make_llm_response(content="Here's what I found")
         bot._llm.chat = AsyncMock(side_effect=[tool_response, stop_response])
         bot._llm.tool_call_to_dict = MagicMock(
@@ -1309,13 +1413,16 @@ class TestRecoverPendingMessages:
         queued_msg.chat_id = "chat_456"
         queued_msg.text = "Hello from crash"
         queued_msg.sender_name = "Bob"
+        queued_msg.sender_id = "1234567890"
         queue.recover_stale = AsyncMock(return_value=[queued_msg])
         bot = _make_bot(message_queue=queue)
+        channel = MagicMock()
+        channel._is_allowed = MagicMock(return_value=True)
 
         # Mock handle_message to succeed
         bot.handle_message = AsyncMock(return_value="response")
 
-        result = await bot.recover_pending_messages()
+        result = await bot.recover_pending_messages(channel=channel)
         assert result["total_found"] == 1
         assert result["recovered"] == 1
         assert result["failed"] == 0
@@ -1328,16 +1435,20 @@ class TestRecoverPendingMessages:
         q1.chat_id = "c1"
         q1.text = "msg1"
         q1.sender_name = "A"
+        q1.sender_id = "1234"
         q2 = MagicMock()
         q2.message_id = "m2"
         q2.chat_id = "c2"
         q2.text = "msg2"
         q2.sender_name = "B"
+        q2.sender_id = "5678"
         queue.recover_stale = AsyncMock(return_value=[q1, q2])
         bot = _make_bot(message_queue=queue)
         bot.handle_message = AsyncMock(return_value="ok")
+        channel = MagicMock()
+        channel._is_allowed = MagicMock(return_value=True)
 
-        result = await bot.recover_pending_messages()
+        result = await bot.recover_pending_messages(channel=channel)
         assert result["total_found"] == 2
         assert result["recovered"] == 2
 
@@ -1348,20 +1459,22 @@ class TestRecoverPendingMessages:
         q1.chat_id = "c1"
         q1.text = "ok"
         q1.sender_name = "A"
+        q1.sender_id = "1234"
         q2 = MagicMock()
         q2.message_id = "m2"
         q2.chat_id = "c2"
         q2.text = "fail"
         q2.sender_name = "B"
+        q2.sender_id = "5678"
         queue.recover_stale = AsyncMock(return_value=[q1, q2])
         bot = _make_bot(message_queue=queue)
+        channel = MagicMock()
+        channel._is_allowed = MagicMock(return_value=True)
 
         # First succeeds, second fails
-        bot.handle_message = AsyncMock(
-            side_effect=["ok", RuntimeError("recovery failed")]
-        )
+        bot.handle_message = AsyncMock(side_effect=["ok", RuntimeError("recovery failed")])
 
-        result = await bot.recover_pending_messages()
+        result = await bot.recover_pending_messages(channel=channel)
         assert result["total_found"] == 2
         assert result["recovered"] == 1
         assert result["failed"] == 1
@@ -1376,11 +1489,14 @@ class TestRecoverPendingMessages:
         q1.chat_id = "c1"
         q1.text = "bad"
         q1.sender_name = "A"
+        q1.sender_id = "1234"
         queue.recover_stale = AsyncMock(return_value=[q1])
         bot = _make_bot(message_queue=queue)
+        channel = MagicMock()
+        channel._is_allowed = MagicMock(return_value=True)
         bot.handle_message = AsyncMock(side_effect=RuntimeError("fail"))
 
-        result = await bot.recover_pending_messages()
+        result = await bot.recover_pending_messages(channel=channel)
         assert result["recovered"] == 0
         assert result["failed"] == 1
 
@@ -1400,8 +1516,11 @@ class TestRecoverPendingMessages:
         queued_msg.chat_id = "c_rec"
         queued_msg.text = "recovered text"
         queued_msg.sender_name = "Alice"
+        queued_msg.sender_id = "1234"
         queue.recover_stale = AsyncMock(return_value=[queued_msg])
         bot = _make_bot(message_queue=queue)
+        channel = MagicMock()
+        channel._is_allowed = MagicMock(return_value=True)
 
         captured_msg = None
 
@@ -1412,7 +1531,7 @@ class TestRecoverPendingMessages:
 
         bot.handle_message = capture_handle
 
-        await bot.recover_pending_messages()
+        await bot.recover_pending_messages(channel=channel)
         assert captured_msg is not None
         assert captured_msg.message_id == "m_rec"
         assert captured_msg.chat_id == "c_rec"
@@ -1488,9 +1607,7 @@ class TestProcessScheduled:
         channel.get_channel_prompt = MagicMock(return_value="Use WhatsApp formatting")
 
         with (
-            patch(
-                "src.bot.build_context", new_callable=AsyncMock, return_value=[]
-            ) as mock_build,
+            patch("src.bot.build_context", new_callable=AsyncMock, return_value=[]) as mock_build,
             patch("src.bot.parse_meta", return_value=("ok", None)),
         ):
             await bot.process_scheduled(
@@ -1509,9 +1626,7 @@ class TestProcessScheduled:
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
-            patch(
-                "src.bot.build_context", new_callable=AsyncMock, return_value=[]
-            ) as mock_build,
+            patch("src.bot.build_context", new_callable=AsyncMock, return_value=[]) as mock_build,
             patch("src.bot.parse_meta", return_value=("ok", None)),
         ):
             await bot.process_scheduled(
@@ -1662,9 +1777,7 @@ class TestHandleMessageEndToEnd:
                 return_value=[{"role": "system", "content": "You are a math tutor."}],
             ),
             patch("src.bot.parse_meta", return_value=("2+2 equals 4.", None)),
-            patch.object(
-                bot, "_load_instruction", return_value="You are a math tutor."
-            ),
+            patch.object(bot, "_load_instruction", return_value="You are a math tutor."),
         ):
             result = await bot.handle_message(msg)
 
@@ -1679,9 +1792,7 @@ class TestHandleMessageEndToEnd:
         routing.match_with_rule = MagicMock(return_value=(rule, "search.md"))
         bot._routing = routing
 
-        tool_call = _make_tool_call(
-            name="web_search", arguments='{"query": "Python tutorials"}'
-        )
+        tool_call = _make_tool_call(name="web_search", arguments='{"query": "Python tutorials"}')
         tool_response = _make_llm_response(
             finish_reason="tool_calls",
             tool_calls=[tool_call],

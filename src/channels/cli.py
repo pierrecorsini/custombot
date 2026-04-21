@@ -69,6 +69,7 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
         """Start the interactive REPL loop."""
         self._running = True
         log.info("CommandLine channel starting (chat_id=%s)", self._chat_id)
+        self.mark_connected()
 
         # Print colorful welcome banner
         console.print("")
@@ -114,9 +115,7 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
                     channel_type="cli",
                     fromMe=False,
                     toMe=True,  # CLI is always a direct message to the bot
-                    correlation_id=str(uuid.uuid4())[
-                        :8
-                    ],  # Generate correlation ID for CLI
+                    correlation_id=str(uuid.uuid4())[:8],  # Generate correlation ID for CLI
                 )
 
                 # Create stream callback for real-time tool execution logging
@@ -125,9 +124,7 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
 
                 # Process the message with channel and stream callback
                 try:
-                    response = await handler(
-                        msg, channel=self, stream_callback=stream_callback
-                    )
+                    response = await handler(msg, channel=self, stream_callback=stream_callback)
                     if response:
                         self._print_response(response)
                 except Exception as exc:
@@ -171,14 +168,10 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
         """
         self._print_response(text)
 
-    async def send_audio(
-        self, chat_id: str, file_path: Path, *, ptt: bool = False
-    ) -> None:
+    async def send_audio(self, chat_id: str, file_path: Path, *, ptt: bool = False) -> None:
         """Print audio file info in CLI mode."""
         kind = "voice note" if ptt else "audio"
-        console.print(
-            f"\n[bold magenta]🔊 {kind.title()}:[/bold magenta] {file_path}\n"
-        )
+        console.print(f"\n[bold magenta]🔊 {kind.title()}:[/bold magenta] {file_path}\n")
 
     async def send_document(
         self,
@@ -197,6 +190,10 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
         """Show typing indicator (no-op for CLI)."""
         pass
 
-    def stop(self) -> None:
+    async def close(self) -> None:
+        """Close CLI channel (no-op)."""
+        pass
+
+    def request_shutdown(self) -> None:
         """Signal the channel to stop."""
         self._running = False

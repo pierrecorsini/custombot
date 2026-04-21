@@ -54,11 +54,11 @@ async def test_whatsapp_channel_prompt_injected_into_system_message(tmp_path: Pa
     the WhatsApp formatting prompt must appear in the LLM system message.
     """
     from src.bot import Bot
-    from src.config import Config, LLMConfig, WhatsAppConfig, NeonizeConfig
+    from src.channels.whatsapp import WhatsAppChannel
+    from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
     from src.db import Database
     from src.memory import Memory
     from src.skills import SkillRegistry
-    from src.channels.whatsapp import WhatsAppChannel
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -71,9 +71,7 @@ async def test_whatsapp_channel_prompt_injected_into_system_message(tmp_path: Pa
     await db.connect()
 
     config = Config(
-        llm=LLMConfig(
-            api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
-        )
+        llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
     )
     memory = Memory(str(workspace))
     skills = SkillRegistry()
@@ -162,9 +160,7 @@ async def test_no_channel_means_no_channel_prompt(tmp_path: Path):
     await db.connect()
 
     config = Config(
-        llm=LLMConfig(
-            api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
-        )
+        llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
     )
     memory = Memory(str(workspace))
     skills = SkillRegistry()

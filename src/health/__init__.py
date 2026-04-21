@@ -7,13 +7,15 @@ Split into focused modules:
 - models: Data classes (HealthStatus, ComponentHealth, HealthReport)
 """
 
-from src.health.models import HealthStatus, ComponentHealth, HealthReport
 from src.health.checks import (
     check_database,
-    check_neonize,
+    check_disk_usage,
     check_llm_credentials,
+    check_neonize,
+    check_scheduler,
     get_token_usage_stats,
 )
+from src.health.models import ComponentHealth, HealthReport, HealthStatus
 from src.health.server import HealthServer, run_health_server
 
 __all__ = [
@@ -21,8 +23,10 @@ __all__ = [
     "ComponentHealth",
     "HealthReport",
     "check_database",
+    "check_disk_usage",
     "check_neonize",
     "check_llm_credentials",
+    "check_scheduler",
     "get_token_usage_stats",
     "HealthServer",
     "run_health_server",

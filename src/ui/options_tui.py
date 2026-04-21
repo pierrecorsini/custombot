@@ -19,13 +19,12 @@ Usage:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, List, Callable, Any
+from typing import Any, Callable, List, Optional
 
 import questionary
 
+from src.config import CONFIG_PATH, Config, load_config, save_config
 from src.ui.cli_output import cli
-from src.config import Config, load_config, save_config, CONFIG_PATH
-
 
 # Custom style for questionary prompts
 QUESTIONARY_STYLE = questionary.Style(
@@ -99,9 +98,7 @@ def _edit_field_list(
             )
 
         # Add navigation options
-        choices.append(
-            questionary.Choice("─────────────────────", value=None, disabled=True)
-        )
+        choices.append(questionary.Choice("─────────────────────", value=None, disabled=True))
         choices.append(questionary.Choice("✓ Done (save changes)", value="__done__"))
         choices.append(questionary.Choice("✗ Cancel", value="__cancel__"))
 

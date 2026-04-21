@@ -17,18 +17,112 @@ Persistence:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
+
+from src.constants import (
+    OUTBOUND_DEDUP_MAX_SIZE,
+    OUTBOUND_DEDUP_TTL_SECONDS,
+    SCHEDULER_MAX_RETRIES,
+    SCHEDULER_RETRY_INITIAL_DELAY,
+)
+from src.utils.retry import is_transient_error
 
 log = logging.getLogger(__name__)
 
 SCHEDULER_DIR = ".scheduler"
 TASKS_FILE = "tasks.json"
 TICK_SECONDS = 30  # check every 30s
+
+
+class OutboundDedupCache:
+    """Short-lived LRU cache that prevents duplicate outbound messages.
+
+    When scheduled tasks are retried (via ``_trigger_with_retry``), the first
+    attempt may succeed and deliver a response before the retry also succeeds
+    and delivers the same content again.  This cache tracks recently-sent
+    message hashes per chat and suppresses duplicates within a configurable
+    TTL window.
+
+    Thread-safety: All methods are synchronous and intended for use within
+    the single asyncio event-loop thread.  No locking is needed because
+    asyncio guarantees sequential execution between await points.
+    """
+
+    __slots__ = ("_cache", "_ttl", "_hits", "_misses")
+
+    def __init__(
+        self,
+        max_size: int = OUTBOUND_DEDUP_MAX_SIZE,
+        ttl: float = OUTBOUND_DEDUP_TTL_SECONDS,
+    ) -> None:
+        from src.utils import LRUDict
+
+        self._cache: LRUDict = LRUDict(max_size=max_size)
+        self._ttl = ttl
+        self._hits: int = 0
+        self._misses: int = 0
+
+    @staticmethod
+    def _make_key(chat_id: str, text: str) -> str:
+        """Content-addressable key from (chat_id, text) via SHA-256."""
+        return hashlib.sha256(f"{chat_id}\x00{text}".encode("utf-8")).hexdigest()
+
+    def is_duplicate(self, chat_id: str, text: str) -> bool:
+        """Check whether *text* was recently sent to *chat_id*.
+
+        Returns ``True`` if the same content was delivered to the same chat
+        within the TTL window (duplicate → should be suppressed).
+        Records the current timestamp on cache miss so future calls detect it.
+        """
+        key = self._make_key(chat_id, text)
+        now = time.monotonic()
+        sent_at = self._cache.get(key)
+        if sent_at is not None and (now - sent_at) < self._ttl:
+            self._hits += 1
+            return True
+        # Record for future checks
+        self._cache[key] = now
+        self._misses += 1
+        return False
+
+    def record(self, chat_id: str, text: str) -> None:
+        """Explicitly record that *text* was sent to *chat_id*.
+
+        Useful when the caller wants to record the send independently of
+        the duplicate check (e.g. after successful channel delivery).
+        """
+        key = self._make_key(chat_id, text)
+        self._cache[key] = time.monotonic()
+
+    @property
+    def stats(self) -> dict[str, int]:
+        """Return {hits, misses} counters for metrics reporting."""
+        return {"hits": self._hits, "misses": self._misses}
+
+
+def _track_dedup_hit() -> None:
+    """Report an outbound dedup cache hit to the global metrics collector."""
+    try:
+        from src.monitoring.performance import get_metrics_collector
+        get_metrics_collector().track_outbound_dedup_hit()
+    except Exception:  # pragma: no cover
+        pass  # metrics should never break the scheduler
+
+
+def _track_dedup_miss() -> None:
+    """Report an outbound dedup cache miss to the global metrics collector."""
+    try:
+        from src.monitoring.performance import get_metrics_collector
+        get_metrics_collector().track_outbound_dedup_miss()
+    except Exception:  # pragma: no cover
+        pass  # metrics should never break the scheduler
 
 
 def _now() -> datetime:
@@ -65,6 +159,12 @@ class TaskScheduler:
         # Cached UTC offset
         self._cached_utc_offset: float | None = None
         self._utc_offset_updated_at: float = 0.0
+        # Execution tracking for health checks
+        self._failure_count: int = 0
+        self._success_count: int = 0
+        self._recent_executions: deque[dict[str, Any]] = deque(maxlen=10)
+        # Outbound message dedup cache — prevents duplicate scheduled responses
+        self._dedup_cache = OutboundDedupCache()
 
     def configure(
         self,
@@ -75,6 +175,14 @@ class TaskScheduler:
         self._workspace = workspace
         self._on_trigger = on_trigger
         self._on_send = on_send
+
+    def set_on_send(self, callback: Callable[[str, str], Awaitable[None]]) -> None:
+        """Set the callback for delivering scheduled task results."""
+        self._on_send = callback
+
+    def set_on_trigger(self, callback: Callable[[str, str], Awaitable[str | None]]) -> None:
+        """Set the callback for triggering scheduled task processing."""
+        self._on_trigger = callback
 
     def start(self) -> None:
         if self._running:
@@ -93,7 +201,42 @@ class TaskScheduler:
                 pass
         log.info("Scheduler stopped")
 
+    def get_status(self) -> dict[str, Any]:
+        """Return scheduler status for health checks."""
+        total_tasks = sum(len(tasks) for tasks in self._tasks.values())
+        enabled_tasks = sum(
+            1 for tasks in self._tasks.values() for t in tasks if t.get("enabled", True)
+        )
+        chats_with_tasks = len(self._tasks)
+        return {
+            "running": self._running,
+            "total_tasks": total_tasks,
+            "enabled_tasks": enabled_tasks,
+            "chats_with_tasks": chats_with_tasks,
+            "success_count": self._success_count,
+            "failure_count": self._failure_count,
+            "recent_executions": list(self._recent_executions),
+        }
+
     # ── task CRUD ──────────────────────────────────────────────────────────
+
+    def _prepare_task(self, chat_id: str, task: dict[str, Any]) -> str:
+        """Prepare a scheduled task with ID and metadata. Returns the task_id."""
+        tasks = self._tasks.setdefault(chat_id, [])
+        existing_ids = {t["task_id"] for t in tasks if "task_id" in t}
+        counter = len(tasks) + 1
+        task_id = f"task_{counter:03d}"
+        while task_id in existing_ids:
+            counter += 1
+            task_id = f"task_{counter:03d}"
+        task.setdefault("task_id", task_id)
+        task["task_id"] = task_id
+        task["created"] = _now().isoformat()
+        task["last_run"] = None
+        task["last_result"] = None
+        task["enabled"] = True
+        tasks.append(task)
+        return task_id
 
     def add_task(self, chat_id: str, task: dict[str, Any]) -> str:
         """Add a scheduled task. Returns the task_id.
@@ -101,39 +244,13 @@ class TaskScheduler:
         Note: Persists synchronously. For async callers that care about
         event loop blocking, use add_task_async() instead.
         """
-        tasks = self._tasks.setdefault(chat_id, [])
-        existing_ids = {t["task_id"] for t in tasks if "task_id" in t}
-        counter = len(tasks) + 1
-        task_id = f"task_{counter:03d}"
-        while task_id in existing_ids:
-            counter += 1
-            task_id = f"task_{counter:03d}"
-        task.setdefault("task_id", task_id)
-        task["task_id"] = task_id
-        task["created"] = _now().isoformat()
-        task["last_run"] = None
-        task["last_result"] = None
-        task["enabled"] = True
-        tasks.append(task)
+        task_id = self._prepare_task(chat_id, task)
         self._persist_sync(chat_id)
         return task_id
 
     async def add_task_async(self, chat_id: str, task: dict[str, Any]) -> str:
         """Add a scheduled task with async persistence. Returns the task_id."""
-        tasks = self._tasks.setdefault(chat_id, [])
-        existing_ids = {t["task_id"] for t in tasks if "task_id" in t}
-        counter = len(tasks) + 1
-        task_id = f"task_{counter:03d}"
-        while task_id in existing_ids:
-            counter += 1
-            task_id = f"task_{counter:03d}"
-        task.setdefault("task_id", task_id)
-        task["task_id"] = task_id
-        task["created"] = _now().isoformat()
-        task["last_run"] = None
-        task["last_result"] = None
-        task["enabled"] = True
-        tasks.append(task)
+        task_id = self._prepare_task(chat_id, task)
         await self._persist_async(chat_id)
         return task_id
 
@@ -245,15 +362,49 @@ class TaskScheduler:
             utc_hour = utc_total_min // 60
             utc_minute = utc_total_min % 60
             # Python weekday: Mon=0..Sun=6
-            if (
-                now.weekday() in weekdays
-                and now.hour == utc_hour
-                and now.minute == utc_minute
-            ):
+            if now.weekday() in weekdays and now.hour == utc_hour and now.minute == utc_minute:
                 if not last_run or not _same_day(last_run, now.isoformat()):
                     return True
 
         return False
+
+    async def _trigger_with_retry(
+        self, chat_id: str, prompt: str, task_id: str,
+    ) -> str:
+        """Trigger the bot callback with retry for transient failures.
+
+        Uses exponential backoff with jitter. Only retries on transient
+        errors (timeouts, connection failures, rate limits). Permanent
+        failures (authentication, invalid prompt) fail immediately.
+        """
+        delay = SCHEDULER_RETRY_INITIAL_DELAY
+        for attempt in range(SCHEDULER_MAX_RETRIES + 1):
+            try:
+                return await self._on_trigger(chat_id, prompt)  # type: ignore[misc]
+            except Exception as exc:
+                if not is_transient_error(exc):
+                    raise
+                if attempt >= SCHEDULER_MAX_RETRIES:
+                    log.warning(
+                        "Retry exhausted for task %s after %d attempts",
+                        task_id,
+                        SCHEDULER_MAX_RETRIES + 1,
+                    )
+                    raise
+                from src.utils.retry import calculate_delay_with_jitter
+
+                actual_delay = calculate_delay_with_jitter(delay)
+                log.info(
+                    "Retrying task %s, attempt %d/%d after %.1fs (error: %s)",
+                    task_id,
+                    attempt + 1,
+                    SCHEDULER_MAX_RETRIES,
+                    actual_delay,
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(actual_delay)
+                delay *= 2
+        raise RuntimeError("Unreachable")  # pragma: no cover
 
     async def _execute_task(self, chat_id: str, task: dict[str, Any]) -> None:
         """Execute a due task by invoking the bot."""
@@ -264,18 +415,16 @@ class TaskScheduler:
         if compare and last_result:
             prompt = (
                 f"{prompt}\n\n"
-                f"[RÉSULTAT PRÉCÉDENT]:\n{last_result}\n\n"
-                f"Compare avec le résultat actuel et signale les changements."
+                f"[PREVIOUS RESULT]:\n{last_result}\n\n"
+                f"Compare with the current result and report any changes."
             )
 
         try:
             if not self._on_trigger:
-                log.warning(
-                    "No on_trigger callback — skipping task %s", task.get("task_id")
-                )
+                log.warning("No on_trigger callback — skipping task %s", task.get("task_id"))
                 return
 
-            result = await self._on_trigger(chat_id, prompt)
+            result = await self._trigger_with_retry(chat_id, prompt, task.get("task_id", ""))
             task["last_result"] = (result or "")[:2000]
             task["last_run"] = _now().isoformat()
             await self._persist_async(chat_id)
@@ -292,21 +441,48 @@ class TaskScheduler:
                     task["task_id"],
                 )
             else:
-                await self._on_send(
-                    chat_id,
-                    f"⏰ **{task.get('label', 'Tâche planifiée')}**\n\n{result}",
-                )
-                log.info(
-                    "Delivered scheduled task %s to chat %s",
-                    task["task_id"],
-                    chat_id,
-                )
+                formatted = f"⏰ **{task.get('label', 'Tâche planifiée')}**\n\n{result}"
+                # Outbound dedup: skip sending if the same content was
+                # already delivered to this chat within the TTL window.
+                # This prevents double-sends when _trigger_with_retry
+                # succeeds after an earlier attempt already delivered.
+                if self._dedup_cache.is_duplicate(chat_id, formatted):
+                    log.info(
+                        "Scheduled task %s response suppressed (duplicate outbound) for chat %s",
+                        task["task_id"],
+                        chat_id,
+                    )
+                    _track_dedup_hit()
+                else:
+                    await self._on_send(chat_id, formatted)
+                    # Record successful delivery for future dedup checks
+                    self._dedup_cache.record(chat_id, formatted)
+                    _track_dedup_miss()
+                    log.info(
+                        "Delivered scheduled task %s to chat %s",
+                        task["task_id"],
+                        chat_id,
+                    )
 
             log.info("Executed scheduled task %s for chat %s", task["task_id"], chat_id)
+            self._success_count += 1
+            self._recent_executions.append({
+                "task_id": task["task_id"],
+                "chat_id": chat_id,
+                "status": "success",
+                "timestamp": _now().isoformat(),
+                "error_summary": None,
+            })
         except Exception as exc:
-            log.error(
-                "Error executing task %s: %s", task.get("task_id"), exc, exc_info=True
-            )
+            self._failure_count += 1
+            self._recent_executions.append({
+                "task_id": task.get("task_id", "unknown"),
+                "chat_id": chat_id,
+                "status": "failure",
+                "timestamp": _now().isoformat(),
+                "error_summary": f"{type(exc).__name__}: {exc}"[:200],
+            })
+            log.error("Error executing task %s: %s", task.get("task_id"), exc, exc_info=True)
 
     # ── main loop ──────────────────────────────────────────────────────────
 
@@ -336,7 +512,7 @@ class TaskScheduler:
                                 "Scheduled task %s raised: %s",
                                 t.get("task_id"),
                                 result,
-                                exc_info=result,
+                                exc_info=(type(result), result, result.__traceback__),
                             )
             except asyncio.CancelledError:
                 raise

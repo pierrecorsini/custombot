@@ -39,11 +39,7 @@ class PathSecurityError(Exception):
 
 def _normalize_path(path: Path) -> str:
     """Normalize path for comparison (case-insensitive on Windows)."""
-    return (
-        str(path.resolve()).lower()
-        if platform.system() == "Windows"
-        else str(path.resolve())
-    )
+    return str(path.resolve()).lower() if platform.system() == "Windows" else str(path.resolve())
 
 
 def is_path_in_workspace(workspace_dir: Path, target_path: Path) -> bool:
@@ -328,7 +324,5 @@ def sanitize_command(workspace_dir: Path, command: str) -> str:
         validate_command_paths(workspace_dir, command)
         return command
     except PathSecurityError as e:
-        log.warning(
-            "Blocked command with unsafe path: %s (reason: %s)", e.path, e.reason
-        )
+        log.warning("Blocked command with unsafe path: %s (reason: %s)", e.path, e.reason)
         return f"❌ Security: {e}"

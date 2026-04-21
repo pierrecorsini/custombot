@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 import markdown
+
 from src.skills.base import BaseSkill, validate_input
 
 log = logging.getLogger(__name__)
@@ -120,8 +121,7 @@ class SendVoiceNote(BaseSkill):
             "language": {
                 "type": "string",
                 "description": (
-                    "Language code (e.g. 'en', 'es', 'fr'). "
-                    "Defaults to English if not specified."
+                    "Language code (e.g. 'en', 'es', 'fr'). Defaults to English if not specified."
                 ),
             },
         },
@@ -306,8 +306,7 @@ class GeneratePDFReport(BaseSkill):
             "filename": {
                 "type": "string",
                 "description": (
-                    "Custom filename for the PDF (without extension). "
-                    "Defaults to the title."
+                    "Custom filename for the PDF (without extension). Defaults to the title."
                 ),
             },
         },
@@ -323,9 +322,7 @@ class GeneratePDFReport(BaseSkill):
 
         # Sanitize filename
         safe_name = custom_filename or title
-        safe_name = "".join(
-            c if c.isalnum() or c in (" ", "-", "_") else "_" for c in safe_name
-        )
+        safe_name = "".join(c if c.isalnum() or c in (" ", "-", "_") else "_" for c in safe_name)
         safe_name = safe_name.strip()[:60] or "report"
 
         # Generate paths

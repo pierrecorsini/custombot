@@ -7,12 +7,26 @@ component status, and session metrics.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Optional
 
 from src.config import Config
-from src.constants import DEFAULT_SHUTDOWN_TIMEOUT, WORKSPACE_DIR
 
+if TYPE_CHECKING:
+    from src.bot import Bot
+    from src.channels.base import BaseChannel
+    from src.db import Database
+    from src.health import HealthServer
+    from src.llm import LLMClient
+    from src.message_queue import MessageQueue
+    from src.project.store import ProjectStore
+    from src.scheduler import TaskScheduler
+    from src.shutdown import GracefulShutdown
+    from src.vector_memory import VectorMemory
+from src.constants import DEFAULT_SHUTDOWN_TIMEOUT, WORKSPACE_DIR
 
 log = logging.getLogger("lifecycle")
 
@@ -116,23 +130,11 @@ def _log_skills_loaded(skills_registry) -> None:
         log.info("Skills loaded: %d", len(skills_list))
 
 
-def _log_connection_status(
-    service: str, status: str, details: str | None = None
+def _log_startup_complete(
+    start_time: float,
+    components: list[str],
+    component_durations: dict[str, float] | None = None,
 ) -> None:
-    """Log connection status for external services."""
-    verbosity = _get_verbosity()
-    if verbosity == "quiet":
-        return
-
-    if verbosity == "verbose":
-        if details:
-            log.info("[CONNECTION] %s - %s (%s)", service.upper(), status, details)
-        else:
-            log.info("[CONNECTION] %s - %s", service.upper(), status)
-    # Normal mode: skip connection logs (handled by CLI output)
-
-
-def _log_startup_complete(start_time: float, components: list[str]) -> None:
     """Log startup completion with timing and component summary."""
     duration = time.time() - start_time
     verbosity = _get_verbosity()
@@ -148,12 +150,14 @@ def _log_startup_complete(start_time: float, components: list[str]) -> None:
         log.info("Components initialized (%d):", len(components))
         for comp in components:
             log.info("  ✓ %s", comp)
+        if component_durations:
+            log.info("Per-component init timing:")
+            for name, dur in component_durations.items():
+                log.info("  %-25s %.3fs", name, dur)
         log.info("")
     else:
         # Normal mode: single line summary
-        log.info(
-            "Startup complete (%.2fs) — %d components ready", duration, len(components)
-        )
+        log.info("Startup complete (%.2fs) — %d components ready", duration, len(components))
 
 
 def _log_shutdown_begin(metrics: dict) -> None:
@@ -170,9 +174,7 @@ def _log_shutdown_begin(metrics: dict) -> None:
         log.info("=" * 60)
         log.info("Session metrics:")
         log.info("  %-25s = %s", "uptime", f"{metrics.get('uptime', 0):.1f}s")
-        log.info(
-            "  %-25s = %d", "messages_processed", metrics.get("messages_processed", 0)
-        )
+        log.info("  %-25s = %d", "messages_processed", metrics.get("messages_processed", 0))
         log.info("  %-25s = %d", "skills_executed", metrics.get("skills_executed", 0))
         log.info("  %-25s = %d", "errors_count", metrics.get("errors_count", 0))
     else:
@@ -214,3 +216,139 @@ def _log_shutdown_complete(start_time: float) -> None:
     else:
         # Normal mode: single line
         log.info("Shutdown complete (%.2fs)", duration)
+
+
+async def perform_shutdown(
+    shutdown: "GracefulShutdown",
+    channel: "BaseChannel",
+    scheduler: "TaskScheduler",
+    health_server: "HealthServer | None",
+    db: "Database",
+    vector_memory: Optional["VectorMemory"],
+    project_store: "ProjectStore",
+    message_queue: "MessageQueue",
+    llm: "LLMClient",
+    session_metrics: dict,
+    log: logging.Logger,
+    verbose: bool = False,
+    bot: Optional["Bot"] = None,
+    executor: Optional[ThreadPoolExecutor] = None,
+) -> None:
+    """Execute the 7-step graceful shutdown sequence."""
+    from src.ui.cli_output import cli as cli_output
+
+    shutdown_begin_time = time.time()
+    if "uptime" not in session_metrics:
+        session_metrics["uptime"] = time.time() - session_metrics.get("start_time", time.time())
+
+    _log_shutdown_begin(session_metrics)
+    cli_output.warning("Initiating graceful shutdown...")
+
+    total_cleanup_steps = 7
+
+    # 1. Stop accepting new messages
+    _log_cleanup_step(1, total_cleanup_steps, "Stopping message acceptance and polling")
+    shutdown.request_shutdown()
+    channel.request_shutdown()
+
+    # 2. Wait for in-flight operations
+    _log_cleanup_step(2, total_cleanup_steps, "Waiting for in-flight operations")
+    cli_output.dim("  Waiting for in-flight operations to complete...")
+    completed = await shutdown.wait_for_in_flight()
+    if not completed:
+        log.warning("Force proceeding after timeout")
+        cli_output.warning("Timed out waiting for operations, forcing shutdown")
+
+    # 3. Stop scheduler and health server in parallel
+    _log_cleanup_step(3, total_cleanup_steps, "Stopping scheduler, health server, and channel")
+    cli_output.dim("  Stopping background services...")
+
+    async def _stop_scheduler():
+        try:
+            await scheduler.stop()
+        except Exception as e:
+            log.warning("Error stopping scheduler: %s", e)
+
+    async def _stop_health():
+        if health_server:
+            try:
+                await health_server.stop()
+            except Exception as e:
+                log.warning("Error stopping health server: %s", e)
+
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(_stop_scheduler())
+        tg.create_task(_stop_health())
+
+    # 4. Close channel
+    _log_cleanup_step(4, total_cleanup_steps, "Closing channel connections")
+    cli_output.dim("  Closing channel connections...")
+    try:
+        await channel.close()
+    except Exception as e:
+        log.warning("Error closing channel: %s", e)
+
+    # 5. Close project store, vector memory, message queue, and LLM client in parallel
+    _log_cleanup_step(5, total_cleanup_steps, "Closing project store, vector memory, message queue, and LLM")
+    cli_output.dim("  Closing storage backends and LLM client...")
+
+    def _close_project_store():
+        try:
+            project_store.close()
+        except Exception as e:
+            log.warning("Error closing project store: %s", e)
+
+    def _close_vector_memory():
+        if vector_memory is None:
+            return
+        try:
+            vector_memory.close()
+        except Exception as e:
+            log.warning("Error closing vector memory: %s", e)
+
+    async def _close_message_queue():
+        try:
+            await message_queue.close()
+        except Exception as e:
+            log.warning("Error closing message queue: %s", e)
+
+    async def _close_llm():
+        try:
+            await llm.close()
+        except Exception as e:
+            log.warning("Error closing LLM client: %s", e)
+
+    async def _stop_memory_monitoring():
+        if bot is None:
+            return
+        try:
+            await bot.stop_memory_monitoring()
+        except Exception as e:
+            log.warning("Error stopping memory monitoring: %s", e)
+
+    await asyncio.gather(
+        asyncio.to_thread(_close_project_store),
+        asyncio.to_thread(_close_vector_memory),
+        _close_message_queue(),
+        _close_llm(),
+        _stop_memory_monitoring(),
+    )
+
+    # 6. Shut down the thread pool executor (after all to_thread calls are done)
+    _log_cleanup_step(6, total_cleanup_steps, "Shutting down thread pool executor")
+    if executor is not None:
+        try:
+            executor.shutdown(wait=False)
+        except Exception as e:
+            log.warning("Error shutting down thread pool executor: %s", e)
+
+    # 7. Close database (must be last — other closers may still write)
+    _log_cleanup_step(7, total_cleanup_steps, "Closing database connections")
+    cli_output.dim("  Closing database connections...")
+    try:
+        await db.close()
+    except Exception as e:
+        log.warning("Error closing database: %s", e)
+
+    _log_shutdown_complete(shutdown_begin_time)
+    cli_output.success("Shutdown complete.")

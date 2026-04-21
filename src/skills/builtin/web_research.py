@@ -127,7 +127,7 @@ class WebResearchSkill(BaseSkill):
 
     async def _crawl_single(self, url: str, selector: str) -> str:
         """Crawl a single URL using crawl4ai directly (no shell injection risk)."""
-        from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+        from crawl4ai import AsyncWebCrawler, CacheMode, CrawlerRunConfig
 
         try:
             config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
@@ -135,9 +135,7 @@ class WebResearchSkill(BaseSkill):
                 config.css_selector = selector
 
             async with AsyncWebCrawler() as crawler:
-                result = await asyncio.wait_for(
-                    crawler.arun(url=url, config=config), timeout=60.0
-                )
+                result = await asyncio.wait_for(crawler.arun(url=url, config=config), timeout=60.0)
 
             if result.success:
                 content = result.markdown.raw_markdown or ""
@@ -148,9 +146,7 @@ class WebResearchSkill(BaseSkill):
         except Exception as e:
             return f"Error crawling {url}: {e}"
 
-    async def _search_and_crawl(
-        self, query: str, max_results: int, selector: str
-    ) -> str:
+    async def _search_and_crawl(self, query: str, max_results: int, selector: str) -> str:
         """Search and then crawl the top results."""
         search_result = await self._search(query, max_results)
 

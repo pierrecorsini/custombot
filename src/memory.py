@@ -17,19 +17,26 @@ import asyncio
 import hashlib
 import logging
 import shutil
-from collections import OrderedDict
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 from src.constants import MAX_LRU_CACHE_SIZE
+from src.security import PathSecurityError, is_path_in_workspace
+from src.utils import LRUDict
+from src.utils.path import sanitize_path_component
 
 log = logging.getLogger(__name__)
 
 MEMORY_FILENAME = "MEMORY.md"
 AGENTS_FILENAME = "AGENTS.md"
 RECOVERY_LOG_FILENAME = "RECOVERY.md"
+ORIGIN_ID_FILENAME = ".chat_id"
+
+# SHA256 checksum truncated to this many hex characters (128 bits)
+CHECKSUM_LENGTH = 32
 BACKUP_DIR = "backups"
 
 
@@ -74,40 +81,50 @@ class Memory:
     def __init__(self, workspace_root: str) -> None:
         self._root = Path(workspace_root)
         # LRU-bounded caches to prevent unbounded memory growth with many chats
-        self._memory_cache: OrderedDict[str, tuple[float, str]] = OrderedDict()
-        self._agents_cache: OrderedDict[str, tuple[float, str]] = OrderedDict()
-        self._max_cache_size = MAX_LRU_CACHE_SIZE
-
-    def _cache_get(self, cache: OrderedDict, chat_id: str) -> tuple[float, str] | None:
-        """Get from LRU cache, moving key to end (most recently used)."""
-        if chat_id in cache:
-            cache.move_to_end(chat_id)
-            return cache[chat_id]
-        return None
-
-    def _cache_put(
-        self, cache: OrderedDict, chat_id: str, value: tuple[float, str]
-    ) -> None:
-        """Put into LRU cache, evicting oldest entry if at capacity."""
-        if chat_id in cache:
-            cache.move_to_end(chat_id)
-            cache[chat_id] = value
-        else:
-            if len(cache) >= self._max_cache_size:
-                cache.popitem(last=False)
-            cache[chat_id] = value
+        self._memory_cache: LRUDict = LRUDict(max_size=MAX_LRU_CACHE_SIZE)
+        self._agents_cache: LRUDict = LRUDict(max_size=MAX_LRU_CACHE_SIZE)
 
     # ── internal ───────────────────────────────────────────────────────────
 
     def _chat_dir(self, chat_id: str) -> Path:
         """Return the chat directory path without creating it."""
-        return self._root / "whatsapp_data" / _safe_name(chat_id)
+        d = self._root / "whatsapp_data" / sanitize_path_component(chat_id)
+        self._validate_path(d, chat_id)
+        return d
 
     def _ensure_chat_dir(self, chat_id: str) -> Path:
         """Return the chat directory path, creating it if needed."""
-        d = self._chat_dir(chat_id)
+        d = self._root / "whatsapp_data" / sanitize_path_component(chat_id)
+        self._validate_path(d, chat_id)
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def _validate_path(self, path: Path, chat_id: str) -> None:
+        """Ensure resolved path stays within the workspace root."""
+        workspace_data = self._root / "whatsapp_data"
+        if not is_path_in_workspace(workspace_data, path.resolve()):
+            log.warning("Path traversal blocked for chat_id=%s", chat_id)
+            raise PathSecurityError(
+                f"Workspace escape blocked for chat_id={chat_id!r}",
+                path=str(path),
+                reason="path_traversal",
+            )
+
+    @staticmethod
+    def _stat_and_read(path: Path, cached_mtime: Optional[float]) -> tuple:
+        """Stat + conditionally read a file in a single thread hop.
+
+        Returns (None, None) if the file does not exist, keeping the
+        existence check off the event loop.
+        """
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            return None, None
+        mtime = st.st_mtime
+        if cached_mtime is not None and mtime == cached_mtime:
+            return mtime, None
+        return mtime, path.read_text(encoding="utf-8")
 
     # ── public API ─────────────────────────────────────────────────────────
 
@@ -122,35 +139,48 @@ class Memory:
         d = self._ensure_chat_dir(chat_id)
         agents_path = d / AGENTS_FILENAME
         if not agents_path.exists():
-            agents_path.write_text(_DEFAULT_AGENTS_MD, encoding="utf-8")
+            # Atomic write: temp file → rename prevents corruption from
+            # concurrent calls for the same new chat
+            try:
+                tmp = d / f"{AGENTS_FILENAME}.tmp"
+                tmp.write_text(_DEFAULT_AGENTS_MD, encoding="utf-8")
+                tmp.rename(agents_path)
+            except FileExistsError:
+                # Another coroutine won the race — that's fine
+                pass
             self._agents_cache.pop(chat_id, None)
             log.debug("Seeded %s", agents_path)
         # Store original chat_id for reverse lookup (JID reconstruction)
         origin_path = d / self.ORIGIN_ID_FILENAME
         if not origin_path.exists():
-            origin_path.write_text(chat_id, encoding="utf-8")
+            try:
+                tmp = d / f"{self.ORIGIN_ID_FILENAME}.tmp"
+                tmp.write_text(chat_id, encoding="utf-8")
+                tmp.rename(origin_path)
+            except FileExistsError:
+                pass
         return d
 
     async def read_memory(self, chat_id: str) -> Optional[str]:
         """Return the contents of MEMORY.md, or None if it doesn't exist."""
         path = self._chat_dir(chat_id) / MEMORY_FILENAME
-        if not path.exists():
+        cached = self._memory_cache.get(chat_id)
+        cached_mtime = cached[0] if cached else None
+        mtime, content = await asyncio.to_thread(
+            self._stat_and_read, path, cached_mtime,
+        )
+        if mtime is None:
             return None
-        # Check mtime-based cache (proper LRU via _cache_get/_cache_put)
-        mtime = (await asyncio.to_thread(path.stat)).st_mtime
-        cached = self._cache_get(self._memory_cache, chat_id)
-        if cached and cached[0] == mtime:
+        if content is None:
             return cached[1] or None
-        content = (await asyncio.to_thread(path.read_text, encoding="utf-8")).strip()
-        self._cache_put(self._memory_cache, chat_id, (mtime, content))
+        content = content.strip()
+        self._memory_cache[chat_id] = (mtime, content)
         return content or None
 
     async def write_memory(self, chat_id: str, content: str) -> None:
         """Overwrite MEMORY.md with new content."""
         path = self._ensure_chat_dir(chat_id) / MEMORY_FILENAME
-        await asyncio.to_thread(
-            path.write_text, content.strip() + "\n", encoding="utf-8"
-        )
+        await asyncio.to_thread(path.write_text, content.strip() + "\n", encoding="utf-8")
         self._memory_cache.pop(chat_id, None)
         log.debug("Memory updated for chat %s", chat_id)
 
@@ -164,9 +194,9 @@ class Memory:
             content: Memory content string
 
         Returns:
-            Hexadecimal checksum string (first 16 chars)
+            Hexadecimal checksum string (first 32 chars = 128 bits)
         """
-        return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()[:CHECKSUM_LENGTH]
 
     def _get_checksum_file(self, chat_id: str) -> Path:
         """Get the checksum file path for a chat's memory."""
@@ -212,7 +242,7 @@ class Memory:
                         chat_id,
                     )
 
-        except Exception as e:
+        except OSError as e:
             result.is_corrupted = True
             result.error_details.append(f"Failed to read memory file: {e}")
             log.error("Failed to read memory file for chat %s: %s", chat_id, e)
@@ -238,20 +268,18 @@ class Memory:
         backup_dir = self._root / BACKUP_DIR
         backup_dir.mkdir(parents=True, exist_ok=True)
 
-        safe_id = _safe_name(chat_id)
+        safe_id = sanitize_path_component(chat_id)
         backup_file = backup_dir / f"{safe_id}_{timestamp}.md.bak"
 
         try:
             shutil.copy2(path, backup_file)
             log.info("Created memory backup: %s", backup_file)
             return str(backup_file)
-        except Exception as e:
+        except OSError as e:
             log.error("Failed to create memory backup: %s", e)
             return None
 
-    def repair_memory_file(
-        self, chat_id: str, backup: bool = True
-    ) -> MemoryCorruptionResult:
+    def repair_memory_file(self, chat_id: str, backup: bool = True) -> MemoryCorruptionResult:
         """
         Attempt to repair a corrupted MEMORY.md file.
 
@@ -289,7 +317,7 @@ class Memory:
             result.repaired = True
             log.info("Repaired memory file for chat %s", chat_id)
 
-        except Exception as e:
+        except OSError as e:
             result.error_details.append(f"Failed to repair: {e}")
             log.error("Failed to repair memory file for chat %s: %s", chat_id, e)
 
@@ -329,13 +357,12 @@ class Memory:
         """
         path = self._ensure_chat_dir(chat_id) / MEMORY_FILENAME
         stripped_content = content.strip()
+        file_content = stripped_content + "\n"
 
-        await asyncio.to_thread(
-            path.write_text, stripped_content + "\n", encoding="utf-8"
-        )
+        await asyncio.to_thread(path.write_text, file_content, encoding="utf-8")
 
-        # Write checksum
-        checksum = self._calculate_checksum(stripped_content)
+        # Write checksum of the actual file content
+        checksum = self._calculate_checksum(file_content)
         checksum_path = self._get_checksum_file(chat_id)
         await asyncio.to_thread(checksum_path.write_text, checksum, encoding="utf-8")
 
@@ -344,18 +371,19 @@ class Memory:
     async def read_agents_md(self, chat_id: str) -> str:
         """Return AGENTS.md content (system persona / extra instructions)."""
         path = self._chat_dir(chat_id) / AGENTS_FILENAME
-        if not path.exists():
+        cached = self._agents_cache.get(chat_id)
+        cached_mtime = cached[0] if cached else None
+        mtime, content = await asyncio.to_thread(
+            self._stat_and_read, path, cached_mtime,
+        )
+        if mtime is None:
             raise FileNotFoundError(
                 f"AGENTS.md not found for chat {chat_id} at {path}. "
                 f"Run ensure_workspace() first or check workspace integrity."
             )
-        # Check mtime-based cache (proper LRU via _cache_get/_cache_put)
-        mtime = (await asyncio.to_thread(path.stat)).st_mtime
-        cached = self._cache_get(self._agents_cache, chat_id)
-        if cached and cached[0] == mtime:
+        if content is None:
             return cached[1]
-        content = await asyncio.to_thread(path.read_text, encoding="utf-8")
-        self._cache_put(self._agents_cache, chat_id, (mtime, content))
+        self._agents_cache[chat_id] = (mtime, content)
         return content
 
     def workspace_path(self, chat_id: str) -> Path:
@@ -444,30 +472,8 @@ class Memory:
             log.debug("Cleared recovery log for chat %s", chat_id)
 
 
-# ── utilities ──────────────────────────────────────────────────────────────
+# ── backward compatibility ──────────────────────────────────────────────────
 
-
-def _safe_name(chat_id: str) -> str:
-    """Strip characters that are unsafe in filesystem paths.
-
-    Uses the same replacement map as db._sanitize_chat_id_for_path()
-    to ensure workspace directories and message files use consistent names.
-    """
-    _SANITIZE_MAP = {
-        "@": "_at_",
-        ":": "_col_",
-        "/": "_sl_",
-        "\\": "_bs_",
-        "|": "_pi_",
-        "?": "_qm_",
-        "*": "_as_",
-        "<": "_lt_",
-        ">": "_gt_",
-        '"': "_dq_",
-    }
-    result = chat_id
-    for char, replacement in _SANITIZE_MAP.items():
-        result = result.replace(char, replacement)
-    # Replace any remaining non-alphanumeric characters (except -_. and the replacements above)
-    result = "".join(c if c.isalnum() or c in "-_." else "_" for c in result)
-    return result
+# Alias so external modules that imported ``_safe_name`` from this file
+# keep working without changes.
+_safe_name = sanitize_path_component

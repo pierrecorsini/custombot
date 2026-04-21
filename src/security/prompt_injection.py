@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -189,12 +190,26 @@ _MEDIUM_CONFIDENCE_PATTERNS: list[tuple[str, str]] = [
 ]
 
 # Compiled regex patterns for efficiency
-_HIGH_CONFIDENCE_COMPILED = [
-    (re.compile(p), name) for p, name in _HIGH_CONFIDENCE_PATTERNS
-]
-_MEDIUM_CONFIDENCE_COMPILED = [
-    (re.compile(p), name) for p, name in _MEDIUM_CONFIDENCE_PATTERNS
-]
+_HIGH_CONFIDENCE_COMPILED = [(re.compile(p), name) for p, name in _HIGH_CONFIDENCE_PATTERNS]
+_MEDIUM_CONFIDENCE_COMPILED = [(re.compile(p), name) for p, name in _MEDIUM_CONFIDENCE_PATTERNS]
+
+# Combined single-pass patterns: all patterns OR'd together for one regex.search()
+# instead of iterating N patterns sequentially. Used by detect_injection().
+_HIGH_COMBINED = re.compile(
+    "(?i)"
+    + "|".join(
+        f"(?P<_{i}>{p.removeprefix('(?i)')})" for i, (p, _) in enumerate(_HIGH_CONFIDENCE_PATTERNS)
+    )
+)
+_MEDIUM_COMBINED = re.compile(
+    "(?i)"
+    + "|".join(
+        f"(?P<_{i}>{p.removeprefix('(?i)')})"
+        for i, (p, _) in enumerate(_MEDIUM_CONFIDENCE_PATTERNS)
+    )
+)
+_HIGH_NAMES = [name for _, name in _HIGH_CONFIDENCE_PATTERNS]
+_MEDIUM_NAMES = [name for _, name in _MEDIUM_CONFIDENCE_PATTERNS]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -262,6 +277,9 @@ def detect_injection(text: str) -> InjectionDetectionResult:
     Supports English, German, French, Spanish, Russian, Chinese,
     Portuguese, and Japanese injection patterns.
 
+    Applies NFKC Unicode normalization to prevent bypasses via confusable
+    characters (e.g., Cyrillic 'о' instead of Latin 'o').
+
     Args:
         text: The user message text to check.
 
@@ -271,20 +289,28 @@ def detect_injection(text: str) -> InjectionDetectionResult:
     if not text or not text.strip():
         return InjectionDetectionResult(detected=False)
 
+    # Normalize Unicode to catch confusable character bypasses
+    normalized = unicodedata.normalize("NFKC", text)
+
     matched: list[str] = []
     max_confidence = 0.0
 
-    # Check high-confidence patterns (confidence = 0.9)
-    for pattern, name in _HIGH_CONFIDENCE_COMPILED:
-        if pattern.search(text):
-            matched.append(name)
-            max_confidence = max(max_confidence, 0.9)
+    # Single-pass scan using combined alternation regex (much faster than
+    # iterating N patterns sequentially — one regex engine pass per tier)
+    m = _HIGH_COMBINED.search(normalized)
+    if m:
+        # Determine which named group matched
+        for i, name in enumerate(_HIGH_NAMES):
+            if m.group(f"_{i}") is not None:
+                matched.append(name)
+        max_confidence = 0.9
 
-    # Check medium-confidence patterns (confidence = 0.6)
-    for pattern, name in _MEDIUM_CONFIDENCE_COMPILED:
-        if pattern.search(text):
-            matched.append(name)
-            max_confidence = max(max_confidence, 0.6)
+    m = _MEDIUM_COMBINED.search(normalized)
+    if m:
+        for i, name in enumerate(_MEDIUM_NAMES):
+            if m.group(f"_{i}") is not None:
+                matched.append(name)
+        max_confidence = max(max_confidence, 0.6)
 
     if matched:
         reason = f"Matched {len(matched)} injection pattern(s): {', '.join(matched)}"
@@ -321,7 +347,8 @@ def sanitize_user_input(text: str, *, strict: bool = False) -> str:
     if not text or not text.strip():
         return text or ""
 
-    result = text
+    # Normalize Unicode to catch confusable character bypasses
+    result = unicodedata.normalize("NFKC", text)
 
     # Remove role injection markers
     result = re.sub(r"(?i)^system\s*:\s*", "[blocked]: ", result, flags=re.MULTILINE)
@@ -390,9 +417,7 @@ def check_system_prompt_length(
     return length <= max_length, length
 
 
-def filter_response_content(
-    content: str, *, redact: bool = True
-) -> ContentFilterResult:
+def filter_response_content(content: str, *, redact: bool = True) -> ContentFilterResult:
     """
     Filter outgoing LLM responses for sensitive content.
 

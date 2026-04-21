@@ -9,23 +9,22 @@ Provides:
 """
 
 from src.config.config import (
-    Config,
-    LLMConfig,
-    WhatsAppConfig,
-    NeonizeConfig,
-    MemoryConfig,
-    load_config,
-    save_config,
     CONFIG_PATH,
     DEPRECATED_OPTIONS,
     RENAMED_OPTIONS,
+    Config,
+    LLMConfig,
+    NeonizeConfig,
+    WhatsAppConfig,
+    load_config,
+    save_config,
 )
 from src.config.config_schema import (
-    validate_config,
-    validate_config_dict,
     ConfigValidationError,
     add_schema_version,
     format_validation_errors,
+    validate_config,
+    validate_config_dict,
 )
 
 __all__ = [
@@ -33,7 +32,6 @@ __all__ = [
     "LLMConfig",
     "WhatsAppConfig",
     "NeonizeConfig",
-    "MemoryConfig",
     "load_config",
     "save_config",
     "CONFIG_PATH",

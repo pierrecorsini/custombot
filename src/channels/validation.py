@@ -26,8 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from src.ui.cli_output import cli
 from src.health import check_llm_credentials
+from src.ui.cli_output import cli
 
 if TYPE_CHECKING:
     from src.config import Config

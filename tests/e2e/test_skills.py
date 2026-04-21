@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests: Skill Registry
 # ─────────────────────────────────────────────────────────────────────────────
@@ -158,9 +157,10 @@ def test_skill_registry_loads_builtins():
     Assert:
         - Built-in skills are loaded
     """
-    from src.skills import SkillRegistry
-    from src.memory import Memory
     import tempfile
+
+    from src.memory import Memory
+    from src.skills import SkillRegistry
 
     with tempfile.TemporaryDirectory() as tmpdir:
         memory = Memory(tmpdir)
@@ -188,9 +188,10 @@ def test_skill_registry_generates_tool_definitions():
     Assert:
         - Definitions have correct format
     """
-    from src.skills import SkillRegistry
-    from src.memory import Memory
     import tempfile
+
+    from src.memory import Memory
+    from src.skills import SkillRegistry
 
     with tempfile.TemporaryDirectory() as tmpdir:
         memory = Memory(tmpdir)

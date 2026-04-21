@@ -18,9 +18,7 @@ class TestLogExecution:
     # ─────────────────────────────────────────────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_async_logs_successful_execution(
-        self, caplog: pytest.LogCaptureFixture
-    ):
+    async def test_async_logs_successful_execution(self, caplog: pytest.LogCaptureFixture):
         """Should log completion with duration for async functions."""
         caplog.set_level(logging.DEBUG)
 
@@ -52,9 +50,7 @@ class TestLogExecution:
         assert "starting" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_async_logs_result_when_enabled(
-        self, caplog: pytest.LogCaptureFixture
-    ):
+    async def test_async_logs_result_when_enabled(self, caplog: pytest.LogCaptureFixture):
         """Should log function result when log_result=True."""
         caplog.set_level(logging.DEBUG)
 
@@ -67,9 +63,7 @@ class TestLogExecution:
         assert "secret_value" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_async_hides_result_when_disabled(
-        self, caplog: pytest.LogCaptureFixture
-    ):
+    async def test_async_hides_result_when_disabled(self, caplog: pytest.LogCaptureFixture):
         """Should not log function result when log_result=False."""
         caplog.set_level(logging.DEBUG)
 
@@ -82,9 +76,7 @@ class TestLogExecution:
         assert "super_secret" not in caplog.text
 
     @pytest.mark.asyncio
-    async def test_async_logs_failure_with_error(
-        self, caplog: pytest.LogCaptureFixture
-    ):
+    async def test_async_logs_failure_with_error(self, caplog: pytest.LogCaptureFixture):
         """Should log failure with duration and error message."""
         caplog.set_level(logging.DEBUG)
 

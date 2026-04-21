@@ -11,9 +11,9 @@ Modules:
     bot — Core bot orchestrator (ReAct loop)
 """
 
-from src.config import Config, load_config, save_config, CONFIG_PATH
 from src.bot import Bot
-from src.utils.protocols import Channel, Skill, Storage, MessageHandler
+from src.config import CONFIG_PATH, Config, load_config, save_config
+from src.utils.protocols import Channel, MessageHandler, Skill, Storage
 
 __all__ = [
     "Config",

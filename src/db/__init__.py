@@ -10,26 +10,26 @@ Provides:
 from src.db.db import (
     Database,
     ValidationResult,
-    get_database,
-    _validate_chat_id,
     _sanitize_chat_id_for_path,
-)
-from src.db.db_integrity import (
-    CorruptionResult,
-    MessageLine,
-    calculate_checksum,
-    validate_checksum,
-    detect_corruption_sync,
-    backup_file_sync,
-    repair_file_sync,
-    validate_all_sync,
+    _validate_chat_id,
+    get_database,
 )
 from src.db.db_index import (
     RecoveryResult,
     load_index,
-    save_index,
     rebuild_index,
     recover_index,
+    save_index,
+)
+from src.db.db_integrity import (
+    CorruptionResult,
+    MessageLine,
+    backup_file_sync,
+    calculate_checksum,
+    detect_corruption_sync,
+    repair_file_sync,
+    validate_all_sync,
+    validate_checksum,
 )
 
 __all__ = [

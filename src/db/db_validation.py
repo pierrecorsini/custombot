@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
-from src.utils import safe_json_parse_with_error, safe_json_parse_line
 from src.db.db_integrity import validate_checksum
+from src.utils import JsonParseMode, safe_json_parse
 
 log = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ def validate_json_file(
 
     try:
         content = file_path.read_text(encoding="utf-8")
-        result = safe_json_parse_with_error(content, expected_type=expected_type)
+        result = safe_json_parse(content, expected_type=expected_type, mode=JsonParseMode.STRICT)
 
         if not result.success:
             if result.error_type == "type":
@@ -133,7 +133,7 @@ def validate_json_file(
         details[key_count] = len(result.data)
         return True
 
-    except Exception as e:
+    except OSError as e:
         errors.append(f"Failed to read {file_path.name}: {e}")
         details[key_valid] = False
         return False
@@ -177,7 +177,7 @@ def validate_message_files(
                 if not line.strip():
                     continue
 
-                msg = safe_json_parse_line(line, default=None, log_errors=False)
+                msg = safe_json_parse(line, default=None, log_errors=False, mode=JsonParseMode.LINE)
                 if msg is None:
                     result["corrupted_files"].append(f"{msg_file.name}:{line_num}")
                     continue
@@ -187,7 +187,7 @@ def validate_message_files(
                 if not is_valid:
                     result["checksum_errors"].append(f"{msg_file.name}:{line_num}")
 
-        except Exception as e:
+        except OSError as e:
             result["corrupted_files"].append(f"{msg_file.name}: {e}")
 
     return result

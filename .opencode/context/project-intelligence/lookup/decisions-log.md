@@ -67,6 +67,22 @@ Related: [Links to PRs, issues, docs]
 
 ---
 
+## Decision: Media Output via Callback Injection
+
+**Date**: 2026-04-12 | **Status**: Decided
+
+**Context**: Needed to add audio (TTS) and PDF report output to the bot without changing existing skill return types or breaking the tool executor interface.
+**Decision**: Use callback injection (Option 2c) — thread a `send_media` callback from the channel through the bot and ToolExecutor to the skill.
+**Rationale**: Keeps existing skills untouched. Skill generates file, calls callback, channel handles delivery. Clean separation between generation and transport.
+**Alternatives**: Return media path from skill (rejected: changes return type contract), Direct channel access in skills (rejected: breaks layering).
+
+**Impact**:
+- **Positive**: No breaking changes, clean layering, extensible to more media types
+- **Negative**: Callback threading adds indirection through 3 layers
+- **Libraries**: edge-tts (free TTS), xhtml2pdf (pure Python PDF), markdown (HTML conversion)
+
+---
+
 ## Deprecated Decisions
 
 | Decision | Date | Replaced By | Why |

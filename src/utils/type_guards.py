@@ -6,12 +6,12 @@ These functions enable both runtime type checking and static type narrowing
 with mypy, improving type safety without sacrificing runtime validation.
 
 Usage:
-    from src.utils.type_guards import is_incoming_message, is_valid_config, is_routing_rule
+    from src.utils.type_guards import is_valid_config, is_routing_rule
 
     def process(obj: object) -> None:
-        if is_incoming_message(obj):
-            # obj is narrowed to IncomingMessage for mypy
-            print(obj.text)  # Type-safe access
+        if is_valid_config(obj):
+            # obj is narrowed to Config for mypy
+            print(obj.llm.model)  # Type-safe access
 """
 
 from __future__ import annotations
@@ -19,52 +19,8 @@ from __future__ import annotations
 from dataclasses import fields, is_dataclass
 from typing import Any, TypeGuard
 
-from src.channels.base import IncomingMessage
-from src.config import Config, LLMConfig, WhatsAppConfig, NeonizeConfig
+from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
 from src.routing import RoutingRule
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# IncomingMessage Type Guard
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def is_incoming_message(obj: Any) -> TypeGuard[IncomingMessage]:
-    """
-    Type guard for IncomingMessage dataclass.
-
-    Validates that obj is an IncomingMessage instance with all required
-    fields present and of the correct type.
-
-    Args:
-        obj: Any object to check.
-
-    Returns:
-        True if obj is a valid IncomingMessage, False otherwise.
-        When True, narrows type to IncomingMessage for static checkers.
-    """
-    if not isinstance(obj, IncomingMessage):
-        return False
-
-    # Validate required string fields are non-empty strings
-    required_strings = ("message_id", "chat_id", "sender_id", "sender_name", "text")
-    for field_name in required_strings:
-        value = getattr(obj, field_name, None)
-        if not isinstance(value, str) or not value:
-            return False
-
-    # Validate timestamp is a float/int
-    timestamp = getattr(obj, "timestamp", None)
-    if not isinstance(timestamp, (int, float)):
-        return False
-
-    # Validate boolean fields
-    if not isinstance(getattr(obj, "fromMe", None), bool):
-        return False
-    if not isinstance(getattr(obj, "toMe", None), bool):
-        return False
-
-    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────

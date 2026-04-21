@@ -73,7 +73,7 @@ def parse_frontmatter(text: str) -> ParsedFile:
         import yaml
 
         metadata = yaml.safe_load(yaml_block)
-    except Exception as exc:
+    except (ImportError, ValueError) as exc:
         log.warning("Failed to parse frontmatter: %s", exc)
         return ParsedFile(content=text)
 
@@ -133,8 +133,6 @@ def dump_frontmatter(metadata: Dict[str, Any], content: str) -> str:
     """
     import yaml
 
-    yaml_block = yaml.dump(
-        metadata, default_flow_style=False, allow_unicode=True
-    ).strip()
+    yaml_block = yaml.dump(metadata, default_flow_style=False, allow_unicode=True).strip()
     body = content.lstrip("\n")
     return f"---\n{yaml_block}\n---\n\n{body}"

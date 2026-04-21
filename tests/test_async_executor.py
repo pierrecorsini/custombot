@@ -7,6 +7,7 @@ with timeout, logging, and proper error handling.
 
 import asyncio
 import sys
+
 import pytest
 
 from src.utils.async_executor import AsyncExecutor, ExecutorResult
@@ -67,9 +68,7 @@ class TestAsyncExecutor:
     @pytest.mark.asyncio
     async def test_shell_mode(self, executor):
         """Test shell mode execution."""
-        result = await executor.run(
-            f'"{sys.executable}" -c "print(\'hello world\')"', shell=True
-        )
+        result = await executor.run(f'"{sys.executable}" -c "print(\'hello world\')"', shell=True)
         assert result.success is True
         assert "hello world" in result.stdout
 
@@ -77,9 +76,7 @@ class TestAsyncExecutor:
     async def test_timeout(self):
         """Test command timeout handling."""
         executor = AsyncExecutor(timeout=0.1)
-        result = await executor.run(
-            [sys.executable, "-c", "import time; time.sleep(5)"]
-        )
+        result = await executor.run([sys.executable, "-c", "import time; time.sleep(5)"])
         assert result.timed_out is True
         assert result.success is False
         assert "timed out" in result.stderr.lower()
@@ -87,9 +84,7 @@ class TestAsyncExecutor:
     @pytest.mark.asyncio
     async def test_custom_timeout(self, executor):
         """Test overriding default timeout."""
-        result = await executor.run(
-            [sys.executable, "-c", "print('test')"], timeout=1.0
-        )
+        result = await executor.run([sys.executable, "-c", "print('test')"], timeout=1.0)
         assert result.success is True
 
     @pytest.mark.asyncio
@@ -116,9 +111,7 @@ class TestAsyncExecutor:
     async def test_stderr_capture(self, executor):
         """Test stderr is captured properly."""
         # Command that writes to stderr
-        result = await executor.run(
-            ["python", "-c", "import sys; sys.stderr.write('error')"]
-        )
+        result = await executor.run(["python", "-c", "import sys; sys.stderr.write('error')"])
         assert "error" in result.stderr
 
     @pytest.mark.asyncio

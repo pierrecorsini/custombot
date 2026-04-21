@@ -21,13 +21,42 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import logging
+import re
+import warnings
 from functools import cached_property
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from src.skills.base import BaseSkill
 
+if TYPE_CHECKING:
+    from src.config.config import ShellConfig
+    from src.core.instruction_loader import InstructionLoader
+    from src.core.project_context import ProjectContextLoader
+    from src.db import Database
+    from src.llm import LLMClient
+    from src.project.store import ProjectStore
+    from src.routing import RoutingEngine
+    from src.vector_memory import VectorMemory
+
 log = logging.getLogger(__name__)
+
+# Valid skill names: lowercase alphanumeric and underscores only.
+_VALID_SKILL_NAME = re.compile(r"^[a-z0-9_]+$")
+
+# Modules that user skills should NOT import during loading.
+# This is a best-effort restriction — it won't stop determined code
+# but catches accidental misuse of dangerous stdlib modules.
+_RESTRICTED_MODULES = frozenset(
+    {
+        "ctypes",
+        "multiprocessing",
+        "signal",
+        "socket",
+        "subprocess",
+        "sys",
+    }
+)
 
 
 class SkillRegistry:
@@ -40,47 +69,64 @@ class SkillRegistry:
         if not skill.name:
             log.warning("Skill %r has no name, skipping.", type(skill).__name__)
             return
+        if not _VALID_SKILL_NAME.match(skill.name):
+            log.warning(
+                "Skill name %r is invalid (must match [a-z0-9_]+), skipping.",
+                skill.name,
+            )
+            return
         self._skills[skill.name] = skill
         # Invalidate cached tool definitions when skills change
         self.__dict__.pop("tool_definitions", None)
         log.debug("Registered skill: %s", skill.name)
 
+    def wire_llm_clients(self, llm: "LLMClient") -> None:
+        """Inject the LLM client into all skills that declare a need."""
+        wired = 0
+        for skill in self._skills.values():
+            if skill.needs_llm():
+                skill.wire_llm(llm)
+                wired += 1
+        if wired:
+            log.debug("Wired LLM client into %d skill(s)", wired)
+
     # ── loading ────────────────────────────────────────────────────────────
 
     def load_builtins(
         self,
-        db=None,
-        vector_memory=None,
-        project_store=None,
-        project_ctx=None,
-        routing_engine=None,
-        instruction_loader=None,
+        db: Database | None = None,
+        vector_memory: VectorMemory | None = None,
+        project_store: ProjectStore | None = None,
+        project_ctx: ProjectContextLoader | None = None,
+        routing_engine: RoutingEngine | None = None,
+        instruction_loader: InstructionLoader | None = None,
+        shell_config: ShellConfig | None = None,
     ) -> None:
         """Import and register all built-in skills."""
-        from src.skills.builtin.web_research import WebResearchSkill
-        from src.skills.builtin.shell import ShellSkill
         from src.skills.builtin.files import (
+            ListFilesSkill,
             ReadFileSkill,
             WriteFileSkill,
-            ListFilesSkill,
         )
+        from src.skills.builtin.media import GeneratePDFReport, SendVoiceNote
+        from src.skills.builtin.planner import PlannerSkill
         from src.skills.builtin.routing import (
-            RoutingListSkill,
             RoutingAddSkill,
             RoutingDeleteSkill,
+            RoutingListSkill,
         )
+        from src.skills.builtin.shell import ShellSkill
         from src.skills.builtin.skills_manager import (
-            SkillsFindSkill,
             SkillsAddSkill,
+            SkillsFindSkill,
             SkillsListSkill,
             SkillsRemoveSkill,
         )
-        from src.skills.builtin.planner import PlannerSkill
         from src.skills.builtin.task_scheduler import TaskSchedulerSkill
-        from src.skills.builtin.media import SendVoiceNote, GeneratePDFReport
+        from src.skills.builtin.web_research import WebResearchSkill
 
         self.register(WebResearchSkill())
-        self.register(ShellSkill())
+        self.register(ShellSkill(shell_config))
         self.register(ReadFileSkill())
         self.register(WriteFileSkill())
         self.register(ListFilesSkill())
@@ -104,9 +150,9 @@ class SkillRegistry:
         # Vector memory skills
         if vector_memory is not None:
             from src.skills.builtin.memory_vss import (
+                MemoryListSkill,
                 MemorySaveSkill,
                 MemorySearchSkill,
-                MemoryListSkill,
             )
 
             self.register(MemorySaveSkill(vector_memory))
@@ -116,16 +162,16 @@ class SkillRegistry:
         # Project & Knowledge skills — reuse shared graph/recall from project_ctx
         if project_store is not None:
             from src.skills.builtin.project_skills import (
-                ProjectCreateSkill,
-                ProjectListSkill,
-                ProjectInfoSkill,
-                ProjectUpdateSkill,
-                ProjectArchiveSkill,
                 KnowledgeAddSkill,
-                KnowledgeSearchSkill,
                 KnowledgeLinkSkill,
                 KnowledgeListSkill,
+                KnowledgeSearchSkill,
+                ProjectArchiveSkill,
+                ProjectCreateSkill,
+                ProjectInfoSkill,
+                ProjectListSkill,
                 ProjectRecallSkill,
+                ProjectUpdateSkill,
             )
 
             # Share graph/recall instances with ProjectContextLoader to avoid duplicates
@@ -171,21 +217,65 @@ class SkillRegistry:
             self._load_markdown_skill(md_file)
 
     def _load_python_skill(self, path: Path) -> None:
+        log.warning(
+            "Loading user skill from %s — user skills execute arbitrary Python "
+            "with the same privileges as the bot process. Only load trusted skills.",
+            path,
+        )
         try:
             spec = importlib.util.spec_from_file_location(path.stem, path)
             if spec is None or spec.loader is None:
                 return
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)  # type: ignore[arg-type]
+
+            # Install a restricted __builtins__ to catch accidental
+            # use of dangerous builtins during module loading.
+            _orig_builtins = module.__dict__.get("__builtins__")
+            module.__builtins__ = self._restricted_builtins()
+
+            try:
+                spec.loader.exec_module(module)  # type: ignore[arg-type]
+            finally:
+                # Restore original builtins so the skill can function normally
+                module.__builtins__ = _orig_builtins
+
             for _, obj in inspect.getmembers(module, inspect.isclass):
                 if (
                     issubclass(obj, BaseSkill)
                     and obj is not BaseSkill
                     and not inspect.isabstract(obj)
                 ):
+                    # Validate the skill exposes the required interface
+                    if not callable(getattr(obj, "execute", None)):
+                        log.warning(
+                            "Skipping skill %s from %s: missing callable execute()",
+                            obj.__name__,
+                            path,
+                        )
+                        continue
+                    log.info(
+                        "Loaded user skill: %s from %s",
+                        obj.__name__,
+                        path,
+                    )
                     self.register(obj())
         except Exception as exc:
             log.error("Failed to load skill from %s: %s", path, exc)
+
+    @staticmethod
+    def _restricted_builtins() -> dict:
+        """Create a restricted __builtins__ dict for user skill loading.
+
+        Removes exec, eval, compile, and __import__ to reduce the attack
+        surface during skill module loading. Skills can still import normally
+        after loading because __builtins__ is restored.
+        """
+        import builtins as _builtins
+
+        safe = dict(vars(_builtins))
+        for name in ("exec", "eval", "compile", "__import__"):
+            safe.pop(name, None)
+        return safe
 
     def _load_markdown_skill(self, path: Path) -> None:
         from src.skills.prompt_skill import PromptSkill
@@ -217,7 +307,18 @@ class SkillRegistry:
 
     def get_tool_definitions(self) -> List[dict]:
         """Deprecated: Use tool_definitions property instead."""
+        warnings.warn(
+            "get_tool_definitions() is deprecated — use .tool_definitions property",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return self.tool_definitions
 
     def list_names(self) -> List[str]:
         return list(self._skills.keys())
+
+
+__all__ = [
+    "SkillRegistry",
+    "BaseSkill",
+]

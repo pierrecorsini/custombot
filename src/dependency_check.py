@@ -53,7 +53,7 @@ def _pip_installed_versions(package_names: list[str]) -> dict[str, Optional[str]
             text=True,
             timeout=30,
         )
-    except Exception:
+    except OSError:
         return {n: None for n in package_names}
 
     versions: dict[str, Optional[str]] = {}
@@ -87,7 +87,7 @@ def _pip_upgrade(packages: list[str]) -> tuple[list[str], list[str]]:
             text=True,
             timeout=120,
         )
-    except Exception as exc:
+    except OSError as exc:
         logging.getLogger(__name__).warning("pip upgrade failed: %s", exc)
         return [], packages
 
@@ -146,7 +146,7 @@ def check_dependencies(
 
                 if Version(ver) < Version(min_ver):
                     outdated.append(name)
-            except Exception:
+            except (ValueError, TypeError):
                 if ver != min_ver:
                     outdated.append(name)
 

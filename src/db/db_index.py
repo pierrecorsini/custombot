@@ -8,13 +8,14 @@ Database thin wrappers to keep db.py focused on core CRUD.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Set
+
+from src.utils import JSONDecodeError, json_dumps, json_loads
 
 log = logging.getLogger(__name__)
 
@@ -101,13 +102,13 @@ def scan_message_files(messages_dir: Path) -> Set[str]:
             for line in content.splitlines():
                 if line.strip():
                     try:
-                        msg = json.loads(line)
+                        msg = json_loads(line)
                         msg_id = msg.get("id")
                         if msg_id:
                             ids.add(msg_id)
-                    except json.JSONDecodeError:
+                    except JSONDecodeError:
                         continue
-        except Exception as e:
+        except OSError as e:
             log.warning("Failed to read message file %s: %s", msg_file.name, e)
             continue
 
@@ -129,23 +130,23 @@ def load_index(index_file: Path) -> Optional[Set[str]]:
 
     try:
         content = index_file.read_text(encoding="utf-8")
-        data = json.loads(content)
+        data = json_loads(content)
         if isinstance(data, list):
             log.debug("Loaded message index with %d entries", len(data))
             return set(data)
         log.warning("message_index.json has invalid format (expected list)")
         return None
-    except json.JSONDecodeError as e:
+    except JSONDecodeError as e:
         log.warning("message_index.json is corrupted: %s", e)
         return None
-    except Exception as e:
+    except OSError as e:
         log.warning("Failed to read message_index.json: %s", e)
         return None
 
 
 def save_index(index_file: Path, ids: Set[str], atomic_write_fn) -> None:
     """Persist message ID index to disk via atomic write."""
-    content = json.dumps(list(ids), ensure_ascii=False)
+    content = json_dumps(list(ids), ensure_ascii=False)
     atomic_write_fn(index_file, content)
 
 
@@ -192,7 +193,7 @@ def recover_index(
             )
         else:
             warnings.append("No valid entries could be extracted from corrupted index")
-    except Exception as e:
+    except OSError as e:
         warnings.append(f"Failed to read corrupted index: {e}")
 
     # Rebuild from message files

@@ -38,6 +38,13 @@ from __future__ import annotations
 # Each chat gets its own lock; 1000 concurrent chats is a reasonable upper bound.
 MAX_LRU_CACHE_SIZE: int = 1000
 
+# Maximum number of pooled file handles for Database message-file appends.
+# Prevents OS file-descriptor exhaustion (EMFILE / "Too many open files")
+# under extreme concurrency by reusing open handles instead of open/close
+# per write.  256 is well under typical OS limits (Linux soft 1024,
+# Windows 512, macOS 256) and leaves headroom for other file operations.
+MAX_FILE_HANDLES: int = 256
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HTTP / Network Timeouts
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,6 +78,11 @@ DEFAULT_LLM_TIMEOUT: float = 120.0  # 2 minutes
 # Maximum time to wait for QR code scan (in seconds).
 MAX_QR_SCAN_WAIT: int = 60
 
+# Maximum time to wait for the channel to connect during startup (in seconds).
+# Covers QR scan, neonize handshake, and initial sync.  If the channel
+# hasn't connected within this window, startup is aborted with a clear error.
+DEFAULT_CHANNEL_STARTUP_TIMEOUT: float = 300.0  # 5 minutes
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Memory / History Limits
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,6 +90,22 @@ MAX_QR_SCAN_WAIT: int = 60
 # Maximum number of recent messages to include in LLM context.
 # Balances context quality against token costs and latency.
 DEFAULT_MEMORY_MAX_HISTORY: int = 50
+
+# Heuristic: approximate characters per token for English text.
+# Used for fast token estimation without external dependencies (tiktoken).
+# English averages ~4 chars/token; mixed/multilingual is lower (~3).
+CHARS_PER_TOKEN: int = 4
+
+# Heuristic: approximate characters per token for CJK text
+# (Chinese, Japanese, Korean).  CJK characters each represent a word or
+# morpheme and tokenize to roughly 1-2 tokens per character, so we use 1.5
+# as the ratio — significantly lower than the English 4 chars/token.
+CJK_CHARS_PER_TOKEN: float = 1.5
+
+# Total token budget for system prompt + history sent to the LLM.
+# Set conservatively to fit within typical model context windows (128k).
+# Leaves headroom for the model's response tokens.
+DEFAULT_CONTEXT_TOKEN_BUDGET: int = 100_000
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Retry Configuration
@@ -113,6 +141,16 @@ DEFAULT_SKILL_TIMEOUT: float = 60.0  # 1 minute
 SLOW_SKILL_THRESHOLD_SECONDS: float = 5.0
 
 # ─────────────────────────────────────────────────────────────────────────────
+# LLM Streaming Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Minimum number of accumulated characters before forwarding a partial
+# text delta to the stream callback.  Batching reduces the number of
+# channel sends (each is a separate WhatsApp message) while still
+# providing timely feedback.
+STREAM_MIN_CHUNK_CHARS: int = 80
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Database Operation Timeouts
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -140,6 +178,19 @@ RATE_LIMIT_WINDOW_SECONDS: float = 60.0
 MAX_RATE_LIMIT_TRACKED_CHATS: int = 1000
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Health Server Rate Limiting
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum HTTP requests per IP to the health server within the rate-limit window.
+HEALTH_HTTP_RATE_LIMIT: int = 60
+
+# Sliding window size (seconds) for health server rate limiting.
+HEALTH_HTTP_RATE_WINDOW_SECONDS: float = 60.0
+
+# Maximum distinct IPs to track for health server rate limiting.
+HEALTH_HTTP_RATE_MAX_TRACKED_IPS: int = 500
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Memory Monitoring Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -164,6 +215,76 @@ MEMORY_CHECK_INTERVAL_SECONDS: float = 60.0
 WORKSPACE_DIR: str = "workspace"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Routing Engine — File Watching
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Minimum interval (seconds) between stale-checks on instruction .md files.
+# Prevents redundant stat() calls when match() is invoked at high frequency.
+ROUTING_WATCH_DEBOUNCE_SECONDS: float = 1.0
+
+# TTL (seconds) for the routing match result cache. Identical message signatures
+# within this window return the cached match result without re-evaluating rules.
+ROUTING_MATCH_CACHE_TTL_SECONDS: float = 5.0
+
+# Maximum number of cached routing match results. Bounded to prevent unbounded
+# memory growth; evicts least-recently-used entries when full.
+ROUTING_MATCH_CACHE_MAX_SIZE: int = 500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Circuit Breaker Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Number of consecutive LLM failures before opening the circuit breaker.
+# Once this threshold is reached, new requests are rejected immediately
+# without waiting for the full LLM timeout.
+CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
+
+# Duration (seconds) the circuit breaker stays OPEN before transitioning
+# to HALF_OPEN to probe whether the LLM provider has recovered.
+CIRCUIT_BREAKER_COOLDOWN_SECONDS: float = 60.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scheduler Retry Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of retry attempts for transient failures in scheduled tasks.
+# After all retries are exhausted, the task fails until the next scheduled interval.
+SCHEDULER_MAX_RETRIES: int = 2
+
+# Initial delay (seconds) before first retry of a failed scheduled task.
+# Uses exponential backoff with jitter: ~30s, then ~60s on the second retry.
+SCHEDULER_RETRY_INITIAL_DELAY: float = 30.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scheduled Task Error Detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Known error prefixes returned by _react_loop() that should never be
+# persisted as normal assistant messages in scheduled tasks.  Covers circuit-
+# breaker responses, empty LLM output, and max-iteration warnings.
+SCHEDULED_ERROR_PREFIXES: tuple[str, ...] = (
+    "⚠️ Service temporarily unavailable",
+    "(The assistant generated an empty response",
+    "⚠️ Reached maximum tool iterations",
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM Log Rotation
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of LLM log files to retain in workspace/logs/llm/.
+# Each LLM call produces two files (request + response), so 200 files ≈ 100 calls.
+LLM_LOG_MAX_FILES: int = 200
+
+# Maximum age (days) for LLM log files. Files older than this are deleted during
+# cleanup, regardless of the file count limit.
+LLM_LOG_MAX_AGE_DAYS: int = 30
+
+# Number of writes between automatic cleanup sweeps. Avoids scanning the directory
+# on every single write while still keeping the log count bounded.
+LLM_LOG_CLEANUP_INTERVAL: int = 20
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Input Validation Limits
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -171,3 +292,71 @@ WORKSPACE_DIR: str = "workspace"
 # Messages exceeding this are rejected before reaching the LLM API,
 # preventing token overflow and excessive costs.
 MAX_MESSAGE_LENGTH: int = 50_000
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Message Queue Limits
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum text length (characters) for messages persisted to the crash-recovery
+# queue.  Messages longer than this are truncated during enqueue so the JSONL
+# file does not grow unboundedly.  The full text is still passed through to
+# the bot for normal processing — only the queue copy is capped.
+MAX_QUEUED_TEXT_LENGTH: int = 10_000
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Event Bus Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of handler callbacks per event name.
+# Prevents unbounded subscription growth from misbehaving plugins.
+EVENT_BUS_MAX_HANDLERS_PER_EVENT: int = 50
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workspace Cleanup Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Default interval (seconds) between periodic workspace size checks and cleanup.
+# A typical workspace has JSONL conversation files, vector memory, LLM logs,
+# and backups that accumulate over time.
+WORKSPACE_CLEANUP_INTERVAL_SECONDS: float = 3600.0  # 1 hour
+
+# Maximum age (days) for JSONL conversation files before they are archived
+# into a compressed .tar.gz.  Active conversations are never touched.
+WORKSPACE_ARCHIVE_MAX_AGE_DAYS: int = 30
+
+# Maximum age (days) for backup files before they are pruned.
+WORKSPACE_BACKUP_MAX_AGE_DAYS: int = 7
+
+# Maximum age (days) for stale temporary files (e.g., .tmp from crashed
+# atomic writes) before they are removed.
+WORKSPACE_STALE_TEMP_MAX_AGE_HOURS: float = 1.0
+
+# Workspace size threshold (MB) at which the health check reports DEGRADED.
+# Helps operators detect unbounded disk growth.
+WORKSPACE_SIZE_WARNING_MB: float = 1024.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Outbound Message Dedup
+# ─────────────────────────────────────────────────────────────────────────────
+
+# TTL (seconds) for the outbound message dedup cache. If the same response
+# content was already sent to a chat within this window, the duplicate is
+# silently skipped.  Prevents double-sends when scheduler retries succeed
+# after the first attempt already delivered a response.
+OUTBOUND_DEDUP_TTL_SECONDS: float = 60.0
+
+# Maximum number of dedup entries to retain. Bounded LRU eviction prevents
+# unbounded memory growth.  Each entry is a SHA-256 hex digest + timestamp.
+OUTBOUND_DEDUP_MAX_SIZE: int = 500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Thread Pool Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Default maximum number of worker threads for the asyncio ThreadPoolExecutor.
+# This executor backs all asyncio.to_thread() calls (database reads/writes,
+# file I/O, psutil calls, vector memory operations).  Under high concurrency
+# (many chats active simultaneously), the default pool
+# (min(32, os.cpu_count()+4)) can saturate, causing to_thread calls to queue.
+# 16 workers balances concurrency against thread overhead.
+DEFAULT_THREAD_POOL_WORKERS: int = 16

@@ -11,7 +11,7 @@ import re
 import pytest
 
 from src.channels.base import IncomingMessage
-from src.routing import RoutingRule, RoutingEngine, _match_compiled, _compile_pattern
+from src.routing import RoutingEngine, RoutingRule, _compile_pattern, _match_compiled
 
 
 # Helper to match a pattern string against a value (mirrors the old _match_criterion API)

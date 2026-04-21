@@ -120,14 +120,9 @@ class MemorySearchSkill(BaseSkill):
         lines = [f"🔍 Found {len(results)} memory(es):\n"]
         for r in results:
             cat = f" [{r['category']}]" if r.get("category") else ""
-            dist = (
-                f" (relevance: {1 - r['distance']:.2f})"
-                if r.get("distance") is not None
-                else ""
-            )
+            dist = f" (relevance: {1 - r['distance']:.2f})" if r.get("distance") is not None else ""
             lines.append(
-                f"- [id={r['id']}]{cat} {_format_ts(r['created_at'])}{dist}\n"
-                f"  {r['text']}"
+                f"- [id={r['id']}]{cat} {_format_ts(r['created_at'])}{dist}\n  {r['text']}"
             )
         return "\n".join(lines)
 
@@ -174,7 +169,5 @@ class MemoryListSkill(BaseSkill):
         lines = [f"📋 {len(entries)} recent memories (total: {total}):\n"]
         for e in entries:
             cat = f" [{e['category']}]" if e.get("category") else ""
-            lines.append(
-                f"- [id={e['id']}]{cat} {_format_ts(e['created_at'])}\n  {e['text']}"
-            )
+            lines.append(f"- [id={e['id']}]{cat} {_format_ts(e['created_at'])}\n  {e['text']}")
         return "\n".join(lines)

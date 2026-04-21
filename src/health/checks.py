@@ -14,14 +14,18 @@ from typing import TYPE_CHECKING, Any, Optional
 from src.health.models import ComponentHealth, HealthStatus
 
 if TYPE_CHECKING:
+    from src.channels.neonize_backend import NeonizeBackend
     from src.db import Database
-    from src.channels.whatsapp import NeonizeBackend
+    from src.scheduler import TaskScheduler
 
 log = logging.getLogger(__name__)
 
 
 async def check_database(db: "Database") -> ComponentHealth:
-    """Check if the database is accessible."""
+    """Check if the database is accessible and functional.
+
+    Tests actual file I/O by listing chats, not just in-memory state.
+    """
     start = time.perf_counter()
     try:
         if not db._initialized:
@@ -30,12 +34,13 @@ async def check_database(db: "Database") -> ComponentHealth:
                 status=HealthStatus.UNHEALTHY,
                 message="Database not initialized",
             )
-        _ = len(db._chats)
+        # Actual I/O test: read chats from disk via the async API
+        chats = await db.list_chats()
         latency = (time.perf_counter() - start) * 1000
         return ComponentHealth(
             name="database",
             status=HealthStatus.HEALTHY,
-            message="Database is accessible",
+            message=f"Database is accessible ({len(chats)} chats)",
             latency_ms=latency,
         )
     except Exception as e:
@@ -96,6 +101,7 @@ async def check_llm_credentials(
         )
 
     start = time.perf_counter()
+    client = None
     try:
         from openai import AsyncOpenAI
 
@@ -133,25 +139,208 @@ async def check_llm_credentials(
             message=f"LLM check failed: {type(e).__name__}",
             latency_ms=latency,
         )
+    finally:
+        if client is not None:
+            await client.close()
 
 
-def get_token_usage_stats() -> dict[str, Any]:
+def check_wiring(wiring_result: list[tuple[str, bool, str]]) -> ComponentHealth:
+    """Check bot component wiring from validate_wiring() results."""
+    failed = [(name, msg) for name, ok, msg in wiring_result if not ok]
+    if not failed:
+        return ComponentHealth(
+            name="wiring",
+            status=HealthStatus.HEALTHY,
+            message=f"All {len(wiring_result)} components wired correctly",
+        )
+    names = ", ".join(name for name, _ in failed)
+    return ComponentHealth(
+        name="wiring",
+        status=HealthStatus.UNHEALTHY,
+        message=f"Missing components: {names}",
+    )
+
+
+def get_token_usage_stats(token_usage: Any = None) -> dict[str, Any]:
     """Get LLM token usage statistics for the current session."""
-    try:
-        from src.llm import get_token_usage
+    if token_usage is not None:
+        return {
+            "prompt_tokens": token_usage.prompt_tokens,
+            "completion_tokens": token_usage.completion_tokens,
+            "total_tokens": token_usage.total_tokens,
+            "request_count": token_usage.request_count,
+        }
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "request_count": 0,
+        "error": "Token tracking not available",
+    }
 
-        usage = get_token_usage()
-        return {
-            "prompt_tokens": usage.prompt_tokens,
-            "completion_tokens": usage.completion_tokens,
-            "total_tokens": usage.total_tokens,
-            "request_count": usage.request_count,
-        }
-    except Exception:
-        return {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "request_count": 0,
-            "error": "Token tracking not available",
-        }
+
+def check_llm_logs(log_dir: Optional[str] = None) -> ComponentHealth:
+    """Check LLM log directory size and file count.
+
+    Reports HEALTHY when logging is disabled or directory size is reasonable,
+    DEGRADED when the directory is growing large (>100 MB).
+    """
+    if log_dir is None:
+        return ComponentHealth(
+            name="llm_logs",
+            status=HealthStatus.HEALTHY,
+            message="LLM logging disabled",
+        )
+
+    from pathlib import Path
+
+    from src.logging.llm_logging import _dir_size, _list_log_files
+
+    dir_path = Path(log_dir)
+    if not dir_path.exists():
+        return ComponentHealth(
+            name="llm_logs",
+            status=HealthStatus.HEALTHY,
+            message="LLM log directory not yet created",
+        )
+
+    try:
+        total_bytes = _dir_size(dir_path)
+        file_count = len(_list_log_files(dir_path))
+        size_mb = total_bytes / (1024 * 1024)
+        message = f"LLM logs: {file_count} files, {size_mb:.1f} MB"
+
+        if size_mb > 100:
+            return ComponentHealth(
+                name="llm_logs",
+                status=HealthStatus.DEGRADED,
+                message=message,
+            )
+        return ComponentHealth(
+            name="llm_logs",
+            status=HealthStatus.HEALTHY,
+            message=message,
+        )
+    except Exception as e:
+        return ComponentHealth(
+            name="llm_logs",
+            status=HealthStatus.DEGRADED,
+            message=f"LLM log check error: {type(e).__name__}",
+        )
+
+
+def _recursive_dir_size(directory: Path) -> int:
+    """Return total size (bytes) of all files under *directory*, recursively."""
+    total = 0
+    try:
+        for entry in directory.rglob("*"):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return total
+
+
+def check_disk_usage(workspace_dir: str) -> ComponentHealth:
+    """Check database and workspace disk usage.
+
+    Reports db_size_mb (workspace/.data/) and workspace_size_mb (full workspace).
+    Returns DEGRADED when workspace exceeds 1 GB.
+    """
+    from pathlib import Path
+
+    workspace = Path(workspace_dir)
+    if not workspace.exists():
+        return ComponentHealth(
+            name="disk_usage",
+            status=HealthStatus.HEALTHY,
+            message="Workspace directory not yet created",
+        )
+
+    data_dir = workspace / ".data"
+    db_bytes = _recursive_dir_size(data_dir) if data_dir.exists() else 0
+    workspace_bytes = _recursive_dir_size(workspace)
+
+    db_mb = db_bytes / (1024 * 1024)
+    workspace_mb = workspace_bytes / (1024 * 1024)
+
+    message = f"db: {db_mb:.1f} MB, workspace: {workspace_mb:.1f} MB"
+    status = HealthStatus.DEGRADED if workspace_mb > 1024 else HealthStatus.HEALTHY
+
+    return ComponentHealth(
+        name="disk_usage",
+        status=status,
+        message=message,
+    )
+
+
+def check_readiness(
+    *,
+    shutdown_accepting: bool,
+    neonize_backend: Optional["NeonizeBackend"],
+    bot_wired: bool,
+    db_available: bool,
+) -> tuple[bool, list[str]]:
+    """Evaluate Kubernetes-style readiness: all components initialized and accepting traffic.
+
+    Returns (ready, reasons) where *ready* is True only when every signal is
+    green.  *reasons* lists the failing conditions (empty when ready).
+    """
+    reasons: list[str] = []
+
+    if not shutdown_accepting:
+        reasons.append("shutdown in progress")
+
+    if neonize_backend is None:
+        reasons.append("WhatsApp backend not configured")
+    elif not neonize_backend.is_ready:
+        reasons.append("WhatsApp channel not connected")
+
+    if not bot_wired:
+        reasons.append("bot components not wired")
+
+    if not db_available:
+        reasons.append("database not available")
+
+    return len(reasons) == 0, reasons
+
+
+def check_scheduler(scheduler: Optional["TaskScheduler"]) -> ComponentHealth:
+    """Check task scheduler status: running state, task count, recent failures."""
+    if scheduler is None:
+        return ComponentHealth(
+            name="scheduler",
+            status=HealthStatus.UNHEALTHY,
+            message="Scheduler not configured",
+        )
+
+    status = scheduler.get_status()
+
+    if not status["running"]:
+        return ComponentHealth(
+            name="scheduler",
+            status=HealthStatus.UNHEALTHY,
+            message="Scheduler is not running",
+        )
+
+    parts = [
+        f"{status['enabled_tasks']} active tasks",
+        f"{status['chats_with_tasks']} chats",
+    ]
+    if status["failure_count"] > 0:
+        parts.append(f"{status['failure_count']} failures")
+
+    details: dict[str, Any] = {}
+    recent = status.get("recent_executions", [])
+    if recent:
+        details["recent_executions"] = recent
+
+    return ComponentHealth(
+        name="scheduler",
+        status=HealthStatus.HEALTHY,
+        message=f"Scheduler running ({', '.join(parts)})",
+        details=details or None,
+    )

@@ -12,14 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 from dataclasses import dataclass
-from typing import Optional, List
+from pathlib import Path
+from typing import List, Optional
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Mock LLM Response Builders
@@ -37,9 +36,7 @@ def make_text_response(text: str):
     return response
 
 
-def make_tool_call_response(
-    tool_name: str, tool_args: dict, tool_call_id: str = "call_123"
-):
+def make_tool_call_response(tool_name: str, tool_args: dict, tool_call_id: str = "call_123"):
     """Create a mock tool call completion response."""
     response = MagicMock()
     response.choices = [MagicMock()]
@@ -104,11 +101,11 @@ async def test_bot_skips_duplicate_messages(tmp_path: Path):
         - Second returns None
     """
     from src.bot import Bot
+    from src.channels.base import IncomingMessage
     from src.config import Config, LLMConfig, WhatsAppConfig
     from src.db import Database
     from src.memory import Memory
     from src.skills import SkillRegistry
-    from src.channels.base import IncomingMessage
 
     # Arrange
     workspace = tmp_path / "workspace"
@@ -118,9 +115,7 @@ async def test_bot_skips_duplicate_messages(tmp_path: Path):
     await db.connect()
 
     config = Config(
-        llm=LLMConfig(
-            api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
-        )
+        llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
     )
     memory = Memory(str(workspace))
     skills = SkillRegistry()
@@ -128,9 +123,7 @@ async def test_bot_skips_duplicate_messages(tmp_path: Path):
     with patch("src.llm.AsyncOpenAI") as mock_openai:
         mock_client = AsyncMock()
         mock_openai.return_value = mock_client
-        mock_client.chat.completions.create = AsyncMock(
-            return_value=make_text_response("Hello!")
-        )
+        mock_client.chat.completions.create = AsyncMock(return_value=make_text_response("Hello!"))
 
         from src.llm import LLMClient
 
@@ -138,9 +131,7 @@ async def test_bot_skips_duplicate_messages(tmp_path: Path):
 
         routing = create_mock_routing_engine(workspace)
 
-        bot = Bot(
-            config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing
-        )
+        bot = Bot(config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing)
 
         msg = IncomingMessage(
             message_id="msg-duplicate-test",
@@ -173,12 +164,12 @@ async def test_bot_executes_tool_call_and_loops(tmp_path: Path):
     E2E Test: Bot executes tool calls and continues the loop.
     """
     from src.bot import Bot
+    from src.channels.base import IncomingMessage
     from src.config import Config, LLMConfig
     from src.db import Database
     from src.memory import Memory
     from src.skills import SkillRegistry
     from src.skills.base import BaseSkill
-    from src.channels.base import IncomingMessage
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -235,9 +226,7 @@ async def test_bot_executes_tool_call_and_loops(tmp_path: Path):
 
         routing = create_mock_routing_engine(workspace)
 
-        bot = Bot(
-            config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing
-        )
+        bot = Bot(config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing)
 
         msg = IncomingMessage(
             message_id="msg-tool-test",
@@ -264,12 +253,12 @@ async def test_bot_handles_max_tool_iterations(tmp_path: Path):
     E2E Test: Bot stops after max tool iterations.
     """
     from src.bot import Bot
+    from src.channels.base import IncomingMessage
     from src.config import Config, LLMConfig
     from src.db import Database
     from src.memory import Memory
     from src.skills import SkillRegistry
     from src.skills.base import BaseSkill
-    from src.channels.base import IncomingMessage
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -278,9 +267,7 @@ async def test_bot_handles_max_tool_iterations(tmp_path: Path):
     await db.connect()
 
     config = Config(
-        llm=LLMConfig(
-            api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
-        )
+        llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
     )
     memory = Memory(str(workspace))
     skills = SkillRegistry()
@@ -311,9 +298,7 @@ async def test_bot_handles_max_tool_iterations(tmp_path: Path):
 
         routing = create_mock_routing_engine(workspace)
 
-        bot = Bot(
-            config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing
-        )
+        bot = Bot(config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing)
 
         msg = IncomingMessage(
             message_id="msg-max-iter",
@@ -342,11 +327,11 @@ async def test_bot_handles_unknown_tool(tmp_path: Path):
     E2E Test: Bot handles unknown tool calls gracefully.
     """
     from src.bot import Bot
+    from src.channels.base import IncomingMessage
     from src.config import Config, LLMConfig
     from src.db import Database
     from src.memory import Memory
     from src.skills import SkillRegistry
-    from src.channels.base import IncomingMessage
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -386,9 +371,7 @@ async def test_bot_handles_unknown_tool(tmp_path: Path):
 
         routing = create_mock_routing_engine(workspace)
 
-        bot = Bot(
-            config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing
-        )
+        bot = Bot(config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing)
 
         msg = IncomingMessage(
             message_id="msg-unknown-tool",
@@ -420,11 +403,11 @@ async def test_bot_includes_memory_in_context(tmp_path: Path):
     E2E Test: Bot includes memory content in LLM context.
     """
     from src.bot import Bot
+    from src.channels.base import IncomingMessage
     from src.config import Config, LLMConfig
     from src.db import Database
     from src.memory import Memory
     from src.skills import SkillRegistry
-    from src.channels.base import IncomingMessage
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -433,17 +416,13 @@ async def test_bot_includes_memory_in_context(tmp_path: Path):
     await db.connect()
 
     config = Config(
-        llm=LLMConfig(
-            api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
-        )
+        llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
     )
     memory = Memory(str(workspace))
     skills = SkillRegistry()
 
     # Write memory for the chat
-    await memory.write_memory(
-        "test-chat", "# User Preferences\n- Likes Python\n- Uses dark mode"
-    )
+    await memory.write_memory("test-chat", "# User Preferences\n- Likes Python\n- Uses dark mode")
 
     captured_messages = []
 
@@ -463,9 +442,7 @@ async def test_bot_includes_memory_in_context(tmp_path: Path):
 
         routing = create_mock_routing_engine(workspace)
 
-        bot = Bot(
-            config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing
-        )
+        bot = Bot(config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing)
 
         msg = IncomingMessage(
             message_id="msg-memory-test",
@@ -486,8 +463,7 @@ async def test_bot_includes_memory_in_context(tmp_path: Path):
     system_msg = captured_messages[0]
     assert system_msg["role"] == "system"
     assert (
-        "User Preferences" in system_msg["content"]
-        or "memory" in system_msg["content"].lower()
+        "User Preferences" in system_msg["content"] or "memory" in system_msg["content"].lower()
     ), "Memory should be included in system message"
 
 
@@ -497,11 +473,11 @@ async def test_bot_maintains_conversation_history(tmp_path: Path):
     E2E Test: Bot maintains conversation history across turns.
     """
     from src.bot import Bot
+    from src.channels.base import IncomingMessage
     from src.config import Config, LLMConfig
     from src.db import Database
     from src.memory import Memory
     from src.skills import SkillRegistry
-    from src.channels.base import IncomingMessage
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -510,9 +486,7 @@ async def test_bot_maintains_conversation_history(tmp_path: Path):
     await db.connect()
 
     config = Config(
-        llm=LLMConfig(
-            api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
-        ),
+        llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"),
         memory_max_history=10,
     )
     memory = Memory(str(workspace))
@@ -539,9 +513,7 @@ async def test_bot_maintains_conversation_history(tmp_path: Path):
 
         routing = create_mock_routing_engine(workspace)
 
-        bot = Bot(
-            config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing
-        )
+        bot = Bot(config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing)
 
         # First message
         msg1 = IncomingMessage(
@@ -587,11 +559,11 @@ async def test_bot_isolates_chats(tmp_path: Path):
     E2E Test: Bot isolates different chats.
     """
     from src.bot import Bot
+    from src.channels.base import IncomingMessage
     from src.config import Config, LLMConfig
     from src.db import Database
     from src.memory import Memory
     from src.skills import SkillRegistry
-    from src.channels.base import IncomingMessage
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -600,9 +572,7 @@ async def test_bot_isolates_chats(tmp_path: Path):
     await db.connect()
 
     config = Config(
-        llm=LLMConfig(
-            api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
-        )
+        llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
     )
     memory = Memory(str(workspace))
     skills = SkillRegistry()
@@ -610,9 +580,7 @@ async def test_bot_isolates_chats(tmp_path: Path):
     with patch("src.llm.AsyncOpenAI") as mock_openai:
         mock_client = AsyncMock()
         mock_openai.return_value = mock_client
-        mock_client.chat.completions.create = AsyncMock(
-            return_value=make_text_response("Response")
-        )
+        mock_client.chat.completions.create = AsyncMock(return_value=make_text_response("Response"))
 
         from src.llm import LLMClient
 
@@ -620,9 +588,7 @@ async def test_bot_isolates_chats(tmp_path: Path):
 
         routing = create_mock_routing_engine(workspace)
 
-        bot = Bot(
-            config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing
-        )
+        bot = Bot(config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing)
 
         # Message to chat A
         msg_a = IncomingMessage(
@@ -667,12 +633,12 @@ async def test_bot_handles_malformed_tool_args(tmp_path: Path):
     E2E Test: Bot handles malformed tool arguments.
     """
     from src.bot import Bot
+    from src.channels.base import IncomingMessage
     from src.config import Config, LLMConfig
     from src.db import Database
     from src.memory import Memory
     from src.skills import SkillRegistry
     from src.skills.base import BaseSkill
-    from src.channels.base import IncomingMessage
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -732,9 +698,7 @@ async def test_bot_handles_malformed_tool_args(tmp_path: Path):
 
         routing = create_mock_routing_engine(workspace)
 
-        bot = Bot(
-            config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing
-        )
+        bot = Bot(config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing)
 
         msg = IncomingMessage(
             message_id="msg-malformed",
@@ -760,12 +724,12 @@ async def test_bot_handles_skill_exception(tmp_path: Path):
     E2E Test: Bot handles skill execution exceptions.
     """
     from src.bot import Bot
+    from src.channels.base import IncomingMessage
     from src.config import Config, LLMConfig
     from src.db import Database
     from src.memory import Memory
     from src.skills import SkillRegistry
     from src.skills.base import BaseSkill
-    from src.channels.base import IncomingMessage
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -815,9 +779,7 @@ async def test_bot_handles_skill_exception(tmp_path: Path):
 
         routing = create_mock_routing_engine(workspace)
 
-        bot = Bot(
-            config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing
-        )
+        bot = Bot(config=config, db=db, llm=llm, memory=memory, skills=skills, routing=routing)
 
         msg = IncomingMessage(
             message_id="msg-skill-exception",

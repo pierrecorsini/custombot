@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from src.memory import (
+    _DEFAULT_AGENTS_MD,
     AGENTS_FILENAME,
     BACKUP_DIR,
     MEMORY_FILENAME,
@@ -30,9 +31,8 @@ from src.memory import (
     Memory,
     MemoryCorruptionResult,
     _safe_name,
-    _DEFAULT_AGENTS_MD,
 )
-
+from src.security import PathSecurityError, is_path_in_workspace
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -93,19 +93,34 @@ class TestSafeName:
 
     @pytest.mark.parametrize(
         "char",
-        ["@", "#", "$", "%", "^", "&", "*", "(", ")", "!", " ", "/", "\\", ":", "|"],
+        ["#", "$", "%", "^", "&", "(", ")", "!", " "],
     )
-    def test_unsafe_chars_replaced(self, char: str):
+    def test_unsafe_chars_replaced_with_underscore(self, char: str):
         assert _safe_name(char) == "_"
+
+    @pytest.mark.parametrize(
+        "char, expected",
+        [
+            ("@", "_at_"),
+            ("*", "_as_"),
+            ("/", "_sl_"),
+            ("\\", "_bs_"),
+            (":", "_col_"),
+            ("|", "_pi_"),
+        ],
+    )
+    def test_unsafe_chars_replaced_with_named(self, char: str, expected: str):
+        assert _safe_name(char) == expected
 
     def test_email_becomes_safe(self):
         result = _safe_name("user@domain.com")
         assert "@" not in result
         assert "." in result  # dot is allowed
-        assert result == "user_domain.com"
+        assert result == "user_at_domain.com"
 
-    def test_empty_string(self):
-        assert _safe_name("") == ""
+    def test_empty_string_raises(self):
+        with pytest.raises(ValueError, match="must not be empty"):
+            _safe_name("")
 
     def test_phone_number_with_plus(self):
         result = _safe_name("+1234567890")
@@ -122,11 +137,11 @@ class TestSafeName:
 
     def test_multiple_special_chars(self):
         result = _safe_name("a@b#c$d")
-        assert result == "a_b_c_d"
+        assert result == "a_at_b_c_d"
 
     def test_consecutive_specials(self):
         result = _safe_name("a@@b")
-        assert result == "a__b"
+        assert result == "a_at__at_b"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,51 +198,51 @@ class TestMemoryInit:
 
 
 class TestLRUCacheInternals:
-    """Tests for _cache_get / _cache_put LRU mechanics."""
+    """Tests for LRUDict-based cache mechanics in Memory."""
 
     def test_cache_get_miss_returns_none(self, mem: Memory):
-        assert mem._cache_get(mem._memory_cache, "x") is None
+        assert mem._memory_cache.get("x") is None
 
     def test_cache_put_and_get(self, mem: Memory):
-        mem._cache_put(mem._memory_cache, "a", (1.0, "content"))
-        result = mem._cache_get(mem._memory_cache, "a")
+        mem._memory_cache["a"] = (1.0, "content")
+        result = mem._memory_cache.get("a")
         assert result == (1.0, "content")
 
     def test_cache_get_moves_to_end_lru(self, mem: Memory):
         """Accessing a key should move it to the most-recent position."""
-        mem._cache_put(mem._memory_cache, "a", (1.0, "A"))
-        mem._cache_put(mem._memory_cache, "b", (1.0, "B"))
+        mem._memory_cache["a"] = (1.0, "A")
+        mem._memory_cache["b"] = (1.0, "B")
         # Access "a" → moves to end
-        mem._cache_get(mem._memory_cache, "a")
+        _ = mem._memory_cache.get("a")
         # Now "b" is oldest, should be evicted next
-        mem._max_cache_size = 2
-        mem._cache_put(mem._memory_cache, "c", (1.0, "C"))
+        mem._memory_cache._max_size = 2
+        mem._memory_cache["c"] = (1.0, "C")
         assert "b" not in mem._memory_cache
         assert "a" in mem._memory_cache
         assert "c" in mem._memory_cache
 
     def test_cache_put_evicts_oldest_at_capacity(self, mem: Memory):
-        mem._max_cache_size = 3
-        mem._cache_put(mem._memory_cache, "a", (1.0, "A"))
-        mem._cache_put(mem._memory_cache, "b", (1.0, "B"))
-        mem._cache_put(mem._memory_cache, "c", (1.0, "C"))
+        mem._memory_cache._max_size = 3
+        mem._memory_cache["a"] = (1.0, "A")
+        mem._memory_cache["b"] = (1.0, "B")
+        mem._memory_cache["c"] = (1.0, "C")
         # Cache is full; next insert should evict "a"
-        mem._cache_put(mem._memory_cache, "d", (1.0, "D"))
+        mem._memory_cache["d"] = (1.0, "D")
         assert "a" not in mem._memory_cache
         assert "d" in mem._memory_cache
 
     def test_cache_put_updates_existing_key(self, mem: Memory):
-        mem._cache_put(mem._memory_cache, "a", (1.0, "old"))
-        mem._cache_put(mem._memory_cache, "a", (2.0, "new"))
-        result = mem._cache_get(mem._memory_cache, "a")
+        mem._memory_cache["a"] = (1.0, "old")
+        mem._memory_cache["a"] = (2.0, "new")
+        result = mem._memory_cache.get("a")
         assert result == (2.0, "new")
 
     def test_separate_caches(self, mem: Memory):
         """Memory cache and agents cache are independent."""
-        mem._cache_put(mem._memory_cache, "a", (1.0, "mem"))
-        mem._cache_put(mem._agents_cache, "a", (1.0, "agents"))
-        assert mem._cache_get(mem._memory_cache, "a") == (1.0, "mem")
-        assert mem._cache_get(mem._agents_cache, "a") == (1.0, "agents")
+        mem._memory_cache["a"] = (1.0, "mem")
+        mem._agents_cache["a"] = (1.0, "agents")
+        assert mem._memory_cache.get("a") == (1.0, "mem")
+        assert mem._agents_cache.get("a") == (1.0, "agents")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,7 +259,7 @@ class TestWorkspacePath:
 
     def test_workspace_path_sanitizes_chat_id(self, mem: Memory):
         result = mem.workspace_path("user@domain")
-        assert result.name == "user_domain"
+        assert result.name == "user_at_domain"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,16 +297,16 @@ class TestEnsureWorkspace:
 
     def test_clears_agents_cache_on_seed(self, mem: Memory):
         """Seeding AGENTS.md should invalidate the agents cache entry."""
-        mem._cache_put(mem._agents_cache, "chat1", (1.0, "old"))
+        mem._agents_cache["chat1"] = (1.0, "old")
         mem.ensure_workspace("chat1")
         assert "chat1" not in mem._agents_cache
 
     def test_does_not_clear_agents_cache_if_agents_exists(self, mem: Memory):
         """If AGENTS.md already exists, the cache should not be touched."""
         mem.ensure_workspace("chat1")  # creates AGENTS.md
-        mem._cache_put(mem._agents_cache, "chat1", (1.0, "cached"))
+        mem._agents_cache["chat1"] = (1.0, "cached")
         mem.ensure_workspace("chat1")  # should NOT evict
-        assert mem._cache_get(mem._agents_cache, "chat1") == (1.0, "cached")
+        assert mem._agents_cache.get("chat1") == (1.0, "cached")
 
     def test_creates_parent_directories(self, mem: Memory):
         result = mem.ensure_workspace("deep/chat")
@@ -320,7 +335,7 @@ class TestWriteMemory:
 
     @pytest.mark.asyncio
     async def test_invalidates_memory_cache(self, mem: Memory):
-        mem._cache_put(mem._memory_cache, "chat1", (1.0, "old"))
+        mem._memory_cache["chat1"] = (1.0, "old")
         await mem.write_memory("chat1", "new content")
         assert "chat1" not in mem._memory_cache
 
@@ -354,7 +369,7 @@ class TestReadMemory:
     async def test_populates_cache_on_read(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "cached content")
         await mem.read_memory("chat1")
-        cached = mem._cache_get(mem._memory_cache, "chat1")
+        cached = mem._memory_cache.get("chat1")
         assert cached is not None
         assert cached[1] == "cached content"
 
@@ -367,9 +382,7 @@ class TestReadMemory:
         assert result == "content"
 
     @pytest.mark.asyncio
-    async def test_cache_invalidated_on_mtime_change(
-        self, mem: Memory, workspace: Path
-    ):
+    async def test_cache_invalidated_on_mtime_change(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "original")
         await mem.read_memory("chat1")
 
@@ -426,9 +439,7 @@ class TestReadAgentsMd:
         assert "Agent Instructions" in result
 
     @pytest.mark.asyncio
-    async def test_raises_file_not_found_when_missing(
-        self, mem: Memory, workspace: Path
-    ):
+    async def test_raises_file_not_found_when_missing(self, mem: Memory, workspace: Path):
         # Create directory but NOT AGENTS.md
         chat_dir = _chat_dir(workspace, "chat1")
         chat_dir.mkdir(parents=True, exist_ok=True)
@@ -439,7 +450,7 @@ class TestReadAgentsMd:
     async def test_caches_content(self, mem: Memory):
         mem.ensure_workspace("chat1")
         await mem.read_agents_md("chat1")
-        cached = mem._cache_get(mem._agents_cache, "chat1")
+        cached = mem._agents_cache.get("chat1")
         assert cached is not None
         assert "Agent Instructions" in cached[1]
 
@@ -452,9 +463,7 @@ class TestReadAgentsMd:
         assert first == second
 
     @pytest.mark.asyncio
-    async def test_cache_refreshed_on_external_modification(
-        self, mem: Memory, workspace: Path
-    ):
+    async def test_cache_refreshed_on_external_modification(self, mem: Memory, workspace: Path):
         mem.ensure_workspace("chat1")
         await mem.read_agents_md("chat1")
 
@@ -475,19 +484,19 @@ class TestReadAgentsMd:
 class TestChecksumCalculation:
     """Tests for _calculate_checksum."""
 
-    def test_produces_16_char_hex(self, mem: Memory):
+    def test_produces_32_char_hex(self, mem: Memory):
         cs = mem._calculate_checksum("hello")
-        assert len(cs) == 16
+        assert len(cs) == 32
         assert all(c in "0123456789abcdef" for c in cs)
 
-    def test_matches_sha256_first_16(self, mem: Memory):
+    def test_matches_sha256_first_32(self, mem: Memory):
         content = "test content"
-        expected = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        expected = hashlib.sha256(content.encode("utf-8")).hexdigest()[:32]
         assert mem._calculate_checksum(content) == expected
 
     def test_empty_string(self, mem: Memory):
         cs = mem._calculate_checksum("")
-        assert len(cs) == 16
+        assert len(cs) == 32
 
     def test_deterministic(self, mem: Memory):
         assert mem._calculate_checksum("x") == mem._calculate_checksum("x")
@@ -518,17 +527,13 @@ class TestDetectMemoryCorruption:
 
     def test_detects_checksum_mismatch(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "corrupted content")
-        _checksum_path(workspace, "chat1").write_text(
-            "badchecksum12345", encoding="utf-8"
-        )
+        _checksum_path(workspace, "chat1").write_text("badchecksum12345", encoding="utf-8")
         result = mem.detect_memory_corruption("chat1")
         assert result.is_corrupted is True
         assert result.checksum_valid is False
         assert any("Checksum mismatch" in e for e in result.error_details)
 
-    def test_detects_corruption_after_content_tampering(
-        self, mem: Memory, workspace: Path
-    ):
+    def test_detects_corruption_after_content_tampering(self, mem: Memory, workspace: Path):
         """Write with checksum, then tamper with the file on disk."""
         _write_memory_raw(workspace, "chat1", "original content")
         cs = mem._calculate_checksum("original content")
@@ -592,7 +597,7 @@ class TestBackupMemoryFile:
         _write_memory_raw(workspace, "chat@1", "data")
         backup_path = mem.backup_memory_file("chat@1")
         assert backup_path is not None
-        assert "chat_1" in Path(backup_path).name
+        assert "chat_at_1" in Path(backup_path).name
 
     def test_backup_file_has_timestamp(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "data")
@@ -637,9 +642,7 @@ class TestRepairMemoryFile:
 
     def test_repairs_corrupted_file(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "corrupted")
-        _checksum_path(workspace, "chat1").write_text(
-            "wrong_checksum", encoding="utf-8"
-        )
+        _checksum_path(workspace, "chat1").write_text("wrong_checksum", encoding="utf-8")
 
         result = mem.repair_memory_file("chat1")
         assert result.repaired is True
@@ -716,7 +719,7 @@ class TestWriteMemoryWithChecksum:
     async def test_writes_checksum_file(self, mem: Memory, workspace: Path):
         await mem.write_memory_with_checksum("chat1", "hello")
         checksum = _checksum_path(workspace, "chat1").read_text(encoding="utf-8")
-        expected = mem._calculate_checksum("hello")
+        expected = mem._calculate_checksum("hello\n")
         assert checksum == expected
 
     @pytest.mark.asyncio
@@ -725,7 +728,7 @@ class TestWriteMemoryWithChecksum:
         content = _memory_path(workspace, "chat1").read_text(encoding="utf-8")
         assert content.startswith("hello")
         checksum = _checksum_path(workspace, "chat1").read_text(encoding="utf-8")
-        expected = mem._calculate_checksum("hello")
+        expected = mem._calculate_checksum("hello\n")
         assert checksum == expected
 
     @pytest.mark.asyncio
@@ -753,9 +756,7 @@ class TestLogRecoveryEvent:
     """Tests for log_recovery_event."""
 
     def test_creates_recovery_log(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event(
-            "chat1", preserved_count=5, rebuilt_count=3, total_count=8
-        )
+        mem.log_recovery_event("chat1", preserved_count=5, rebuilt_count=3, total_count=8)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         assert recovery.exists()
         content = recovery.read_text(encoding="utf-8")
@@ -765,20 +766,14 @@ class TestLogRecoveryEvent:
         assert "8" in content
 
     def test_log_has_header(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event(
-            "chat1", preserved_count=0, rebuilt_count=0, total_count=0
-        )
+        mem.log_recovery_event("chat1", preserved_count=0, rebuilt_count=0, total_count=0)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         content = recovery.read_text(encoding="utf-8")
         assert content.startswith("# Message Index Recovery Log")
 
     def test_appends_to_existing_log(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event(
-            "chat1", preserved_count=1, rebuilt_count=2, total_count=3
-        )
-        mem.log_recovery_event(
-            "chat1", preserved_count=4, rebuilt_count=5, total_count=9
-        )
+        mem.log_recovery_event("chat1", preserved_count=1, rebuilt_count=2, total_count=3)
+        mem.log_recovery_event("chat1", preserved_count=4, rebuilt_count=5, total_count=9)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         content = recovery.read_text(encoding="utf-8")
         # Should have two recovery events
@@ -810,9 +805,7 @@ class TestLogRecoveryEvent:
         assert "error 5" not in content
 
     def test_no_errors_section_when_none(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event(
-            "chat1", preserved_count=0, rebuilt_count=0, total_count=0
-        )
+        mem.log_recovery_event("chat1", preserved_count=0, rebuilt_count=0, total_count=0)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         content = recovery.read_text(encoding="utf-8")
         assert "Errors" not in content
@@ -851,3 +844,76 @@ class TestClearRecoveryLog:
         """clear_recovery_log calls _ensure_chat_dir, which creates dirs."""
         mem.clear_recovery_log("new-chat")
         assert _chat_dir(workspace, "new-chat").is_dir()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Path Traversal Validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPathTraversalValidation:
+    """Security tests ensuring workspace confinement in Memory."""
+
+    def test_normal_chat_id_passes(self, mem: Memory):
+        """Legitimate chat IDs should work without issue."""
+        path = mem.ensure_workspace("1234567890@s.whatsapp.net")
+        assert path.is_dir()
+        assert is_path_in_workspace(mem._root / "whatsapp_data", path)
+
+    def test_dotdot_in_chat_id_blocked(self, mem: Memory):
+        """`..` passes through sanitize_path_component (dots are allowed),
+        but resolve() catches the escape — verify it's blocked."""
+        with pytest.raises(PathSecurityError, match="Workspace escape blocked"):
+            mem.ensure_workspace("..")
+
+    def test_resolve_stays_within_workspace(self, mem: Memory, workspace: Path):
+        """Verify that created paths resolve within workspace_data."""
+        d = mem._chat_dir("normal-chat")
+        assert is_path_in_workspace(workspace / "whatsapp_data", d.resolve())
+
+    def test_ensure_workspace_raises_on_escape(self, mem: Memory, monkeypatch):
+        """If sanitize_path_component returned a traversal, _validate_path blocks it."""
+        monkeypatch.setattr(
+            "src.memory.sanitize_path_component", lambda x: "../../etc"
+        )
+        with pytest.raises(PathSecurityError, match="Workspace escape blocked"):
+            mem.ensure_workspace("evil")
+
+    def test_chat_dir_raises_on_escape(self, mem: Memory, monkeypatch):
+        """_chat_dir also validates (read path protection)."""
+        monkeypatch.setattr(
+            "src.memory.sanitize_path_component", lambda x: "../../etc"
+        )
+        with pytest.raises(PathSecurityError, match="Workspace escape blocked"):
+            mem._chat_dir("evil")
+
+    def test_write_memory_raises_on_escape(self, mem: Memory, monkeypatch):
+        """write_memory calls _ensure_chat_dir which validates."""
+        monkeypatch.setattr(
+            "src.memory.sanitize_path_component", lambda x: "../../etc"
+        )
+        with pytest.raises(PathSecurityError):
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(
+                mem.write_memory("evil", "data")
+            )
+
+    def test_symlink_escape_blocked(self, workspace: Path):
+        """A symlink inside whatsapp_data pointing outside should be caught."""
+        import os
+
+        ws = workspace / "whatsapp_data"
+        ws.mkdir()
+        # Create a symlink that points outside workspace
+        link_target = workspace.parent  # one level above workspace
+        link_path = ws / "evil_link"
+        try:
+            os.symlink(str(link_target), str(link_path))
+        except (OSError, NotImplementedError):
+            pytest.skip("Symlinks not supported on this platform")
+
+        m = Memory(str(workspace))
+        # sanitize_path_component("evil_link") returns "evil_link" unchanged
+        # but resolve() follows the symlink and detects the escape
+        with pytest.raises(PathSecurityError, match="Workspace escape blocked"):
+            m.ensure_workspace("evil_link")

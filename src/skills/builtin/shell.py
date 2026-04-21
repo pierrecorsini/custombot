@@ -6,7 +6,8 @@ the current chat), so the agent cannot accidentally touch other chats'
 data or system files outside workspace/.
 
 Security measures:
-- Command pattern blocking (rm -rf, sudo, etc.)
+- Command pattern blocking (rm -rf, sudo, etc.) — configurable via ShellConfig
+- Configurable allowlist/denylist in config.json
 - Path validation to prevent absolute path escapes
 - System directory access blocking
 - Environment variable protection (blocks reading sensitive vars)
@@ -23,14 +24,18 @@ import platform
 import re
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from src.security.audit import audit_log
 from src.security.path_validator import (
-    validate_command_paths,
     PathSecurityError,
+    validate_command_paths,
 )
 from src.skills.base import BaseSkill, validate_input
 from src.utils.async_executor import AsyncExecutor
+
+if TYPE_CHECKING:
+    from src.config.config import ShellConfig
 
 log = logging.getLogger(__name__)
 
@@ -103,31 +108,38 @@ _SENSITIVE_ENV_REGEX = re.compile(r"|".join(_SENSITIVE_ENV_PATTERNS), re.IGNOREC
 
 
 def _audit_log(event: str, details: Dict[str, Any]) -> None:
-    """
-    Log security-relevant events for audit purposes.
-
-    Args:
-        event: Event type (e.g., "command_blocked", "path_blocked", "env_blocked")
-        details: Additional context about the event
-    """
-    log.warning(
-        "SECURITY_AUDIT: %s | %s",
-        event,
-        " | ".join(f"{k}={v}" for k, v in details.items()),
-        extra={
-            "security_event": event,
-            **details,
-        },
-    )
+    """Log security-relevant events for audit purposes."""
+    audit_log(event, details, level=logging.WARNING, prefix="SECURITY_AUDIT")
 
 
-def _is_command_blocked(command: str) -> Optional[str]:
+def _is_command_blocked(command: str, extra_denylist: List[str] | None = None) -> Optional[str]:
     """Check if command matches blocked patterns. Returns reason if blocked."""
     cmd_lower = command.lower()
     for pattern in _BLOCKED_PATTERNS:
         if re.search(pattern, cmd_lower, re.IGNORECASE):
             return f"Command blocked for security (matches pattern: {pattern})"
+    # Additional user-configured deny patterns
+    if extra_denylist:
+        for pattern in extra_denylist:
+            try:
+                if re.search(pattern, cmd_lower, re.IGNORECASE):
+                    return f"Command blocked by custom denylist (matches pattern: {pattern})"
+            except re.error as e:
+                log.warning("Invalid denylist regex %r: %s", pattern, e)
     return None
+
+
+def _is_command_allowed(command: str, allowlist: List[str] | None = None) -> bool:
+    """Check if command matches any allowlist pattern (bypasses denylist)."""
+    if not allowlist:
+        return False
+    for pattern in allowlist:
+        try:
+            if re.search(pattern, command, re.IGNORECASE):
+                return True
+        except re.error as e:
+            log.warning("Invalid allowlist regex %r: %s", pattern, e)
+    return False
 
 
 def _is_env_access_blocked(command: str) -> Optional[str]:
@@ -223,6 +235,9 @@ class ShellSkill(BaseSkill):
         "required": ["command"],
     }
 
+    def __init__(self, config: ShellConfig | None = None) -> None:
+        self._config = config
+
     @cached_property
     def tool_definition(self) -> Dict[str, Any]:
         """Return tool definition with dynamic environment info in description."""
@@ -244,17 +259,28 @@ class ShellSkill(BaseSkill):
         timeout: int = _TIMEOUT,
         **kwargs: Any,
     ) -> str:
-        # Security check 1: Block dangerous command patterns
-        blocked_reason = _is_command_blocked(command)
-        if blocked_reason:
+        cfg = self._config
+        extra_denylist = cfg.command_denylist if cfg else []
+        allowlist = cfg.command_allowlist if cfg else []
+
+        # Security check 0: Allowlist bypass (takes precedence over denylist)
+        if _is_command_allowed(command, allowlist):
             _audit_log(
-                "command_blocked",
-                {
-                    "command_snippet": command[:100],
-                    "reason": blocked_reason,
-                },
+                "command_allowed_by_allowlist",
+                {"command_snippet": command[:100]},
             )
-            return f"❌ Security: {blocked_reason}"
+        else:
+            # Security check 1: Block dangerous command patterns
+            blocked_reason = _is_command_blocked(command, extra_denylist)
+            if blocked_reason:
+                _audit_log(
+                    "command_blocked",
+                    {
+                        "command_snippet": command[:100],
+                        "reason": blocked_reason,
+                    },
+                )
+                return f"❌ Security: {blocked_reason}"
 
         # Security check 2: Block access to sensitive environment variables
         env_blocked = _is_env_access_blocked(command)

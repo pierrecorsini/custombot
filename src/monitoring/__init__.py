@@ -40,26 +40,43 @@ from __future__ import annotations
 
 # Memory monitoring exports
 from src.monitoring.memory import (
-    MemoryStats,
-    MemoryMonitor,
-    get_memory_stats,
-    get_global_monitor,
-    check_memory_health,
-    DEFAULT_MEMORY_WARNING_THRESHOLD,
     DEFAULT_MEMORY_CHECK_INTERVAL,
+    DEFAULT_MEMORY_WARNING_THRESHOLD,
+    MemoryMonitor,
+    MemoryStats,
+    check_memory_health,
+    get_global_monitor,
+    get_memory_stats,
+    reset_global_monitor,
+)
+
+# Workspace monitor exports
+from src.monitoring.workspace_monitor import (
+    WorkspaceMonitor,
+    WorkspaceStats,
+    check_workspace_health,
+    get_global_workspace_monitor,
+    reset_global_workspace_monitor,
 )
 
 # Performance metrics exports
 from src.monitoring.performance import (
-    LatencyStats,
-    PerformanceSnapshot,
-    PerformanceMetrics,
-    _calculate_latency_stats,
-    get_metrics_collector,
-    check_performance_health,
+    DEFAULT_METRICS_LOG_INTERVAL,
+    DEFAULT_MAX_TRACKED_CHATS,
+    DEFAULT_TOP_CHATS,
     METRICS_HISTORY_SIZE,
     METRICS_SUMMARY_INTERVAL,
-    DEFAULT_METRICS_LOG_INTERVAL,
+    ChatConversationDepth,
+    ChatMessageCount,
+    LatencyStats,
+    PerformanceMetrics,
+    PerformanceSnapshot,
+    SessionMetrics,
+    SkillMetrics,
+    _calculate_latency_stats,
+    check_performance_health,
+    get_metrics_collector,
+    reset_metrics_collector,
 )
 
 __all__ = [
@@ -68,17 +85,30 @@ __all__ = [
     "MemoryMonitor",
     "get_memory_stats",
     "get_global_monitor",
+    "reset_global_monitor",
     "check_memory_health",
     "DEFAULT_MEMORY_WARNING_THRESHOLD",
     "DEFAULT_MEMORY_CHECK_INTERVAL",
     # Performance metrics
+    "ChatConversationDepth",
+    "ChatMessageCount",
     "LatencyStats",
     "PerformanceSnapshot",
     "PerformanceMetrics",
-    "_calculate_latency_stats",
+    "SessionMetrics",
+    "SkillMetrics",
     "get_metrics_collector",
+    "reset_metrics_collector",
     "check_performance_health",
     "METRICS_HISTORY_SIZE",
     "METRICS_SUMMARY_INTERVAL",
     "DEFAULT_METRICS_LOG_INTERVAL",
+    "DEFAULT_MAX_TRACKED_CHATS",
+    "DEFAULT_TOP_CHATS",
+    # Workspace monitor
+    "WorkspaceStats",
+    "WorkspaceMonitor",
+    "check_workspace_health",
+    "get_global_workspace_monitor",
+    "reset_global_workspace_monitor",
 ]

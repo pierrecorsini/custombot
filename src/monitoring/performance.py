@@ -25,14 +25,64 @@ import asyncio
 import logging
 import statistics
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
-if TYPE_CHECKING:
-    pass
+from src.utils.singleton import get_or_create_singleton, reset_singleton
 
 log = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Session Metrics
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class SessionMetrics:
+    """Session metrics counter for tracking bot activity.
+
+    Note: Relies on asyncio's single-threaded event loop for safety.
+    Not safe for use from multiple OS threads.
+    """
+
+    __slots__ = ("start_time", "_messages", "_skills", "_errors")
+
+    def __init__(self) -> None:
+        self.start_time = time.time()
+        self._messages = 0
+        self._skills = 0
+        self._errors = 0
+
+    @property
+    def messages_processed(self) -> int:
+        return self._messages
+
+    @property
+    def skills_executed(self) -> int:
+        return self._skills
+
+    @property
+    def errors_count(self) -> int:
+        return self._errors
+
+    def increment_messages(self) -> None:
+        self._messages += 1
+
+    def increment_skills(self) -> None:
+        self._skills += 1
+
+    def increment_errors(self) -> None:
+        self._errors += 1
+
+    def to_dict(self) -> dict:
+        return {
+            "start_time": self.start_time,
+            "uptime": time.time() - self.start_time,
+            "messages_processed": self._messages,
+            "skills_executed": self._skills,
+            "errors_count": self._errors,
+        }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Performance Metrics Configuration
@@ -47,6 +97,11 @@ METRICS_SUMMARY_INTERVAL: int = 10
 
 # Default interval for periodic metrics logging (seconds).
 DEFAULT_METRICS_LOG_INTERVAL: float = 60.0
+
+# TTL for cached system metrics (seconds). Avoids blocking psutil calls on
+# every snapshot; refresh happens via the async ``refresh_system_metrics()``
+# method driven by periodic logging and health-check callers.
+SYSTEM_METRICS_TTL: float = 30.0
 
 
 @dataclass
@@ -80,6 +135,54 @@ class LatencyStats:
 
 
 @dataclass
+class SkillMetrics:
+    """Per-skill execution metrics: calls, successes, errors, and error types."""
+
+    calls: int = 0
+    successes: int = 0
+    errors: int = 0
+    error_types: dict[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "calls": self.calls,
+            "successes": self.successes,
+            "errors": self.errors,
+            "error_rate": round(self.errors / self.calls, 4) if self.calls else 0.0,
+            "error_types": dict(self.error_types),
+        }
+
+
+@dataclass
+class ChatMessageCount:
+    """Per-chat message count entry for top-chats reporting."""
+
+    chat_id: str
+    message_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"chat_id": self.chat_id, "message_count": self.message_count}
+
+
+@dataclass
+class ChatConversationDepth:
+    """Per-chat conversation depth (last ReAct iteration count)."""
+
+    chat_id: str
+    depth: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"chat_id": self.chat_id, "depth": self.depth}
+
+
+# Maximum number of chats tracked for per-chat message counting.
+DEFAULT_MAX_TRACKED_CHATS: int = 1000
+
+# Default number of top chats returned in snapshots.
+DEFAULT_TOP_CHATS: int = 10
+
+
+@dataclass
 class PerformanceSnapshot:
     """
     Point-in-time snapshot of performance metrics.
@@ -101,14 +204,32 @@ class PerformanceSnapshot:
     # Skill execution metrics
     skill_call_count: int = 0
     skill_latencies: dict[str, LatencyStats] = field(default_factory=dict)
+    skill_metrics: dict[str, SkillMetrics] = field(default_factory=dict)
 
     # Database operation metrics
     db_op_count: int = 0
     db_latency: LatencyStats = field(default_factory=LatencyStats)
 
+    # ReAct loop iteration metrics
+    react_iteration_count: int = 0
+    react_iterations: LatencyStats = field(default_factory=LatencyStats)
+
     # Queue metrics
     queue_depth: int = 0
     queue_max_depth: int = 0
+
+    # Active chat tracking
+    active_chat_count: int = 0
+    top_chats: list[ChatMessageCount] = field(default_factory=list)
+    top_chat_depths: list[ChatConversationDepth] = field(default_factory=list)
+
+    # Memory cache effectiveness
+    memory_cache_hits: int = 0
+    memory_cache_misses: int = 0
+
+    # Outbound message dedup
+    outbound_dedup_hits: int = 0
+    outbound_dedup_misses: int = 0
 
     # System metrics
     cpu_percent: float = 0.0
@@ -129,14 +250,40 @@ class PerformanceSnapshot:
             "skills": {
                 "call_count": self.skill_call_count,
                 "latencies": {k: v.to_dict() for k, v in self.skill_latencies.items()},
+                "per_skill": {k: v.to_dict() for k, v in self.skill_metrics.items()},
             },
             "database": {
                 "op_count": self.db_op_count,
                 "latency": self.db_latency.to_dict(),
             },
+            "react_iterations": {
+                "count": self.react_iteration_count,
+                "stats": self.react_iterations.to_dict(),
+            },
             "queue": {
                 "depth": self.queue_depth,
                 "max_depth": self.queue_max_depth,
+            },
+            "active_chats": self.active_chat_count,
+            "top_chats": [c.to_dict() for c in self.top_chats],
+            "top_chat_depths": [d.to_dict() for d in self.top_chat_depths],
+            "memory_cache": {
+                "hits": self.memory_cache_hits,
+                "misses": self.memory_cache_misses,
+                "hit_ratio": round(
+                    self.memory_cache_hits / (self.memory_cache_hits + self.memory_cache_misses), 4
+                ) if (self.memory_cache_hits + self.memory_cache_misses) > 0 else 0.0,
+            },
+            "outbound_dedup": {
+                "hits": self.outbound_dedup_hits,
+                "misses": self.outbound_dedup_misses,
+                "hit_ratio": round(
+                    self.outbound_dedup_hits
+                    / (self.outbound_dedup_hits + self.outbound_dedup_misses),
+                    4,
+                )
+                if (self.outbound_dedup_hits + self.outbound_dedup_misses) > 0
+                else 0.0,
             },
             "system": {
                 "cpu_percent": round(self.cpu_percent, 1),
@@ -222,8 +369,14 @@ class PerformanceMetrics:
         self._llm_latencies: deque[float] = deque(maxlen=history_size)
         self._db_latencies: deque[float] = deque(maxlen=history_size)
 
+        # ReAct loop iteration counts per conversation
+        self._react_iteration_counts: deque[float] = deque(maxlen=history_size)
+
         # Per-skill latency tracking (lazy initialization)
         self._skill_latencies: dict[str, deque[float]] = {}
+
+        # Per-skill execution metrics registry
+        self._skill_metrics: dict[str, SkillMetrics] = {}
 
         # Counters
         self._message_count: int = 0
@@ -231,9 +384,32 @@ class PerformanceMetrics:
         self._skill_call_count: int = 0
         self._db_op_count: int = 0
 
+        # Memory cache effectiveness counters
+        self._memory_cache_hits: int = 0
+        self._memory_cache_misses: int = 0
+
+        # Outbound message dedup counters
+        self._outbound_dedup_hits: int = 0
+        self._outbound_dedup_misses: int = 0
+
         # Queue depth tracking
         self._queue_depth: int = 0
         self._queue_max_depth: int = 0
+
+        # Active chat tracking
+        self._active_chat_count: int = 0
+
+        # Per-chat message count tracking (bounded LRU)
+        self._max_tracked_chats: int = DEFAULT_MAX_TRACKED_CHATS
+        self._chat_message_counts: OrderedDict[str, int] = OrderedDict()
+
+        # Per-chat conversation depth tracking (bounded LRU)
+        self._chat_conversation_depths: OrderedDict[str, int] = OrderedDict()
+
+        # Cached system metrics (refreshed async via refresh_system_metrics)
+        self._cpu_percent: float = 0.0
+        self._memory_percent: float = 0.0
+        self._last_system_refresh: float = 0.0
 
         # Background logging task
         self._log_task: Optional[asyncio.Task[None]] = None
@@ -267,6 +443,21 @@ class PerformanceMetrics:
         self._llm_latencies.append(latency_ms)
         self._llm_call_count += 1
 
+    def track_react_iterations(self, count: int) -> None:
+        """Record the number of ReAct loop iterations for a conversation."""
+        self._react_iteration_counts.append(float(count))
+
+    def track_db_latency(self, latency_seconds: float) -> None:
+        """
+        Record a database operation latency.
+
+        Args:
+            latency_seconds: Time taken for the DB operation.
+        """
+        latency_ms = latency_seconds * 1000
+        self._db_latencies.append(latency_ms)
+        self._db_op_count += 1
+
     def track_skill_time(self, skill_name: str, latency_seconds: float) -> None:
         """
         Record a skill execution time.
@@ -284,16 +475,18 @@ class PerformanceMetrics:
         self._skill_latencies[skill_name].append(latency_ms)
         self._skill_call_count += 1
 
-    def track_db_time(self, latency_seconds: float) -> None:
-        """
-        Record a database operation time.
+    def track_skill_success(self, skill_name: str) -> None:
+        """Record a successful skill execution."""
+        m = self._skill_metrics.setdefault(skill_name, SkillMetrics())
+        m.calls += 1
+        m.successes += 1
 
-        Args:
-            latency_seconds: Time taken for the database operation.
-        """
-        latency_ms = latency_seconds * 1000
-        self._db_latencies.append(latency_ms)
-        self._db_op_count += 1
+    def track_skill_error(self, skill_name: str, error_type: str) -> None:
+        """Record a failed skill execution with its error type."""
+        m = self._skill_metrics.setdefault(skill_name, SkillMetrics())
+        m.calls += 1
+        m.errors += 1
+        m.error_types[error_type] = m.error_types.get(error_type, 0) + 1
 
     def update_queue_depth(self, depth: int) -> None:
         """
@@ -305,6 +498,107 @@ class PerformanceMetrics:
         self._queue_depth = depth
         if depth > self._queue_max_depth:
             self._queue_max_depth = depth
+
+    def update_active_chat_count(self, count: int) -> None:
+        """
+        Update the current active chat count.
+
+        Args:
+            count: Current number of active chats.
+        """
+        self._active_chat_count = count
+
+    def track_chat_message(self, chat_id: str) -> None:
+        """Increment the message count for a specific chat (bounded LRU).
+
+        When the max tracked chats limit is reached, the least-recently-used
+        entries are evicted to keep memory bounded.
+        """
+        if chat_id in self._chat_message_counts:
+            self._chat_message_counts[chat_id] += 1
+            self._chat_message_counts.move_to_end(chat_id)
+            return
+
+        # Evict oldest half when at capacity (LRU eviction)
+        if len(self._chat_message_counts) >= self._max_tracked_chats:
+            for _ in range(len(self._chat_message_counts) // 2):
+                self._chat_message_counts.popitem(last=False)
+
+        self._chat_message_counts[chat_id] = 1
+
+    def get_top_chats(self, n: int = DEFAULT_TOP_CHATS) -> list[ChatMessageCount]:
+        """Return the top-N chats by message count, descending."""
+        sorted_chats = sorted(
+            self._chat_message_counts.items(), key=lambda item: item[1], reverse=True
+        )
+        return [ChatMessageCount(chat_id=cid, message_count=cnt) for cid, cnt in sorted_chats[:n]]
+
+    def track_memory_cache_hit(self) -> None:
+        """Record a memory cache hit (file mtime unchanged, reused cached content)."""
+        self._memory_cache_hits += 1
+
+    def track_memory_cache_miss(self) -> None:
+        """Record a memory cache miss (file changed or not yet cached)."""
+        self._memory_cache_misses += 1
+
+    def track_outbound_dedup_hit(self) -> None:
+        """Record an outbound message dedup cache hit (duplicate suppressed)."""
+        self._outbound_dedup_hits += 1
+
+    def track_outbound_dedup_miss(self) -> None:
+        """Record an outbound message dedup cache miss (new message allowed)."""
+        self._outbound_dedup_misses += 1
+
+    def track_conversation_depth(self, chat_id: str, depth: int) -> None:
+        """Record the last ReAct iteration count for a specific chat (bounded LRU)."""
+        self._chat_conversation_depths[chat_id] = depth
+        self._chat_conversation_depths.move_to_end(chat_id)
+        # Evict oldest half when at capacity
+        if len(self._chat_conversation_depths) > self._max_tracked_chats:
+            for _ in range(len(self._chat_conversation_depths) // 2):
+                self._chat_conversation_depths.popitem(last=False)
+
+    def get_top_chat_depths(self, n: int = DEFAULT_TOP_CHATS) -> list[ChatConversationDepth]:
+        """Return the top-N chats by conversation depth, descending."""
+        sorted_chats = sorted(
+            self._chat_conversation_depths.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return [ChatConversationDepth(chat_id=cid, depth=d) for cid, d in sorted_chats[:n]]
+
+    # ── System Metrics (cached, async-refreshed) ─────────────────────────────
+
+    def _read_system_metrics_sync(self) -> tuple[float, float]:
+        """Read CPU and memory percentages synchronously.
+
+        Uses ``interval=None`` so the call is non-blocking (returns the
+        utilisation since the last call, or 0.0 on the first invocation).
+        """
+        try:
+            import psutil
+
+            cpu = psutil.cpu_percent(interval=None)
+            mem = psutil.virtual_memory().percent
+            return cpu, mem
+        except (ImportError, Exception):
+            return 0.0, 0.0
+
+    async def refresh_system_metrics(self) -> None:
+        """Refresh cached CPU/memory metrics off the event loop.
+
+        Calls psutil in a thread pool so the event loop is never blocked.
+        Results are cached and reused by ``get_snapshot()`` until the TTL
+        expires.
+        """
+        cpu, mem = await asyncio.to_thread(self._read_system_metrics_sync)
+        self._cpu_percent = cpu
+        self._memory_percent = mem
+        self._last_system_refresh = time.time()
+
+    def _is_system_cache_valid(self) -> bool:
+        """Return True if the cached system metrics are within TTL."""
+        return (time.time() - self._last_system_refresh) < SYSTEM_METRICS_TTL
 
     # ── Snapshot & Reporting ─────────────────────────────────────────────────
 
@@ -328,21 +622,40 @@ class PerformanceMetrics:
                 name: _calculate_latency_stats(samples)
                 for name, samples in self._skill_latencies.items()
             },
+            skill_metrics={
+                name: SkillMetrics(
+                    calls=m.calls,
+                    successes=m.successes,
+                    errors=m.errors,
+                    error_types=dict(m.error_types),
+                )
+                for name, m in self._skill_metrics.items()
+            },
             db_op_count=self._db_op_count,
             db_latency=_calculate_latency_stats(self._db_latencies),
+            react_iteration_count=len(self._react_iteration_counts),
+            react_iterations=_calculate_latency_stats(self._react_iteration_counts),
             queue_depth=self._queue_depth,
             queue_max_depth=self._queue_max_depth,
+            active_chat_count=self._active_chat_count,
+            top_chats=self.get_top_chats(),
+            top_chat_depths=self.get_top_chat_depths(),
+            memory_cache_hits=self._memory_cache_hits,
+            memory_cache_misses=self._memory_cache_misses,
+            outbound_dedup_hits=self._outbound_dedup_hits,
+            outbound_dedup_misses=self._outbound_dedup_misses,
         )
 
-        # Add system metrics if requested
+        # Use cached system metrics (refreshed async via refresh_system_metrics).
+        # Never call psutil synchronously here — even interval=None involves
+        # blocking I/O syscalls that stall the event loop.  Async callers
+        # (health endpoint, periodic logger) always call refresh_system_metrics()
+        # before get_snapshot(), so the cache is fresh.  The only sync caller is
+        # _log_summary() via track_message_latency(), where stale/zero values
+        # are acceptable.
         if include_system:
-            try:
-                import psutil
-
-                snapshot.cpu_percent = psutil.cpu_percent(interval=0.1)
-                snapshot.memory_percent = psutil.virtual_memory().percent
-            except (ImportError, Exception):
-                pass
+            snapshot.cpu_percent = self._cpu_percent
+            snapshot.memory_percent = self._memory_percent
 
         return snapshot
 
@@ -354,7 +667,8 @@ class PerformanceMetrics:
         log.info(
             "Performance summary | messages=%d | msg_latency_p95=%.1fms | "
             "llm_calls=%d | llm_latency_p95=%.1fms | skills=%d | "
-            "db_ops=%d | db_latency_p95=%.1fms | queue=%d | cpu=%.1f%% | mem=%.1f%%",
+            "db_ops=%d | db_latency_p95=%.1fms | react_iters=%d(%.1f/%.1f/%.1f min/med/max) | "
+            "queue=%d | cpu=%.1f%% | mem=%.1f%%",
             snapshot.message_count,
             snapshot.message_latency.p95_ms,
             snapshot.llm_call_count,
@@ -362,6 +676,10 @@ class PerformanceMetrics:
             snapshot.skill_call_count,
             snapshot.db_op_count,
             snapshot.db_latency.p95_ms,
+            snapshot.react_iteration_count,
+            snapshot.react_iterations.min_ms,
+            snapshot.react_iterations.median_ms,
+            snapshot.react_iterations.max_ms,
             snapshot.queue_depth,
             snapshot.cpu_percent,
             snapshot.memory_percent,
@@ -374,6 +692,7 @@ class PerformanceMetrics:
                 "skill_call_count": snapshot.skill_call_count,
                 "db_op_count": snapshot.db_op_count,
                 "db_latency_ms": snapshot.db_latency.to_dict(),
+                "react_iterations": snapshot.react_iterations.to_dict(),
                 "queue_depth": snapshot.queue_depth,
                 "cpu_percent": snapshot.cpu_percent,
                 "memory_percent": snapshot.memory_percent,
@@ -392,6 +711,7 @@ class PerformanceMetrics:
         while self._running:
             try:
                 await asyncio.sleep(interval_seconds)
+                await self.refresh_system_metrics()
                 self._log_summary()
             except asyncio.CancelledError:
                 break
@@ -432,16 +752,14 @@ class PerformanceMetrics:
         return self._running
 
 
-# Global performance metrics instance (lazy-initialized)
-_global_metrics: Optional[PerformanceMetrics] = None
-
-
 def get_metrics_collector(
     history_size: int = METRICS_HISTORY_SIZE,
     summary_interval: int = METRICS_SUMMARY_INTERVAL,
 ) -> PerformanceMetrics:
     """
     Get or create the global performance metrics collector.
+
+    Thread-safe singleton using get_or_create_singleton from utils.
 
     Args:
         history_size: Maximum samples to retain per metric.
@@ -450,13 +768,16 @@ def get_metrics_collector(
     Returns:
         The global PerformanceMetrics instance.
     """
-    global _global_metrics
-    if _global_metrics is None:
-        _global_metrics = PerformanceMetrics(
-            history_size=history_size,
-            summary_interval=summary_interval,
-        )
-    return _global_metrics
+    return get_or_create_singleton(
+        PerformanceMetrics,
+        history_size=history_size,
+        summary_interval=summary_interval,
+    )
+
+
+def reset_metrics_collector() -> None:
+    """Reset the global performance metrics collector (useful for testing)."""
+    reset_singleton(PerformanceMetrics)
 
 
 async def check_performance_health() -> dict[str, Any]:
@@ -472,6 +793,7 @@ async def check_performance_health() -> dict[str, Any]:
 
     try:
         metrics = get_metrics_collector()
+        await metrics.refresh_system_metrics()
         snapshot = metrics.get_snapshot(include_system=True)
 
         # Determine health status based on latency thresholds
@@ -481,25 +803,19 @@ async def check_performance_health() -> dict[str, Any]:
         # Check message latency (warn if p95 > 5s)
         if snapshot.message_latency.p95_ms > 5000:
             status = HealthStatus.DEGRADED
-            messages.append(
-                f"High message latency: {snapshot.message_latency.p95_ms:.0f}ms p95"
-            )
+            messages.append(f"High message latency: {snapshot.message_latency.p95_ms:.0f}ms p95")
 
         # Check LLM latency (warn if p95 > 30s)
         if snapshot.llm_latency.p95_ms > 30000:
             status = HealthStatus.DEGRADED
-            messages.append(
-                f"High LLM latency: {snapshot.llm_latency.p95_ms:.0f}ms p95"
-            )
+            messages.append(f"High LLM latency: {snapshot.llm_latency.p95_ms:.0f}ms p95")
 
         # Check system resources (degraded if memory > 90%)
         if snapshot.memory_percent > 90:
             status = HealthStatus.DEGRADED
             messages.append(f"High memory usage: {snapshot.memory_percent:.1f}%")
 
-        message = (
-            "; ".join(messages) if messages else "Performance within normal parameters"
-        )
+        message = "; ".join(messages) if messages else "Performance within normal parameters"
 
         return {
             "component": ComponentHealth(

@@ -10,22 +10,22 @@ Tests all validation functions including:
 
 from __future__ import annotations
 
-import pytest
 from dataclasses import asdict
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.config import Config, LLMConfig, WhatsAppConfig, NeonizeConfig
+import pytest
+
 from src.channels.validation import (
     ValidationResult,
-    validate_channels,
-    validate_all_channels,
     _validate_llm,
     _validate_whatsapp,
     format_validation_report,
+    validate_all_channels,
+    validate_channels,
 )
+from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
 from src.health import HealthStatus
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -417,9 +417,7 @@ async def test_validate_channels_empty_db_path(
     assert success is False, "Expected failure with empty db_path"
     assert len(errors) >= 1, "Expected at least one error"
     error_text = " ".join(errors).lower()
-    assert (
-        "db_path" in error_text or "neonize" in error_text or "whatsapp" in error_text
-    )
+    assert "db_path" in error_text or "neonize" in error_text or "whatsapp" in error_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -514,9 +512,7 @@ async def test_validate_llm_placeholder_patterns(valid_config: Config):
 
         result = await _validate_llm(config)
 
-        assert result.success is False, (
-            f"Expected failure for placeholder: {placeholder}"
-        )
+        assert result.success is False, f"Expected failure for placeholder: {placeholder}"
         assert "placeholder" in result.message.lower()
 
 
@@ -553,9 +549,7 @@ async def test_validate_whatsapp_unsupported_provider(
     result = await _validate_whatsapp(config_with_invalid_provider)
 
     assert result.success is False
-    assert (
-        "unsupported" in result.message.lower() or "provider" in result.message.lower()
-    )
+    assert "unsupported" in result.message.lower() or "provider" in result.message.lower()
     assert "hint" in result.details
 
 
@@ -570,10 +564,7 @@ async def test_validate_whatsapp_non_writable_path(valid_config: Config):
         result = await _validate_whatsapp(valid_config)
 
     assert result.success is False
-    assert (
-        "not writable" in result.message.lower()
-        or "permission" in result.message.lower()
-    )
+    assert "not writable" in result.message.lower() or "permission" in result.message.lower()
     assert "hint" in result.details
 
 
@@ -727,9 +718,7 @@ async def test_error_messages_include_hints(valid_config: Config):
         mock_llm_health.message = "Invalid credentials"
         mock_llm.return_value = mock_llm_health
 
-        results = await validate_all_channels(
-            config_with_empty_db_path_fixture(valid_config)
-        )
+        results = await validate_all_channels(config_with_empty_db_path_fixture(valid_config))
 
     for result in results:
         if not result.success:
@@ -768,9 +757,7 @@ async def test_llm_error_includes_base_url_and_model(valid_config: Config):
 async def test_whatsapp_error_includes_hint():
     """Test WhatsApp validation error includes helpful hint."""
     config = Config(
-        llm=LLMConfig(
-            api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
-        ),
+        llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"),
         whatsapp=WhatsAppConfig(
             provider="neonize",
             neonize=NeonizeConfig(db_path=""),
@@ -781,3 +768,101 @@ async def test_whatsapp_error_includes_hint():
 
     assert result.success is False
     assert "hint" in result.details
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: Additional edge cases
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_format_validation_report_empty():
+    """Test report formatting with no results."""
+    report = format_validation_report([])
+    assert "0/0 channels passed" in report
+
+
+def test_format_validation_report_latency():
+    """Test report includes latency when present."""
+    results = [
+        ValidationResult(
+            channel="llm",
+            success=True,
+            message="OK",
+            details={"latency_ms": 42.5},
+        ),
+    ]
+    report = format_validation_report(results)
+    assert "42.50ms" in report
+
+
+def test_validation_result_to_dict_roundtrip():
+    """Test ValidationResult to_dict preserves all fields."""
+    original = ValidationResult(
+        channel="llm",
+        success=False,
+        message="Error",
+        details={"hint": "Check key", "model": "gpt-4"},
+    )
+    data = original.to_dict()
+    assert data == {
+        "channel": "llm",
+        "success": False,
+        "message": "Error",
+        "details": {"hint": "Check key", "model": "gpt-4"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_channels_includes_hint_in_error_message():
+    """Test that validate_channels appends hints to error messages."""
+    config = Config(
+        llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"),
+        whatsapp=WhatsAppConfig(
+            provider="neonize",
+            neonize=NeonizeConfig(db_path=""),
+        ),
+    )
+    with patch("src.channels.validation.check_llm_credentials") as mock_llm:
+        mock_llm_health = MagicMock()
+        mock_llm_health.status.value = "unhealthy"
+        mock_llm_health.message = "Bad key"
+        mock_llm.return_value = mock_llm_health
+
+        success, errors = await validate_channels(config)
+
+    assert success is False
+    # At least one error should include a hint
+    has_hint = any("Hint:" in e for e in errors)
+    assert has_hint, f"Expected at least one error with Hint: {errors}"
+
+
+@pytest.mark.asyncio
+async def test_validate_llm_all_placeholder_patterns():
+    """Test every placeholder pattern is detected."""
+    patterns = ["sk-your-api-key", "your_api_key", "YOUR-API-KEY", "xxx"]
+    for p in patterns:
+        config = Config(
+            llm=LLMConfig(api_key=p, model="m", base_url="http://x"),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path="workspace/test.db"),
+            ),
+        )
+        result = await _validate_llm(config)
+        assert result.success is False, f"Pattern {p!r} should be detected as placeholder"
+
+
+@pytest.mark.asyncio
+async def test_validate_whatsapp_creates_parent_dir(tmp_path):
+    """Test that validate_whatsapp creates parent directory if needed."""
+    db_path = tmp_path / "new_subdir" / "session.db"
+    config = Config(
+        llm=LLMConfig(api_key="sk-test", model="m", base_url="http://x"),
+        whatsapp=WhatsAppConfig(
+            provider="neonize",
+            neonize=NeonizeConfig(db_path=str(db_path)),
+        ),
+    )
+    result = await _validate_whatsapp(config)
+    assert result.success is True
+    assert (tmp_path / "new_subdir").is_dir()

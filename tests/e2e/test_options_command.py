@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests
@@ -56,9 +55,7 @@ def test_options_opens_config_editor(cli_runner: CliRunner, tmp_path: Path):
     assert mock_tui.call_args[0][0] == config_path, "Config path should be passed"
 
 
-def test_options_creates_default_config_if_missing(
-    cli_runner: CliRunner, tmp_path: Path
-):
+def test_options_creates_default_config_if_missing(cli_runner: CliRunner, tmp_path: Path):
     """
     E2E Test: Options command creates default config if it doesn't exist.
 

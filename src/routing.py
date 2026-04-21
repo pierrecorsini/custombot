@@ -13,11 +13,18 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.channels.base import IncomingMessage
+from src.constants import (
+    ROUTING_MATCH_CACHE_MAX_SIZE,
+    ROUTING_MATCH_CACHE_TTL_SECONDS,
+    ROUTING_WATCH_DEBOUNCE_SECONDS,
+)
 from src.utils.frontmatter import extract_routing_rules, parse_file
 
 log = logging.getLogger(__name__)
@@ -148,35 +155,31 @@ class RoutingRule:
     skillExecVerbose: str = ""
     showErrors: bool = True
     # Pre-compiled regex patterns (computed once at construction)
-    _compiled_sender: Optional[re.Pattern] = field(
-        default=None, repr=False, compare=False
-    )
-    _compiled_recipient: Optional[re.Pattern] = field(
-        default=None, repr=False, compare=False
-    )
-    _compiled_channel: Optional[re.Pattern] = field(
-        default=None, repr=False, compare=False
-    )
-    _compiled_content: Optional[re.Pattern] = field(
-        default=None, repr=False, compare=False
-    )
+    _compiled_sender: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
+    _compiled_recipient: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
+    _compiled_channel: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
+    _compiled_content: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
+    # Pre-computed flag: True when all four match patterns are "*"
+    _is_wildcard: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # frozen=True requires object.__setattr__ to modify fields
         object.__setattr__(self, "_compiled_sender", _compile_pattern(self.sender))
-        object.__setattr__(
-            self, "_compiled_recipient", _compile_pattern(self.recipient)
-        )
+        object.__setattr__(self, "_compiled_recipient", _compile_pattern(self.recipient))
         object.__setattr__(self, "_compiled_channel", _compile_pattern(self.channel))
+        object.__setattr__(self, "_compiled_content", _compile_pattern(self.content_regex))
         object.__setattr__(
-            self, "_compiled_content", _compile_pattern(self.content_regex)
+            self,
+            "_is_wildcard",
+            self.sender == "*"
+            and self.recipient == "*"
+            and self.channel == "*"
+            and self.content_regex == "*",
         )
 
     def __repr__(self) -> str:
         regex_preview = (
-            self.content_regex[:20] + "..."
-            if len(self.content_regex) > 20
-            else self.content_regex
+            self.content_regex[:20] + "..." if len(self.content_regex) > 20 else self.content_regex
         )
         status = "ON" if self.enabled else "OFF"
         return (
@@ -218,6 +221,10 @@ class RoutingEngine:
     frontmatter containing a ``routing`` key. The engine loads all
     rules into memory and evaluates them in priority order.
 
+    The engine auto-reloads rules when instruction files change on disk.
+    A debounced mtime check runs before each match, so explicit
+    ``refresh_rules()`` calls are only needed for forced reloads.
+
     The engine no longer depends on the Database for rule storage.
     Instead, it scans the instructions directory directly.
     """
@@ -230,17 +237,54 @@ class RoutingEngine:
             instructions_dir: Path to the directory containing .md instruction files.
         """
         self._instructions_dir = Path(instructions_dir)
-        self._rules: List[RoutingRule] = []
+        self._rules_list: List[RoutingRule] = []
+        self._file_mtimes: dict[str, float] = {}
+        self._last_stale_check: float = 0.0
+        # TTL-bounded LRU cache for match results.
+        # Key: (fromMe, toMe, sender_id, chat_id, channel_type, text[:100])
+        # Value: (timestamp, (rule | None, instruction | None))
+        self._match_cache: OrderedDict[Tuple, Tuple[float, Tuple]] = OrderedDict()
+
+    @property
+    def _rules(self) -> List[RoutingRule]:
+        """Internal rules list (backed by _rules_list)."""
+        return self._rules_list
+
+    @_rules.setter
+    def _rules(self, value: List[RoutingRule]) -> None:
+        """Set rules and invalidate the match cache."""
+        self._rules_list = value
+        self._match_cache.clear()
 
     @property
     def rules(self) -> List[RoutingRule]:
         """Read-only access to loaded routing rules."""
-        return self._rules
+        return self._rules_list
 
     @property
     def instructions_dir(self) -> Path:
         """Read-only access to the instructions directory."""
         return self._instructions_dir
+
+    def _scan_file_mtimes(self) -> dict[str, float]:
+        """Collect current mtimes for all .md files in the instructions directory."""
+        mtimes: dict[str, float] = {}
+        if self._instructions_dir.is_dir():
+            for md_file in self._instructions_dir.glob("*.md"):
+                try:
+                    mtimes[md_file.name] = md_file.stat().st_mtime
+                except OSError:
+                    # File may have been deleted between glob and stat
+                    pass
+        return mtimes
+
+    def _is_stale(self) -> bool:
+        """Check whether instruction files have changed since last load (debounced)."""
+        now = time.monotonic()
+        if now - self._last_stale_check < ROUTING_WATCH_DEBOUNCE_SECONDS:
+            return False
+        self._last_stale_check = now
+        return self._scan_file_mtimes() != self._file_mtimes
 
     def load_rules(self) -> None:
         """
@@ -283,6 +327,7 @@ class RoutingEngine:
         # Sort by priority ascending
         rules.sort(key=lambda r: r.priority)
         self._rules = rules
+        self._file_mtimes = self._scan_file_mtimes()
 
         log.info(
             "Loaded %d routing rule(s) from %s",
@@ -316,6 +361,32 @@ class RoutingEngine:
         _, instruction = self.match_with_rule(msg)
         return instruction
 
+    def _cache_key(self, ctx: MatchingContext) -> Tuple:
+        """Build a hashable cache key from message signature attributes."""
+        return (ctx.fromMe, ctx.toMe, ctx.sender_id, ctx.chat_id, ctx.channel_type, ctx.text[:100])
+
+    def _cache_get(self, key: Tuple) -> Optional[Tuple]:
+        """Return cached match result if present and not expired, else None."""
+        entry = self._match_cache.get(key)
+        if entry is None:
+            return None
+        ts, result = entry
+        if time.monotonic() - ts > ROUTING_MATCH_CACHE_TTL_SECONDS:
+            # Expired — remove and report miss
+            self._match_cache.pop(key, None)
+            return None
+        # Move to end (most recently used)
+        self._match_cache.move_to_end(key)
+        return result
+
+    def _cache_put(self, key: Tuple, result: Tuple) -> None:
+        """Store a match result in the cache, evicting LRU if at capacity."""
+        if key in self._match_cache:
+            self._match_cache.move_to_end(key)
+        elif len(self._match_cache) >= ROUTING_MATCH_CACHE_MAX_SIZE:
+            self._match_cache.popitem(last=False)
+        self._match_cache[key] = (time.monotonic(), result)
+
     def match_with_rule(
         self, msg: IncomingMessage
     ) -> tuple[Optional["RoutingRule"], Optional[str]]:
@@ -323,6 +394,8 @@ class RoutingEngine:
         Match an incoming message and return both the rule and instruction.
 
         Same as match() but returns the full rule object for logging/debugging.
+        Auto-reloads rules if instruction files have changed on disk.
+        Results are cached for identical message signatures within a short TTL.
 
         Args:
             msg: The incoming message to match.
@@ -330,8 +403,18 @@ class RoutingEngine:
         Returns:
             Tuple of (rule, instruction_filename). Both are None if no match.
         """
-        ctx = MatchingContext.from_message(msg)
+        if self._is_stale():
+            self.load_rules()
 
+        ctx = MatchingContext.from_message(msg)
+        cache_key = self._cache_key(ctx)
+
+        # Check cache first
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        # Evaluate rules
         for rule in self._rules:
             if not rule.enabled:
                 continue
@@ -342,24 +425,25 @@ class RoutingEngine:
             if rule.toMe is not None and rule.toMe != ctx.toMe:
                 continue
 
-            if not _match_compiled(rule._compiled_sender, rule.sender, ctx.sender_id):
-                continue
+            # Wildcard-only rules skip all regex/exact matching — fromMe/toMe
+            # (checked above) are the only discriminators.
+            if not rule._is_wildcard:
+                if not _match_compiled(rule._compiled_sender, rule.sender, ctx.sender_id):
+                    continue
 
-            if not _match_compiled(
-                rule._compiled_recipient, rule.recipient, ctx.chat_id
-            ):
-                continue
+                if not _match_compiled(rule._compiled_recipient, rule.recipient, ctx.chat_id):
+                    continue
 
-            if not _match_compiled(
-                rule._compiled_channel, rule.channel, ctx.channel_type
-            ):
-                continue
+                if not _match_compiled(rule._compiled_channel, rule.channel, ctx.channel_type):
+                    continue
 
-            if not _match_compiled(
-                rule._compiled_content, rule.content_regex, ctx.text
-            ):
-                continue
+                if not _match_compiled(rule._compiled_content, rule.content_regex, ctx.text):
+                    continue
 
-            return rule, rule.instruction
+            result = (rule, rule.instruction)
+            self._cache_put(cache_key, result)
+            return result
 
-        return None, None
+        result = (None, None)
+        self._cache_put(cache_key, result)
+        return result

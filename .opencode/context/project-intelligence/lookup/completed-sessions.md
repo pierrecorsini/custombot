@@ -38,6 +38,24 @@
 | Logging | `src/logging_config.py`, `src/monitoring.py`, `src/health.py` |
 | UX | `src/cli_output.py`, `src/progress.py`, `src/setup_wizard.py` |
 
+## 2026-04-12: Media Output (TTS + PDF)
+
+**Status**: Completed
+
+**Deliverables**:
+- `BaseChannel.send_audio()` + `send_document()` abstract methods
+- WhatsAppChannel media sending via neonize
+- `SendVoiceNote` skill (edge-tts → audio → callback)
+- `GeneratePDFReport` skill (markdown → HTML → PDF → callback)
+- `send_media` callback bridge through ToolExecutor
+- Dependencies: edge-tts, xhtml2pdf, markdown
+
+**Architecture decision**: Callback injection (Option 2c) — `send_media` callback threaded from channel → bot → ToolExecutor → skill.
+
+**Files affected**: `channels/base.py`, `channels/whatsapp.py`, `src/core/tool_executor.py`, `src/bot.py`, `skills/builtin/` (new media skills)
+
+---
+
 ## Pending Work
 
 ### code-optimization (0/8 tasks)

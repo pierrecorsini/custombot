@@ -26,7 +26,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional, Mapping
+from typing import Mapping, Optional
 
 from src.utils.logging_utils import log_execution
 
@@ -111,9 +111,7 @@ class AsyncExecutor:
                     env=process_env,
                 )
 
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
             stdout = stdout_bytes.decode("utf-8", errors="replace")
             stderr = stderr_bytes.decode("utf-8", errors="replace")

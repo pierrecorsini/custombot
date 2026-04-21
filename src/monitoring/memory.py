@@ -29,10 +29,9 @@ import logging
 import platform
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import Any, Callable, Optional
 
-if TYPE_CHECKING:
-    pass
+from src.utils.singleton import get_or_create_singleton, reset_singleton
 
 log = logging.getLogger(__name__)
 
@@ -302,9 +301,7 @@ class MemoryMonitor:
 
             await asyncio.sleep(interval_seconds)
 
-    def start_periodic_check(
-        self, interval_seconds: float = DEFAULT_MEMORY_CHECK_INTERVAL
-    ) -> None:
+    def start_periodic_check(self, interval_seconds: float = DEFAULT_MEMORY_CHECK_INTERVAL) -> None:
         """
         Start periodic memory checking in the background.
 
@@ -347,16 +344,14 @@ class MemoryMonitor:
         return self._running
 
 
-# Global monitor instance (lazy-initialized)
-_global_monitor: Optional[MemoryMonitor] = None
-
-
 def get_global_monitor(
     warning_threshold_percent: float = DEFAULT_MEMORY_WARNING_THRESHOLD,
     critical_threshold_percent: float = 90.0,
 ) -> MemoryMonitor:
     """
     Get or create the global memory monitor instance.
+
+    Thread-safe singleton using get_or_create_singleton from utils.
 
     Args:
         warning_threshold_percent: Warning threshold percentage.
@@ -365,13 +360,16 @@ def get_global_monitor(
     Returns:
         The global MemoryMonitor instance.
     """
-    global _global_monitor
-    if _global_monitor is None:
-        _global_monitor = MemoryMonitor(
-            warning_threshold_percent=warning_threshold_percent,
-            critical_threshold_percent=critical_threshold_percent,
-        )
-    return _global_monitor
+    return get_or_create_singleton(
+        MemoryMonitor,
+        warning_threshold_percent=warning_threshold_percent,
+        critical_threshold_percent=critical_threshold_percent,
+    )
+
+
+def reset_global_monitor() -> None:
+    """Reset the global memory monitor (useful for testing)."""
+    reset_singleton(MemoryMonitor)
 
 
 async def check_memory_health() -> dict[str, Any]:

@@ -109,9 +109,7 @@ class TaskSchedulerSkill(BaseSkill):
         chat_id = workspace_dir.name
 
         actions = {
-            "create": lambda: self._create(
-                scheduler, chat_id, label, prompt, schedule, compare
-            ),
+            "create": lambda: self._create(scheduler, chat_id, label, prompt, schedule, compare),
             "list": lambda: self._list(scheduler, chat_id),
             "cancel": lambda: self._cancel(scheduler, chat_id, task_id),
             "status": lambda: self._status(scheduler, chat_id, task_id),
@@ -142,9 +140,7 @@ class TaskSchedulerSkill(BaseSkill):
 
         stype = schedule.get("type", "")
         if stype not in ("daily", "interval", "cron"):
-            return (
-                f"❌ Type de schedule invalide: {stype}. Utilise: daily, interval, cron"
-            )
+            return f"❌ Type de schedule invalide: {stype}. Utilise: daily, interval, cron"
 
         if stype in ("daily", "cron") and "hour" not in schedule:
             return "❌ 'hour' est requis pour les types daily et cron"

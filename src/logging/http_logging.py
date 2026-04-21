@@ -15,7 +15,6 @@ from typing import Any, Optional
 
 import httpx
 
-
 # Sensitive field patterns to redact in logs
 SENSITIVE_FIELDS = frozenset(
     {
@@ -48,10 +47,10 @@ SENSITIVE_PATTERNS = [
 def _should_log_http_requests() -> bool:
     """Check if HTTP requests should be logged at INFO level (verbose mode only)."""
     try:
-        from src.logging.logging_config import get_verbosity, VerbosityLevel
+        from src.logging.logging_config import VerbosityLevel, get_verbosity
 
         return get_verbosity() == VerbosityLevel.VERBOSE
-    except Exception:
+    except ImportError:
         return False
 
 
@@ -87,6 +86,8 @@ def get_correlation_id() -> str:
     try:
         from src.logging.logging_config import (
             get_correlation_id as _get,
+        )
+        from src.logging.logging_config import (
             new_correlation_id,
             set_correlation_id,
         )

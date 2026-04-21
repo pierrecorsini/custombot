@@ -16,50 +16,71 @@ All skill I/O is confined to that directory.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import json
 import logging
 import time
 import uuid
-import contextvars
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
-from src.channels.base import IncomingMessage
-from src.config import Config
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_message_function_tool_call import ChatCompletionMessageFunctionToolCall
+from openai.types.chat import (
+    ChatCompletionMessageParam,
+    ChatCompletionToolMessageParam,
+    ChatCompletionToolParam,
+)
+
+from src.channels.base import IncomingMessage, SendMediaCallback
 
 if TYPE_CHECKING:
     from src.channels.base import BaseChannel
 from src.constants import (
+    DEFAULT_CHAT_RATE_LIMIT,
     MAX_LRU_CACHE_SIZE,
     MAX_MESSAGE_LENGTH,
     MEMORY_CHECK_INTERVAL_SECONDS,
     MEMORY_CRITICAL_THRESHOLD_PERCENT,
     MEMORY_WARNING_THRESHOLD_PERCENT,
+    RATE_LIMIT_WINDOW_SECONDS,
+    SCHEDULED_ERROR_PREFIXES,
     WORKSPACE_DIR,
 )
-from src.logging import set_correlation_id, clear_correlation_id
-from src.rate_limiter import RateLimiter
-from src.utils.type_guards import is_incoming_message
-from src.utils import LRULockCache
-from src.db import Database
-from src.llm import LLMClient
-from src.memory import Memory
-from src.message_queue import MessageQueue
-from src.routing import RoutingEngine
-from src.monitoring import get_metrics_collector, PerformanceMetrics
-from src.skills import SkillRegistry
+from src.core.context_builder import ChatMessage, build_context
+from src.core.instruction_loader import InstructionLoader
+from src.core.serialization import serialize_tool_call_message
+from src.core.project_context import ProjectContextLoader as _ProjectContextLoaderImpl
 from src.core.tool_executor import ToolExecutor
-from src.core.context_builder import build_context
 from src.core.tool_formatter import (
+    ToolLogEntry,
     format_response_with_tool_log,
     format_single_tool_execution,
 )
-from src.core.instruction_loader import InstructionLoader
-from src.core.project_context import ProjectContextLoader as _ProjectContextLoaderImpl
-from src.utils.protocols import ProjectStore, ProjectContextLoader, MemoryMonitor
 from src.core.topic_cache import TopicCache, parse_meta
+from src.db import Database
+from src.exceptions import ErrorCode, LLMError
+from src.llm import LLMClient
+from src.logging import clear_correlation_id, get_correlation_id, set_correlation_id
+from src.message_queue import MessageQueue
+from src.monitoring import PerformanceMetrics, SessionMetrics, get_metrics_collector
+from src.rate_limiter import RateLimiter
+from src.routing import RoutingEngine
+from src.security.audit import SkillAuditLogger
 from src.security.prompt_injection import filter_response_content
+from src.skills import SkillRegistry
+from src.utils import LRULockCache
+from src.utils.circuit_breaker import CircuitBreaker
+from src.utils.protocols import (
+    LockProvider,
+    MemoryMonitor,
+    MemoryProtocol,
+    ProjectContextLoader,
+    ProjectStore,
+)
+
 
 log = logging.getLogger(__name__)
 
@@ -92,19 +113,56 @@ class PreflightResult:
         return self.passed
 
 
+@dataclass(slots=True, frozen=True)
+class TurnContext:
+    """Immutable context assembled for a single ReAct turn.
+
+    Built by ``Bot._build_turn_context()`` from routing match, instruction
+    loading, memory reads, and the LLM message list.  Returned as a single
+    object so the context-assembly stage can be unit-tested independently of
+    the full ReAct loop.
+    """
+
+    messages: list[ChatMessage]
+    rule_id: str
+    skill_exec_verbose: str
+    show_errors: bool
+
+
+@dataclass(slots=True, frozen=True)
+class BotConfig:
+    """Explicit configuration surface for the Bot orchestrator.
+
+    Extracts the specific values Bot reads from the full application
+    config, making the dependency surface narrow, typed, and testable
+    without coupling to the entire config structure.
+
+    Constructed in ``builder.py`` from the full ``Config`` and injected
+    into ``Bot.__init__()`` — no ``Config`` import needed here.
+    """
+
+    max_tool_iterations: int
+    memory_max_history: int
+    system_prompt_prefix: str
+    stream_response: bool = False
+
+
 class Bot:
     def __init__(
         self,
-        config: Config,
+        config: BotConfig,
         db: Database,
         llm: LLMClient,
-        memory: Memory,
+        memory: MemoryProtocol,
         skills: SkillRegistry,
         routing: RoutingEngine | None = None,
         instructions_dir: str = "",
         message_queue: MessageQueue | None = None,
         project_store: ProjectStore | None = None,
         project_ctx: ProjectContextLoader | None = None,
+        session_metrics: "SessionMetrics | None" = None,
+        instruction_loader: InstructionLoader | None = None,
+        chat_locks: LockProvider | None = None,
     ) -> None:
         self._cfg = config
         self._db = db
@@ -116,7 +174,9 @@ class Bot:
         self._message_queue = message_queue
         self._project_store = project_store
         # Semaphore: only one active LLM call per chat at a time (bounded LRU cache)
-        self._chat_locks = LRULockCache(max_size=MAX_LRU_CACHE_SIZE)
+        self._chat_locks: LockProvider = (
+            chat_locks if chat_locks is not None else LRULockCache(max_size=MAX_LRU_CACHE_SIZE)
+        )
         # Rate limiter for skill execution
         self._rate_limiter = RateLimiter()
         # Per-chat message rate limiter
@@ -130,9 +190,11 @@ class Bot:
             skills_registry=skills,
             rate_limiter=self._rate_limiter,
             metrics=self._metrics,
+            on_skill_executed=session_metrics.increment_skills if session_metrics else None,
+            audit_logger=SkillAuditLogger(Path(WORKSPACE_DIR) / "logs"),
         )
-        # Instruction file loader (mtime-cached)
-        self._instruction_loader = InstructionLoader(self._instructions_dir)
+        # Instruction file loader (mtime-cached) — prefer injected shared instance
+        self._instruction_loader = instruction_loader or InstructionLoader(self._instructions_dir)
         # Project context loader — prefer injected shared instance
         self._project_ctx = project_ctx or _ProjectContextLoaderImpl(project_store)
         # Per-chat topic summary cache
@@ -167,9 +229,7 @@ class Bot:
                 critical_threshold_percent=MEMORY_CRITICAL_THRESHOLD_PERCENT,
             )
             # Register the chat_locks cache for size tracking
-            self._memory_monitor.register_cache(
-                "chat_locks", lambda: len(self._chat_locks._cache)
-            )
+            self._memory_monitor.register_cache("chat_locks", lambda: len(self._chat_locks))
             self._memory_monitor.start_periodic_check(
                 interval_seconds=MEMORY_CHECK_INTERVAL_SECONDS
             )
@@ -190,6 +250,41 @@ class Bot:
             await self._memory_monitor.stop()
             self._memory_monitor = None
             log.info("Memory monitoring stopped")
+
+    # ── wiring validation ────────────────────────────────────────────────────
+
+    def validate_wiring(self) -> list[tuple[str, bool, str]]:
+        """Validate that all core components are wired correctly.
+
+        Returns a list of (component_name, is_ok, message) tuples.
+        Logs an overall summary at INFO or WARNING level.
+        """
+        checks: list[tuple[str, bool, str]] = [
+            ("database", self._db is not None, "Database instance missing"),
+            ("llm", self._llm is not None, "LLM client missing"),
+            ("memory", self._memory is not None, "Memory instance missing"),
+            ("skills", self._skills is not None, "Skill registry missing"),
+            ("routing", self._routing is not None, "Routing engine missing"),
+        ]
+        failed = [name for name, ok, _ in checks if not ok]
+        if failed:
+            log.warning("Wiring validation FAILED — missing: %s", ", ".join(failed))
+        else:
+            log.info("Wiring validation passed — all %d components OK", len(checks))
+        return checks
+
+    # ── LLM diagnostics ──────────────────────────────────────────────────────
+
+    def get_llm_status(self) -> CircuitBreaker | None:
+        """Return the LLM circuit breaker for health/metrics endpoints.
+
+        Provides read-only access to the circuit breaker without exposing
+        the private ``_llm`` client.  Returns ``None`` if the LLM client
+        is not wired.
+        """
+        if self._llm is None:
+            return None
+        return self._llm.circuit_breaker
 
     # ── crash recovery ────────────────────────────────────────────────────────
 
@@ -232,12 +327,8 @@ class Bot:
             try:
                 # Validate sender against current ACL before reprocessing
                 if channel is not None and hasattr(channel, "_is_allowed"):
-                    # Use sender_name as fallback since queued messages may not store sender_id
-                    sender_id = (
-                        getattr(queued_msg, "sender_id", None)
-                        or queued_msg.sender_name
-                        or ""
-                    )
+                    # Use sender_id from queued message, fallback to sender_name
+                    sender_id = queued_msg.sender_id or queued_msg.sender_name or ""
                     if not channel._is_allowed(sender_id):
                         log.warning(
                             "Skipping recovery of message %s — sender %s not in allowed_numbers",
@@ -246,15 +337,24 @@ class Bot:
                         )
                         skipped_acl += 1
                         continue
+                elif channel is None:
+                    # No channel available — defer recovery until ACL can be checked
+                    log.warning(
+                        "Skipping recovery of message %s — no channel for ACL check. "
+                        "Recovery should be called after channel initialization.",
+                        queued_msg.message_id,
+                    )
+                    skipped_acl += 1
+                    continue
 
                 # Reconstruct IncomingMessage from queued data
-                from src.channels.base import IncomingMessage as IM
-
-                recovered_msg = IM(
+                recovered_msg = IncomingMessage(
                     message_id=queued_msg.message_id,
                     chat_id=queued_msg.chat_id,
+                    sender_id=queued_msg.sender_id or "",
+                    sender_name=queued_msg.sender_name or "",
                     text=queued_msg.text,
-                    sender_name=queued_msg.sender_name,
+                    timestamp=queued_msg.created_at or time.time(),
                 )
 
                 # Process the recovered message
@@ -313,7 +413,7 @@ class Bot:
         Returns:
             PreflightResult indicating whether the message should be processed.
         """
-        if not is_incoming_message(msg):
+        if not isinstance(msg, IncomingMessage):
             return PreflightResult(passed=False, reason="invalid")
 
         if not msg.text or not msg.text.strip():
@@ -337,6 +437,11 @@ class Bot:
     ) -> str | None:
         """
         Process an incoming message and return the response text.
+
+        Performs dedup, rate limiting, and the full ReAct loop. Safe to call
+        directly — ``preflight_check()`` is an optional pre-filter to avoid
+        showing typing indicators for messages that will be rejected anyway.
+
         Returns None if the message was a duplicate or filtered.
 
         Args:
@@ -344,14 +449,13 @@ class Bot:
             channel: Optional channel instance for getting channel-specific prompts.
             stream_callback: Optional async callback for streaming tool executions in real-time.
         """
+        # Runtime validation for incoming message
+        if not isinstance(msg, IncomingMessage):
+            log.warning("Invalid incoming message received: %r", msg)
+            return None
+
         # Set correlation ID for request tracing (use custom ID if provided)
         correlation_id = set_correlation_id(msg.correlation_id)
-
-        # Runtime validation for incoming message
-        if not is_incoming_message(msg):
-            log.warning("Invalid incoming message received: %r", msg)
-            clear_correlation_id()
-            return None
 
         # Reject empty messages early (optimization + prevents LLM confusion)
         if not msg.text or not msg.text.strip():
@@ -386,13 +490,23 @@ class Bot:
             extra={"chat_id": msg.chat_id, "message_id": msg.message_id},
         )
 
-        # Note: Dedup check is already performed in preflight_check() which
-        # is always called before handle_message() in the message pipeline.
-        # Skipping the redundant check here saves one async dict lookup per message.
+        # Dedup: single authoritative gate.  preflight_check() also performs
+        # this check but only as an optimisation to avoid the typing indicator.
+        if await self._db.message_exists(msg.message_id):
+            log.debug(
+                "Duplicate message %s from chat %s, skipping",
+                msg.message_id,
+                msg.chat_id,
+                extra={"chat_id": msg.chat_id, "message_id": msg.message_id},
+            )
+            clear_correlation_id()
+            return None
 
-        # Check per-chat message rate limit (30 messages per minute)
+        # Check per-chat message rate limit
         rate_result = self._chat_rate_limiter.check_message_rate(
-            msg.chat_id, limit=30, window_seconds=60
+            msg.chat_id,
+            limit=DEFAULT_CHAT_RATE_LIMIT,
+            window_seconds=RATE_LIMIT_WINDOW_SECONDS,
         )
         if not rate_result.allowed:
             log.warning(
@@ -410,9 +524,8 @@ class Bot:
             clear_correlation_id()
             return None
 
-        # Get or create per-chat lock (bounded LRU cache)
-        chat_lock = await self._chat_locks.get_or_create(msg.chat_id)
-        async with chat_lock:
+        # Acquire per-chat lock via context manager (tracks ref count for safe eviction)
+        async with self._chat_locks.acquire(msg.chat_id):
             # Track message processing time
             start_time = time.perf_counter()
 
@@ -424,9 +537,7 @@ class Bot:
             _routing_show_errors_var.set(True)
 
             try:
-                result = await self._process(
-                    msg, channel=channel, stream_callback=stream_callback
-                )
+                result = await self._process(msg, channel=channel, stream_callback=stream_callback)
                 # Mark message as completed after successful processing
                 if self._message_queue:
                     await self._message_queue.complete(msg.message_id)
@@ -434,11 +545,15 @@ class Bot:
                 # Track message processing latency
                 processing_time = time.perf_counter() - start_time
                 self._metrics.track_message_latency(processing_time)
+                self._metrics.track_chat_message(msg.chat_id)
 
                 # Update queue depth if available
                 if self._message_queue:
                     queue_depth = await self._message_queue.get_pending_count()
                     self._metrics.update_queue_depth(queue_depth)
+
+                # Update active chat count from LRU cache
+                self._metrics.update_active_chat_count(len(self._chat_locks))
 
                 log.info(
                     "Message %s processed successfully in %.2fs",
@@ -501,7 +616,7 @@ class Bot:
         Returns:
             The LLM response text, or None on failure.
         """
-        correlation_id = set_correlation_id(f"sched_{chat_id}")
+        correlation_id = set_correlation_id(f"sched_{chat_id}_{uuid.uuid4().hex[:8]}")
 
         log.info(
             "Processing scheduled task for chat %s",
@@ -509,107 +624,169 @@ class Bot:
             extra={"chat_id": chat_id},
         )
 
-        # Ensure per-chat workspace directory exists
-        workspace_dir = self._memory.ensure_workspace(chat_id)
+        # Acquire per-chat lock to prevent concurrent execution with handle_message
+        # or other scheduled tasks for the same chat (ref-tracked for safe eviction)
+        async with self._chat_locks.acquire(chat_id):
+            try:
+                # Ensure per-chat workspace directory exists
+                try:
+                    workspace_dir = self._memory.ensure_workspace(chat_id)
+                except OSError as exc:
+                    log.warning(
+                        "Scheduled task for chat %s aborted: workspace creation failed: %s",
+                        chat_id,
+                        exc,
+                        extra={"chat_id": chat_id, "correlation_id": correlation_id},
+                    )
+                    return None
 
-        # Get channel-specific prompt (e.g. WhatsApp formatting rules)
-        channel_prompt = channel.get_channel_prompt() if channel else None
+                # Get channel-specific prompt (e.g. WhatsApp formatting rules)
+                channel_prompt = channel.get_channel_prompt() if channel else None
 
-        # Build LLM context with the scheduled prompt as the user message
+                # Build LLM context with the scheduled prompt as the user message
+                try:
+                    messages = await self._assemble_context(
+                        chat_id=chat_id,
+                        channel_prompt=channel_prompt,
+                    )
+                    messages.append(ChatMessage(role="user", content=prompt))
+                except OSError as exc:
+                    log.warning(
+                        "Scheduled task for chat %s aborted: context build failed: %s",
+                        chat_id,
+                        exc,
+                        extra={"chat_id": chat_id, "correlation_id": correlation_id},
+                    )
+                    return None
+
+                # Run the ReAct loop
+                tools = self._skills.tool_definitions
+                response_text, _ = await self._react_loop(
+                    chat_id=chat_id,
+                    messages=[m.to_api_dict() for m in messages],
+                    tools=tools if tools else None,
+                    workspace_dir=workspace_dir,
+                    channel=channel,
+                )
+
+                # Skip persistence for known error responses (circuit breaker,
+                # empty LLM output, max iterations) — they are not real content.
+                if response_text and any(
+                    response_text.startswith(prefix)
+                    for prefix in SCHEDULED_ERROR_PREFIXES
+                ):
+                    log.warning(
+                        "Scheduled task for chat %s produced an error response, "
+                        "skipping persistence: %.80s",
+                        chat_id,
+                        response_text,
+                        extra={"chat_id": chat_id, "correlation_id": correlation_id},
+                    )
+                    return None
+
+                # Guard against None response_text (e.g. circuit breaker returned
+                # an error, LLM produced empty response, or max iterations hit).
+                if response_text is None:
+                    log.warning(
+                        "Scheduled task for chat %s produced None response, "
+                        "skipping persistence",
+                        chat_id,
+                        extra={"chat_id": chat_id, "correlation_id": correlation_id},
+                    )
+                    return None
+
+                # Parse topic META from response before persisting
+                response_text, meta = parse_meta(response_text)
+                if meta:
+                    self._handle_topic_meta(chat_id, meta)
+
+                # Filter sensitive content (PII, secrets, API keys) before persisting
+                filter_result = filter_response_content(response_text)
+                if filter_result.flagged:
+                    response_text = filter_result.sanitized_content
+                    log.warning(
+                        "Filtered sensitive content from scheduled response: %s",
+                        filter_result.categories,
+                        extra={
+                            "chat_id": chat_id,
+                            "filter_categories": filter_result.categories,
+                        },
+                    )
+
+                # Persist both turns in conversation history
+                await self._db.upsert_chat(chat_id, "Scheduler")
+                await self._db.save_message(
+                    chat_id=chat_id,
+                    role="user",
+                    content=prompt,
+                    name="Scheduler",
+                    message_id=f"sched_{uuid.uuid4().hex[:8]}",
+                )
+                await self._db.save_message(
+                    chat_id=chat_id,
+                    role="assistant",
+                    content=response_text,
+                )
+
+                log.info(
+                    "Scheduled task for chat %s completed successfully",
+                    chat_id,
+                    extra={"chat_id": chat_id},
+                )
+                return response_text
+
+            except Exception as exc:
+                log.error(
+                    "Scheduled task failed for chat %s: %s",
+                    chat_id,
+                    exc,
+                    exc_info=True,
+                    extra={"chat_id": chat_id, "correlation_id": correlation_id},
+                )
+                return None
+            finally:
+                clear_correlation_id()
+
+    # ── internal processing ────────────────────────────────────────────────
+
+    async def _assemble_context(
+        self,
+        chat_id: str,
+        channel_prompt: str | None = None,
+        instruction: str = "",
+    ) -> list[ChatMessage]:
+        """Read memories and build the LLM message list.
+
+        Shared by ``_build_turn_context()`` (normal messages) and
+        ``process_scheduled()`` (scheduled tasks) so both paths go through
+        the same token-budget trimming and sanitization in ``build_context()``.
+        """
         memory_content = await self._memory.read_memory(chat_id)
         agents_content = await self._memory.read_agents_md(chat_id)
         project_context = await self._get_project_context(chat_id)
         topic_summary = self._topic_cache.read(chat_id)
-        messages = await build_context(
+        return await build_context(
             db=self._db,
             config=self._cfg,
             chat_id=chat_id,
             memory_content=memory_content,
             agents_md=agents_content,
+            instruction=instruction,
             channel_prompt=channel_prompt,
             project_context=project_context,
             topic_summary=topic_summary,
         )
-        # Append the scheduled prompt as the user turn
-        messages.append({"role": "user", "content": prompt})
 
-        # Run the ReAct loop
-        tools = self._skills.tool_definitions
-        try:
-            response_text, _ = await self._react_loop(
-                chat_id=chat_id,
-                messages=messages,
-                tools=tools if tools else None,
-                workspace_dir=workspace_dir,
-                channel=channel,
-            )
-
-            # Parse topic META from response before persisting
-            response_text, meta = parse_meta(response_text)
-            if meta:
-                self._handle_topic_meta(chat_id, meta)
-
-            # Persist both turns in conversation history
-            await self._db.upsert_chat(chat_id, "Scheduler")
-            await self._db.save_message(
-                chat_id=chat_id,
-                role="user",
-                content=prompt,
-                name="Scheduler",
-                message_id=f"sched_{uuid.uuid4().hex[:8]}",
-            )
-            await self._db.save_message(
-                chat_id=chat_id,
-                role="assistant",
-                content=response_text,
-            )
-
-            log.info(
-                "Scheduled task for chat %s completed successfully",
-                chat_id,
-                extra={"chat_id": chat_id},
-            )
-            return response_text
-
-        except Exception as exc:
-            log.error(
-                "Scheduled task failed for chat %s: %s",
-                chat_id,
-                exc,
-                exc_info=True,
-                extra={"chat_id": chat_id, "correlation_id": correlation_id},
-            )
-            return None
-        finally:
-            clear_correlation_id()
-
-    # ── internal processing ────────────────────────────────────────────────
-
-    async def _process(
+    async def _build_turn_context(
         self,
         msg: IncomingMessage,
         channel: "BaseChannel | None" = None,
-        stream_callback: StreamCallback | None = None,
-    ) -> str:
-        log.debug(
-            "Starting _process for chat %s",
-            msg.chat_id,
-            extra={"chat_id": msg.chat_id},
-        )
-        # 1. Persist user turn
-        await self._db.upsert_chat(msg.chat_id, msg.sender_name)
-        await self._db.save_message(
-            chat_id=msg.chat_id,
-            role="user",
-            content=msg.text,
-            name=msg.sender_name,
-            message_id=msg.message_id,
-        )
+    ) -> TurnContext | None:
+        """Match routing rule, load instruction, and assemble LLM messages.
 
-        # 2. Ensure per-chat workspace directory exists (seeds AGENTS.md)
-        workspace_dir = self._memory.ensure_workspace(msg.chat_id)
-
-        # 3. Match routing rule to get instruction file
+        Returns ``None`` when routing is disabled or no rule matches.
+        """
+        # 1. Match routing rule to get instruction file
         if not self._routing:
             log.warning("No routing engine configured, skipping message")
             return None
@@ -633,47 +810,82 @@ class Bot:
             instruction_filename,
             msg.sender_id,
         )
-        instruction_content = self._load_instruction(instruction_filename)
 
-        # Get channel-specific prompt
+        # 2. Load instruction and channel-specific prompt
+        instruction_content = self._load_instruction(instruction_filename)
         channel_prompt = channel.get_channel_prompt() if channel else None
 
-        # 4. Build LLM message list (async — fetches history from DB)
-        memory_content = await self._memory.read_memory(msg.chat_id)
-        agents_content = await self._memory.read_agents_md(msg.chat_id)
-        project_context = await self._get_project_context(msg.chat_id)
-        topic_summary = self._topic_cache.read(msg.chat_id)
-        messages = await build_context(
-            db=self._db,
-            config=self._cfg,
+        # 3. Build LLM message list (async — fetches history from DB)
+        messages = await self._assemble_context(
             chat_id=msg.chat_id,
-            memory_content=memory_content,
-            agents_md=agents_content,
-            instruction=instruction_content,
             channel_prompt=channel_prompt,
-            project_context=project_context,
-            topic_summary=topic_summary,
+            instruction=instruction_content,
         )
 
-        # 5. Run the ReAct loop with optional streaming
-        tools = self._skills.tool_definitions
-        verbose = matched_rule.skillExecVerbose
-        stream_cb = stream_callback if verbose == "full" else None
-        raw_response, tool_log = await self._react_loop(
-            chat_id=msg.chat_id,
+        return TurnContext(
             messages=messages,
+            rule_id=matched_rule.id,
+            skill_exec_verbose=matched_rule.skillExecVerbose,
+            show_errors=matched_rule.showErrors,
+        )
+
+    async def _process(
+        self,
+        msg: IncomingMessage,
+        channel: "BaseChannel | None" = None,
+        stream_callback: StreamCallback | None = None,
+    ) -> str:
+        log.debug(
+            "Starting _process for chat %s",
+            msg.chat_id,
+            extra={"chat_id": msg.chat_id},
+        )
+        # 1. Persist user turn
+        await self._db.upsert_chat(msg.chat_id, msg.sender_name)
+        try:
+            await self._db.save_message(
+                chat_id=msg.chat_id,
+                role="user",
+                content=msg.text,
+                name=msg.sender_name,
+                message_id=msg.message_id,
+            )
+        except Exception as exc:
+            log.error(
+                "Failed to persist user turn for chat %s: %s",
+                msg.chat_id,
+                exc,
+                exc_info=True,
+                extra={"chat_id": msg.chat_id},
+            )
+
+        # 2. Ensure per-chat workspace directory exists (seeds AGENTS.md)
+        workspace_dir = self._memory.ensure_workspace(msg.chat_id)
+
+        # 3. Assemble turn context (routing, instruction, memory, context)
+        ctx = await self._build_turn_context(msg, channel)
+        if not ctx:
+            return None
+
+        # 4. Run the ReAct loop with optional streaming
+        tools = self._skills.tool_definitions
+        verbose = ctx.skill_exec_verbose
+        stream_cb = stream_callback if verbose == "full" else None
+        raw_response, tool_log, buffered_persist = await self._react_loop(
+            chat_id=msg.chat_id,
+            messages=[m.to_api_dict() for m in ctx.messages],
             tools=tools if tools else None,
             workspace_dir=workspace_dir,
             stream_callback=stream_cb,
             channel=channel,
         )
 
-        # 6. Parse topic detection META from response
+        # 5. Parse topic detection META from response
         response_text, meta = parse_meta(raw_response)
         if meta:
             self._handle_topic_meta(msg.chat_id, meta)
 
-        # 6b. Filter sensitive content (PII, secrets, API keys) from LLM response
+        # 5b. Filter sensitive content (PII, secrets, API keys) from LLM response
         filter_result = filter_response_content(response_text)
         if filter_result.flagged:
             response_text = filter_result.sanitized_content
@@ -686,16 +898,13 @@ class Bot:
                 },
             )
 
-        # 7. Append tool summary if skillExecVerbose == "summary"
+        # 6. Append tool summary if skillExecVerbose == "summary"
         if verbose == "summary" and tool_log:
             response_text = format_response_with_tool_log(response_text, tool_log)
 
-        # 8. Persist assistant turn
-        await self._db.save_message(
-            chat_id=msg.chat_id,
-            role="assistant",
-            content=response_text,
-        )
+        # 7. Persist assistant turn + buffered tool messages in a single batch write
+        batch = [*buffered_persist, {"role": "assistant", "content": response_text}]
+        await self._db.save_messages_batch(chat_id=msg.chat_id, messages=batch)
 
         return response_text
 
@@ -704,14 +913,14 @@ class Bot:
     async def _react_loop(
         self,
         chat_id: str,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None,
+        messages: list[ChatCompletionMessageParam],
+        tools: list[ChatCompletionToolParam] | None,
         workspace_dir: Path,
         stream_callback: StreamCallback | None = None,
         channel: "BaseChannel | None" = None,
-    ) -> tuple[str, list[dict[str, Any]]]:
+    ) -> tuple[str, list[ToolLogEntry], list[dict]]:
         """
-        Run the ReAct loop and return response text with tool execution log.
+        Run the ReAct loop and return response text, tool log, and buffered messages.
 
         Args:
             chat_id: Chat identifier for logging.
@@ -722,54 +931,79 @@ class Bot:
             channel: Optional channel for media-sending callback injection.
 
         Returns:
-            Tuple of (response_text, tool_log) where tool_log contains
-            dicts with 'name', 'args', and 'result' keys.
+            Tuple of (response_text, tool_log, buffered_persist) where *tool_log*
+            contains :class:`ToolLogEntry` records and *buffered_persist* holds
+            dicts suitable for :meth:`Database.save_messages_batch` — one per
+            assistant tool-call turn and one per tool-result message accumulated
+            across all iterations.
         """
-        max_iter = self._cfg.llm.max_tool_iterations
-        tool_log: list[dict[str, Any]] = []
+        max_iter = self._cfg.max_tool_iterations
+        tool_log: list[ToolLogEntry] = []
+        buffered_persist: list[dict] = []
+        use_streaming = self._cfg.stream_response
 
         for iteration in range(max_iter):
             # Track LLM latency
             llm_start = time.perf_counter()
-            completion = await self._llm.chat(messages, tools=tools)
+            try:
+                if use_streaming:
+                    # Build a streaming-aware callback that forwards text
+                    # chunks to the user via the stream_callback (which
+                    # sends via the channel).  Only flush chunks for the
+                    # final text response — tool-call iterations accumulate
+                    # silently.
+                    completion = await self._llm.chat_stream(
+                        messages,
+                        tools=tools,
+                        on_chunk=stream_callback,
+                    )
+                else:
+                    completion = await self._llm.chat(messages, tools=tools)
+            except LLMError as exc:
+                if exc.error_code == ErrorCode.LLM_CIRCUIT_BREAKER_OPEN:
+                    log.warning("Circuit breaker open — returning unavailable message")
+                    self._metrics.track_react_iterations(iteration + 1)
+                    self._metrics.track_conversation_depth(chat_id, iteration + 1)
+                    return (
+                        "⚠️ Service temporarily unavailable. "
+                        "The AI provider is experiencing issues. Please try again in a minute.",
+                        tool_log,
+                        buffered_persist,
+                    )
+                raise
             llm_latency = time.perf_counter() - llm_start
             self._metrics.track_llm_latency(llm_latency)
 
             choice = completion.choices[0]
             finish = choice.finish_reason
 
-            # Use pattern matching for finish reason handling
-            match finish:
-                case "tool_calls":
-                    iteration_log = await self._process_tool_calls(
-                        choice,
-                        messages,
-                        chat_id,
-                        workspace_dir,
-                        stream_callback,
-                        channel,
+            # Check for tool calls — either explicit finish_reason or edge case
+            if finish == "tool_calls" or choice.message.tool_calls:
+                iteration_log, iteration_buffered = await self._process_tool_calls(
+                    choice,
+                    messages,
+                    chat_id,
+                    workspace_dir,
+                    stream_callback,
+                    channel,
+                )
+                tool_log.extend(iteration_log)
+                buffered_persist.extend(iteration_buffered)
+            else:
+                # LLM is done — return the final text
+                content = choice.message.content
+                if not content or not content.strip():
+                    self._metrics.track_react_iterations(iteration + 1)
+                    self._metrics.track_conversation_depth(chat_id, iteration + 1)
+                    return (
+                        "(The assistant generated an empty response. "
+                        "Please try rephrasing your request.)",
+                        tool_log,
+                        buffered_persist,
                     )
-                    tool_log.extend(iteration_log)
-                case _ if choice.message.tool_calls:
-                    # Has tool calls but finish isn't "tool_calls" (edge case)
-                    iteration_log = await self._process_tool_calls(
-                        choice,
-                        messages,
-                        chat_id,
-                        workspace_dir,
-                        stream_callback,
-                        channel,
-                    )
-                    tool_log.extend(iteration_log)
-                case _:
-                    # LLM is done — return the final text
-                    content = choice.message.content
-                    if not content or not content.strip():
-                        return (
-                            "(The assistant generated an empty response. Please try rephrasing your request.)",
-                            tool_log,
-                        )
-                    return content, tool_log
+                self._metrics.track_react_iterations(iteration + 1)
+                self._metrics.track_conversation_depth(chat_id, iteration + 1)
+                return content, tool_log, buffered_persist
 
         log.warning(
             "Reached max tool iterations (%d) for chat %s",
@@ -777,48 +1011,51 @@ class Bot:
             chat_id,
             extra={"chat_id": chat_id, "max_iterations": max_iter},
         )
+        self._metrics.track_react_iterations(max_iter)
+        self._metrics.track_conversation_depth(chat_id, max_iter)
         # Build informative truncation message with tool summary
         tool_summary = ""
         if tool_log:
-            tool_names = [entry["name"] for entry in tool_log]
+            tool_names = [entry.name for entry in tool_log]
             unique_tools = dict.fromkeys(tool_names)  # preserve order, deduplicate
-            tool_summary = (
-                f"\n\n🔧 Tools used ({len(tool_log)} calls): {', '.join(unique_tools)}"
-            )
+            tool_summary = f"\n\n🔧 Tools used ({len(tool_log)} calls): {', '.join(unique_tools)}"
         return (
             f"⚠️ Reached maximum tool iterations ({max_iter}). "
             f"The task may be too complex for a single request. "
             f"Try breaking it into smaller steps.{tool_summary}",
             tool_log,
+            buffered_persist,
         )
 
     async def _process_tool_calls(
         self,
-        choice: Any,
-        messages: list[dict[str, Any]],
+        choice: Choice,
+        messages: list[ChatCompletionMessageParam],
         chat_id: str,
         workspace_dir: Path,
         stream_callback: StreamCallback | None = None,
         channel: "BaseChannel | None" = None,
-    ) -> list[dict[str, Any]]:
-        """
-        Process tool calls from an LLM response and append results to messages.
+    ) -> tuple[list[ToolLogEntry], list[dict]]:
+        """Process tool calls from an LLM response and append results to messages.
 
-        Args:
-            choice: The LLM response choice containing tool calls.
-            messages: Conversation history to append results to.
-            chat_id: Chat identifier for logging.
-            workspace_dir: Workspace directory for skill execution.
-            stream_callback: Optional callback to stream tool executions in real-time.
-            channel: Optional channel for creating the send_media callback.
+        Executes all requested tool calls in parallel via ``asyncio.TaskGroup``,
+        then appends results to *messages* in the original call order so the
+        LLM receives correctly-ordered tool-call-result pairs.
 
         Returns:
-            List of dicts with 'name', 'args', and 'result' keys for logging.
+            Tuple of (tool_log, buffered_persist).  *buffered_persist* contains
+            dicts suitable for :meth:`Database.save_messages_batch` — one dict
+            per assistant tool-call turn and one per tool-result message.
         """
-        tool_log: list[dict[str, Any]] = []
+        tool_log: list[ToolLogEntry] = []
+        buffered_persist: list[dict] = []
 
         # Append the assistant's tool-call turn to context
-        messages.append(self._llm.tool_call_to_dict(choice.message))
+        assistant_msg = serialize_tool_call_message(choice.message)
+        messages.append(assistant_msg)
+        buffered_persist.append(
+            {"role": "assistant", "content": assistant_msg.get("content") or ""}
+        )
 
         # Create send_media callback if channel is available
         send_media = None
@@ -835,43 +1072,100 @@ class Bot:
                     else:
                         log.warning("Unknown media kind: %s", kind)
                 except Exception as exc:
-                    log.error("send_media callback failed: %s", exc)
+                    log.error(
+                        "send_media callback failed: %s",
+                        exc,
+                        extra={"chat_id": chat_id, "correlation_id": get_correlation_id()},
+                    )
 
             send_media = _send_media
 
-        # Execute each requested tool
-        for tool_call in choice.message.tool_calls or []:
+        tool_calls = choice.message.tool_calls or []
+        if not tool_calls:
+            return tool_log, buffered_persist
+
+        # Execute all function-type tool calls in parallel via structured concurrency
+        function_calls = [tc for tc in tool_calls if tc.type == "function"]
+        async with asyncio.TaskGroup() as tg:
+            tasks = [
+                tg.create_task(
+                    self._execute_tool_call(tc, chat_id, workspace_dir, send_media)
+                )
+                for tc in function_calls
+            ]
+        results = [t.result() for t in tasks]
+
+        # Append results to messages in original order
+        for tc_id, content, tool_entry in results:
+            tool_msg: ChatCompletionToolMessageParam = {
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "content": content,
+            }
+            messages.append(tool_msg)
+            tool_log.append(tool_entry)
+            buffered_persist.append(
+                {"role": "tool", "content": content, "name": tool_entry.name}
+            )
+            if stream_callback:
+                formatted = format_single_tool_execution(tool_entry)
+                await stream_callback(formatted)
+
+        return tool_log, buffered_persist
+
+    async def _execute_tool_call(
+        self,
+        tool_call: ChatCompletionMessageFunctionToolCall,
+        chat_id: str,
+        workspace_dir: Path,
+        send_media: SendMediaCallback | None,
+    ) -> tuple[str, str, ToolLogEntry]:
+        """Execute a single tool call, returning result data for message assembly.
+
+        Returns:
+            Tuple of ``(tool_call_id, result_content, tool_log_entry)``.
+            Never raises — returns error content on any failure.
+        """
+        tc_id = tool_call.id
+        try:
+            if not tool_call.function or not tool_call.function.name:
+                raise AttributeError("tool_call.function or name is missing")
+
             result = await self._tool_executor.execute(
                 chat_id=chat_id,
                 tool_call=tool_call,
                 workspace_dir=workspace_dir,
                 send_media=send_media,
             )
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                }
-            )
-            # Collect tool execution info for logging
             try:
                 args = json.loads(tool_call.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            tool_entry = {
-                "name": tool_call.function.name,
-                "args": args,
-                "result": result,
-            }
-            tool_log.append(tool_entry)
+            return (
+                tc_id,
+                result,
+                ToolLogEntry(name=tool_call.function.name, args=args, result=result),
+            )
 
-            # Stream tool execution in real-time if callback provided
-            if stream_callback:
-                formatted = format_single_tool_execution(tool_entry)
-                await stream_callback(formatted)
-
-        return tool_log
+        except (AttributeError, TypeError) as exc:
+            log.error(
+                "Malformed tool_call structure in chat %s: %s",
+                chat_id,
+                exc,
+                extra={"chat_id": chat_id, "correlation_id": get_correlation_id()},
+                exc_info=True,
+            )
+            return (
+                tc_id,
+                "⚠️ Malformed tool call: function name or "
+                "arguments were missing or invalid. "
+                "Please retry with properly formatted tool calls.",
+                ToolLogEntry(
+                    name=getattr(tool_call.function, "name", "unknown"),
+                    args={},
+                    result="Malformed tool call — skipped.",
+                ),
+            )
 
     # ── helpers ────────────────────────────────────────────────────────────
 

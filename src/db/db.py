@@ -8,53 +8,72 @@ Storage structure:
         └── messages/
             ├── <chat_id_1>.jsonl   # Messages (JSONL = one JSON per line)
             └── <chat_id_2>.jsonl
+
+Lock model: Uses asyncio.Lock for all file I/O because all operations run
+inside async contexts (async with lock / await asyncio.to_thread(...)).
+This ensures only one coroutine accesses a chat's file at a time without
+blocking the event loop. Never use threading.Lock here — it would block
+the event loop while waiting for the lock.
+
+Metrics: All write and read operations (save_message, get_recent_messages,
+_save_chats) are instrumented with latency tracking via PerformanceMetrics.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
+import shutil
+import threading
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator, Dict, List, Optional, Any
+from typing import Any, AsyncIterator, Dict, IO, List, Optional
 
-from src.constants import DEFAULT_DB_TIMEOUT, MAX_LRU_CACHE_SIZE
-from src.utils import (
-    LRULockCache,
-    check_disk_space,
-    DEFAULT_MIN_DISK_SPACE,
-    safe_json_parse,
-    safe_json_parse_line,
-    safe_json_parse_with_error,
-)
-from src.exceptions import DatabaseError, DiskSpaceError
-
-from src.db.db_integrity import (
-    CorruptionResult,
-    MessageLine,
-    calculate_checksum,
-    validate_checksum,
-    detect_corruption_sync,
-    backup_file_sync,
-    repair_file_sync,
-    validate_all_sync,
-)
+from src.constants import DEFAULT_DB_TIMEOUT, MAX_FILE_HANDLES, MAX_LRU_CACHE_SIZE
 from src.db.db_index import (
     RecoveryResult,
     load_index,
-    save_index,
     rebuild_index,
     recover_index,
+    save_index,
+)
+from src.db.db_integrity import (
+    CorruptionResult,
+    MessageLine,
+    backup_file_sync,
+    calculate_checksum,
+    detect_corruption_sync,
+    repair_file_sync,
+    validate_all_sync,
+    validate_checksum,
+)
+from src.exceptions import DatabaseError, DiskSpaceError
+from src.utils import (
+    DEFAULT_MIN_DISK_SPACE,
+    JsonParseMode,
+    LRULockCache,
+    check_disk_space,
+    json_dumps,
+    safe_json_parse,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _track_db_latency(elapsed_seconds: float) -> None:
+    """Record a database operation latency in the global metrics collector."""
+    try:
+        from src.monitoring.performance import get_metrics_collector
+
+        get_metrics_collector().track_db_latency(elapsed_seconds)
+    except Exception:
+        pass  # Metrics tracking must never crash DB operations
 
 # Maximum messages that can be retrieved in a single query (memory safety)
 MAX_MESSAGE_HISTORY = 500
@@ -65,7 +84,7 @@ MAX_MESSAGE_ID_INDEX = 100_000
 # Pattern for valid chat_id (safe for file paths)
 _CHAT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\.\@]+$")
 
-from src.memory import _safe_name as _sanitize_chat_id_for_path
+from src.utils.path import sanitize_path_component as _sanitize_chat_id_for_path
 
 
 def _validate_chat_id(chat_id: str) -> None:
@@ -110,6 +129,81 @@ class ValidationResult:
     details: Dict[str, Any] = field(default_factory=dict)
 
 
+class _FileHandlePool:
+    """Bounded LRU pool of append-mode file handles for message JSONL files.
+
+    Prevents OS file-descriptor exhaustion under extreme concurrency by reusing
+    open file handles across writes instead of open/close per operation.
+
+    Thread-safe via ``threading.Lock`` because file I/O runs inside
+    ``asyncio.to_thread()`` workers (no event loop available in those threads).
+    Per-chat asyncio locks already guarantee that only one thread accesses a
+    given handle at a time, so the pool itself only needs to protect the
+    OrderedDict metadata.
+
+    Handles are opened in line-buffered append mode (``buffering=1``) so every
+    newline-terminated JSONL record is flushed to the OS immediately, matching
+    the durability guarantee of the previous open/write/close pattern.
+    """
+
+    __slots__ = ("_handles", "_lock", "_max_size")
+
+    def __init__(self, max_size: int = MAX_FILE_HANDLES) -> None:
+        self._max_size = max_size
+        self._handles: OrderedDict[str, IO[str]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get_or_open(self, path: Path) -> IO[str]:
+        """Return an open append-mode handle for *path*, creating one if needed.
+
+        LRU-evicts the least-recently-used handle when the pool exceeds
+        *max_size*, closing the evicted handle.
+        """
+        key = str(path)
+        with self._lock:
+            if key in self._handles:
+                handle = self._handles[key]
+                if not handle.closed:
+                    self._handles.move_to_end(key)
+                    return handle
+                # Stale handle — remove and reopen
+                del self._handles[key]
+
+            handle = path.open("a", encoding="utf-8", buffering=1)
+            self._handles[key] = handle
+
+            # Evict LRU entries over capacity
+            while len(self._handles) > self._max_size:
+                _, evicted = self._handles.popitem(last=False)
+                self._close_handle(evicted)
+
+            return handle
+
+    def invalidate(self, path: Path) -> None:
+        """Close and remove the handle for *path* (e.g. after file repair)."""
+        key = str(path)
+        with self._lock:
+            handle = self._handles.pop(key, None)
+            if handle is not None:
+                self._close_handle(handle)
+
+    def close_all(self) -> None:
+        """Close every pooled handle.  Called during ``Database.close()``."""
+        with self._lock:
+            handles = list(self._handles.values())
+            self._handles.clear()
+        for handle in handles:
+            self._close_handle(handle)
+
+    @staticmethod
+    def _close_handle(handle: IO[str]) -> None:
+        try:
+            if not handle.closed:
+                handle.close()
+        except Exception:
+            pass  # Best-effort close during shutdown
+
+
 class Database:
     """
     File-based async database using JSON/JSONL files.
@@ -140,20 +234,57 @@ class Database:
         self._last_chats_save: float = 0.0
         self._chats_save_interval: float = 5.0  # seconds
 
+        # Debounce index persistence: flush on-disk index periodically
+        # so the on-disk index is never more than _index_save_interval
+        # seconds behind the in-memory index.
+        self._index_dirty: bool = False
+        self._last_index_save: float = 0.0
+        self._index_save_interval: float = 5.0  # seconds
+
         # Index persistence
         self._index_file = self._dir / "message_index.json"
 
-        # Locks for thread safety
-        self._chats_lock = asyncio.Lock()
+        # Locks for thread safety (lazy-initialised to avoid requiring
+        # a running event loop at construction time; see base.py pattern).
+        self._chats_lock: asyncio.Lock | None = None
         self._message_locks = LRULockCache(max_size=MAX_LRU_CACHE_SIZE)
-        self._index_lock = asyncio.Lock()
+        self._index_lock: asyncio.Lock | None = None
+
+        # Bounded pool of open file handles for message JSONL appends.
+        # Prevents OS file-descriptor exhaustion under extreme concurrency.
+        self._file_pool = _FileHandlePool(max_size=MAX_FILE_HANDLES)
 
         self._initialized = False
 
         # Recovery tracking
         self._last_recovery: Optional[RecoveryResult] = None
 
-    async def _run_with_timeout(self, coro, timeout: float, operation: str) -> Any:
+    def _get_chats_lock(self) -> asyncio.Lock:
+        """Return the chats lock, creating it on first use.
+
+        Cannot be eagerly created in __init__ because asyncio.Lock()
+        requires a running event loop on Python 3.10+.
+        """
+        if self._chats_lock is None:
+            self._chats_lock = asyncio.Lock()
+        return self._chats_lock
+
+    def _get_index_lock(self) -> asyncio.Lock:
+        """Return the index lock, creating it on first use.
+
+        Cannot be eagerly created in __init__ because asyncio.Lock()
+        requires a running event loop on Python 3.10+.
+        """
+        if self._index_lock is None:
+            self._index_lock = asyncio.Lock()
+        return self._index_lock
+
+    async def _run_with_timeout(
+        self,
+        coro: Any,
+        timeout: float,
+        operation: str,
+    ) -> Any:
         """
         Run a coroutine with a timeout, raising DatabaseError on timeout.
 
@@ -223,9 +354,7 @@ class Database:
         else:
             details["messages_dir_exists"] = True
             if not os.access(self._messages_dir, os.W_OK):
-                errors.append(
-                    f"Messages directory is not writable: {self._messages_dir}"
-                )
+                errors.append(f"Messages directory is not writable: {self._messages_dir}")
                 details["messages_dir_writable"] = False
             else:
                 details["messages_dir_writable"] = True
@@ -235,7 +364,7 @@ class Database:
             details["files_checked"].append("chats.json")
             try:
                 content = self._chats_file.read_text(encoding="utf-8")
-                result = safe_json_parse_with_error(content, expected_type=dict)
+                result = safe_json_parse(content, expected_type=dict, mode=JsonParseMode.STRICT)
                 if not result.success:
                     if result.error_type == "type":
                         errors.append("chats.json is not a valid JSON object")
@@ -245,7 +374,7 @@ class Database:
                 else:
                     details["chats_json_valid"] = True
                     details["chats_count"] = len(result.data)
-            except Exception as e:
+            except OSError as e:
                 errors.append(f"Failed to read chats.json: {e}")
                 details["chats_json_valid"] = False
         else:
@@ -257,7 +386,7 @@ class Database:
             details["files_checked"].append("message_index.json")
             try:
                 content = self._index_file.read_text(encoding="utf-8")
-                result = safe_json_parse_with_error(content, expected_type=list)
+                result = safe_json_parse(content, expected_type=list, mode=JsonParseMode.STRICT)
                 if not result.success:
                     if result.error_type == "type":
                         errors.append("message_index.json is not a valid JSON array")
@@ -269,10 +398,8 @@ class Database:
                 else:
                     details["message_index_valid"] = True
                     details["indexed_message_count"] = len(result.data)
-            except Exception as e:
-                warnings.append(
-                    f"Failed to read message_index.json (will be rebuilt): {e}"
-                )
+            except OSError as e:
+                warnings.append(f"Failed to read message_index.json (will be rebuilt): {e}")
                 details["message_index_valid"] = False
         else:
             details["message_index_valid"] = True  # Not existing is OK
@@ -290,7 +417,7 @@ class Database:
                     for line_num, line in enumerate(content.splitlines(), 1):
                         if not line.strip():
                             continue
-                        msg = safe_json_parse_line(line, default=None, log_errors=False)
+                        msg = safe_json_parse(line, default=None, log_errors=False, mode=JsonParseMode.LINE)
                         if msg is None:
                             corrupted_files.append(f"{msg_file.name}:{line_num}")
                             continue
@@ -298,19 +425,15 @@ class Database:
                         is_valid, error = validate_checksum(msg)
                         if not is_valid:
                             checksum_errors.append(f"{msg_file.name}:{line_num}")
-                except Exception as e:
+                except OSError as e:
                     corrupted_files.append(f"{msg_file.name}: {e}")
 
             if corrupted_files:
-                warnings.append(
-                    f"Some message files have invalid JSON: {corrupted_files[:3]}"
-                )
+                warnings.append(f"Some message files have invalid JSON: {corrupted_files[:3]}")
                 details["corrupted_message_files"] = corrupted_files
 
             if checksum_errors:
-                warnings.append(
-                    f"Some message files have checksum errors: {checksum_errors[:3]}"
-                )
+                warnings.append(f"Some message files have checksum errors: {checksum_errors[:3]}")
                 details["checksum_errors"] = checksum_errors
 
             # Log corruption detection event
@@ -361,33 +484,26 @@ class Database:
         self._messages_dir.mkdir(parents=True, exist_ok=True)
 
         # Load or initialize chats
-        self._chats = (
-            safe_json_parse(
-                self._chats_file.read_text(encoding="utf-8")
-                if self._chats_file.exists()
-                else "{}",
+        if self._chats_file.exists():
+            self._chats = safe_json_parse(
+                self._chats_file.read_text(encoding="utf-8"),
                 default={},
                 expected_type=dict,
                 log_errors=True,
             )
-            if self._chats_file.exists()
-            else {}
-        )
+        else:
+            self._chats = {}
 
         # Seed instruction files from templates into workspace/instructions/
         workspace_root = self._dir.parent
         instructions_dir = workspace_root / "instructions"
-        template_instructions = (
-            Path(__file__).parent.parent / "templates" / "instructions"
-        )
+        template_instructions = Path(__file__).parent.parent / "templates" / "instructions"
         if template_instructions.is_dir():
             instructions_dir.mkdir(parents=True, exist_ok=True)
             for template_file in template_instructions.iterdir():
                 if template_file.is_file():
                     target = instructions_dir / template_file.name
                     if not target.exists():
-                        import shutil
-
                         shutil.copy2(template_file, target)
                         log.info("Seeded instruction template: %s", target.name)
 
@@ -400,24 +516,36 @@ class Database:
         """
         Flush any pending writes and close database.
 
-        Persists any unsaved chat metadata to disk and marks the database
-        as uninitialized. After calling this method, connect() must be called
-        again before any database operations.
+        Persists any unsaved chat metadata to disk, closes all pooled file
+        handles, and marks the database as uninitialized. After calling this
+        method, connect() must be called again before any database operations.
 
         Side Effects:
             - Saves chats index to .data/chats.json
+            - Closes all pooled message-file handles
             - Sets _initialized flag to False
         """
         # Flush any debounced chat writes
         if self._chats_dirty:
             await self._save_chats()
+        # Flush debounced index writes so the on-disk index is up to date
+        if self._index_dirty:
+            await self._save_message_index()
+            self._index_dirty = False
+        # Close all pooled file handles to release OS file descriptors
+        self._file_pool.close_all()
         self._initialized = False
 
     async def __aenter__(self) -> "Database":
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
         await self.close()
 
     async def _get_message_lock(self, chat_id: str) -> asyncio.Lock:
@@ -474,8 +602,10 @@ class Database:
             - Creates/overwrites .data/chats.json
             - Creates temporary .data/chats.tmp during write
         """
-        content = json.dumps(self._chats, indent=2, ensure_ascii=False)
+        content = json_dumps(self._chats, indent=2, ensure_ascii=False)
+        _db_start = time.monotonic()
         await asyncio.to_thread(self._atomic_write, self._chats_file, content)
+        _track_db_latency(time.monotonic() - _db_start)
 
     def _atomic_write(self, file_path: Path, content: str) -> None:
         """
@@ -486,23 +616,24 @@ class Database:
         Raises:
             DiskSpaceError: If insufficient disk space available
         """
+        from src.utils.async_file import sync_atomic_write
+
         self._check_disk_space_before_write(file_path)
-        temp_file = file_path.with_suffix(".tmp")
-        temp_file.write_text(content, encoding="utf-8")
-        temp_file.replace(file_path)
+        sync_atomic_write(file_path, content)
 
     def _message_file(self, chat_id: str) -> Path:
         """Get the message file path for a chat."""
-        _validate_chat_id(chat_id)
-        # Use comprehensive sanitization for cross-platform file path safety
+        # Sanitize first so special chars (e.g. WhatsApp ':' '@') are replaced
+        # before validation rejects them.
         safe_id = _sanitize_chat_id_for_path(chat_id)
+        _validate_chat_id(safe_id)
         return self._messages_dir / f"{safe_id}.jsonl"
 
     # ── message index ───────────────────────────────────────────────────────
 
     async def _ensure_message_index(self) -> None:
         """Load or rebuild message ID index from disk."""
-        async with self._index_lock:
+        async with self._get_index_lock():
             loaded = await asyncio.to_thread(load_index, self._index_file)
             if loaded is not None:
                 # Convert set to dict for deterministic FIFO eviction order
@@ -576,9 +707,7 @@ class Database:
         msg_file = self._message_file(chat_id)
         return await asyncio.to_thread(backup_file_sync, msg_file, self._dir)
 
-    async def repair_message_file(
-        self, chat_id: str, backup: bool = True
-    ) -> CorruptionResult:
+    async def repair_message_file(self, chat_id: str, backup: bool = True) -> CorruptionResult:
         """Detect and repair corruption, optionally backing up first."""
         result = await self.detect_corruption(chat_id)
         if not result.is_corrupted:
@@ -590,14 +719,14 @@ class Database:
         msg_file = self._message_file(chat_id)
         lock = await self._get_message_lock(chat_id)
         async with lock:
+            # Invalidate the pooled handle before atomic rewrite
+            self._file_pool.invalidate(msg_file)
             result.repaired = await asyncio.to_thread(
                 repair_file_sync, msg_file, result, self._atomic_write
             )
         return result
 
-    async def validate_all_message_files(
-        self, repair: bool = False
-    ) -> Dict[str, CorruptionResult]:
+    async def validate_all_message_files(self, repair: bool = False) -> Dict[str, CorruptionResult]:
         """Validate (and optionally repair) all message files."""
         if repair:
             results: Dict[str, CorruptionResult] = {}
@@ -609,6 +738,53 @@ class Database:
             return results
 
         return await asyncio.to_thread(validate_all_sync, self._messages_dir)
+
+    @staticmethod
+    def _build_message_record(
+        role: str,
+        content: str,
+        name: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> dict:
+        """Build a single message dict ready for JSONL persistence.
+
+        Handles ID generation, checksum calculation, and injection scanning
+        for user-role messages.
+
+        Returns:
+            Tuple of ``(record_dict, message_id)``.
+        """
+        mid = message_id or str(uuid.uuid4())
+        timestamp = time.time()
+        checksum = calculate_checksum(content, role, timestamp)
+
+        _sanitized = False
+        if role == "user" and content:
+            from src.security.prompt_injection import (
+                detect_injection,
+                sanitize_user_input,
+            )
+
+            result = detect_injection(content)
+            if result.detected and result.confidence >= 0.8:
+                content = sanitize_user_input(content)
+                _sanitized = True
+                log.info(
+                    "Sanitized injection in user message %s (confidence=%.1f patterns=%s)",
+                    mid,
+                    result.confidence,
+                    result.matched_patterns,
+                )
+
+        return {
+            "id": mid,
+            "role": role,
+            "content": content,
+            "name": name,
+            "timestamp": timestamp,
+            "_checksum": checksum,
+            "_sanitized": _sanitized,
+        }, mid
 
     async def save_message(
         self,
@@ -634,52 +810,19 @@ class Database:
         Raises:
             DatabaseError: If the operation times out.
         """
-        mid = message_id or str(uuid.uuid4())
-        timestamp = time.time()
-
-        # Calculate checksum for corruption detection
-        checksum = calculate_checksum(content, role, timestamp)
-
-        # Scan user messages for injection at save time — avoids re-scanning
-        # every history message on every LLM call (performance optimization)
-        _sanitized = False
-        if role == "user" and content:
-            from src.security.prompt_injection import (
-                detect_injection,
-                sanitize_user_input,
-            )
-
-            result = detect_injection(content)
-            if result.detected and result.confidence >= 0.8:
-                content = sanitize_user_input(content)
-                _sanitized = True
-                log.info(
-                    "Sanitized injection in user message %s (confidence=%.1f patterns=%s)",
-                    mid,
-                    result.confidence,
-                    result.matched_patterns,
-                )
-
-        msg = {
-            "id": mid,
-            "role": role,
-            "content": content,
-            "name": name,
-            "timestamp": timestamp,
-            "_checksum": checksum,
-            "_sanitized": _sanitized,
-        }
+        msg, mid = self._build_message_record(role, content, name, message_id)
 
         msg_file = self._message_file(chat_id)
         lock = await self._get_message_lock(chat_id)
 
+        _db_start = time.monotonic()
+
         async def _write_message():
             async with lock:
-                # Run file I/O in thread pool to avoid blocking
                 await asyncio.to_thread(
                     self._append_to_file,
                     msg_file,
-                    json.dumps(msg, ensure_ascii=False) + "\n",
+                    json_dumps(msg, ensure_ascii=False) + "\n",
                 )
 
         await self._run_with_timeout(
@@ -688,15 +831,73 @@ class Database:
             operation="save_message",
         )
 
-        # Add to in-memory index for O(1) lookups (with size cap)
-        async with self._index_lock:
-            self._message_id_index[mid] = None
+        await self._update_index([mid])
+
+        _track_db_latency(time.monotonic() - _db_start)
+
+        return mid
+
+    async def save_messages_batch(
+        self,
+        chat_id: str,
+        messages: list[dict],
+    ) -> list[str]:
+        """Persist multiple messages in a single lock acquisition and file append.
+
+        Each dict in *messages* must have ``role`` and ``content`` keys.
+        Optional keys: ``name``, ``message_id``.
+
+        Reduces ``asyncio.to_thread()`` hops and JSONL appends from *N*
+        individual calls to a single batched write.
+
+        Returns:
+            List of message IDs, one per input message.
+        """
+        records: list[dict] = []
+        ids: list[str] = []
+
+        for spec in messages:
+            msg, mid = self._build_message_record(
+                role=spec["role"],
+                content=spec["content"],
+                name=spec.get("name"),
+                message_id=spec.get("message_id"),
+            )
+            records.append(msg)
+            ids.append(mid)
+
+        msg_file = self._message_file(chat_id)
+        lock = await self._get_message_lock(chat_id)
+
+        _db_start = time.monotonic()
+
+        lines = "".join(json_dumps(r, ensure_ascii=False) + "\n" for r in records)
+
+        async def _write_batch():
+            async with lock:
+                await asyncio.to_thread(self._append_to_file, msg_file, lines)
+
+        await self._run_with_timeout(
+            _write_batch(),
+            timeout=DEFAULT_DB_TIMEOUT,
+            operation="save_messages_batch",
+        )
+
+        await self._update_index(ids)
+
+        _track_db_latency(time.monotonic() - _db_start)
+
+        return ids
+
+    async def _update_index(self, message_ids: list[str]) -> None:
+        """Add message IDs to the in-memory index with debounce flush."""
+        async with self._get_index_lock():
+            for mid in message_ids:
+                self._message_id_index[mid] = None
+
             if len(self._message_id_index) > MAX_MESSAGE_ID_INDEX:
-                # Deterministic FIFO eviction: remove oldest entries first
-                # dict preserves insertion order in Python 3.7+
                 discard_count = MAX_MESSAGE_ID_INDEX // 4
                 for _ in range(discard_count):
-                    # popitem(last=False) removes the first (oldest) entry
                     self._message_id_index.popitem(last=False)
                 log.warning(
                     "Trimmed %d entries from message ID index (cap=%d)",
@@ -704,20 +905,27 @@ class Database:
                     MAX_MESSAGE_ID_INDEX,
                 )
 
-        return mid
+            self._index_dirty = True
+            now = time.monotonic()
+            if (now - self._last_index_save) >= self._index_save_interval:
+                await self._save_message_index()
+                self._last_index_save = now
+                self._index_dirty = False
 
     def _append_to_file(self, file_path: Path, content: str) -> None:
         """
-        Synchronous helper to append content to a file.
+        Append content to a file using a pooled file handle.
 
-        Checks disk space before writing to prevent corruption from disk full.
+        Uses the file-handle pool to avoid repeated open/close syscalls and
+        prevent OS file-descriptor exhaustion under extreme concurrency.
+        Line-buffered handles flush on every newline automatically.
 
         Raises:
             DiskSpaceError: If insufficient disk space available
         """
         self._check_disk_space_before_write(file_path)
-        with file_path.open("a", encoding="utf-8") as f:
-            f.write(content)
+        handle = self._file_pool.get_or_open(file_path)
+        handle.write(content)
 
     async def get_recent_messages(self, chat_id: str, limit: int = 50) -> List[dict]:
         """
@@ -744,16 +952,15 @@ class Database:
             return []
 
         lock = await self._get_message_lock(chat_id)
+        _db_start = time.monotonic()
 
         async def _read_messages():
             async with lock:
                 try:
                     # Run file I/O in thread pool to avoid blocking
                     # Pass limit directly to avoid reading more lines than needed
-                    lines = await asyncio.to_thread(
-                        self._read_file_lines, msg_file, limit
-                    )
-                except Exception:
+                    lines = await asyncio.to_thread(self._read_file_lines, msg_file, limit)
+                except OSError:
                     return []
             return lines
 
@@ -773,12 +980,10 @@ class Database:
         corruption_detected = False
 
         for line_num_offset, line in enumerate(recent_lines):
-            msg = safe_json_parse_line(line, default=None, log_errors=False)
+            msg = safe_json_parse(line, default=None, log_errors=False, mode=JsonParseMode.LINE)
             if msg is None:
                 if line.strip():  # Only log if line wasn't empty
-                    actual_line_num = (
-                        len(lines) - len(recent_lines) + line_num_offset + 1
-                    )
+                    actual_line_num = len(lines) - len(recent_lines) + line_num_offset + 1
                     log.warning(
                         "JSON corruption detected in chat %s line %d",
                         chat_id,
@@ -807,6 +1012,7 @@ class Database:
                     "role": msg.get("role", "user"),
                     "content": msg.get("content", ""),
                     "name": msg.get("name"),
+                    "_sanitized": msg.get("_sanitized", False),
                 }
             )
 
@@ -818,20 +1024,80 @@ class Database:
                 chat_id,
             )
 
+        _track_db_latency(time.monotonic() - _db_start)
+
         # Already in chronological order (oldest first) since we read from file
         return messages
 
-    def _read_file_lines(
-        self, file_path: Path, limit: int = MAX_MESSAGE_HISTORY
-    ) -> List[str]:
-        """Synchronous helper to read last N file lines efficiently.
+    # Maximum chunks the reverse-seek will scan before falling back to a
+    # simple deque read.  Prevents unbounded looping on corrupted files that
+    # lack newline characters.
+    _MAX_SEEK_ITERATIONS = 10_000
 
-        Uses deque with maxlen to only retain the requested number of lines,
-        avoiding reading the entire file into memory for large chat histories.
+    def _read_file_lines(self, file_path: Path, limit: int = MAX_MESSAGE_HISTORY) -> List[str]:
+        """Read the last N lines from a file without reading the entire file.
+
+        For small files (<64KB), reads normally using deque for O(limit) memory.
+        For larger files, seeks backwards from the end in chunks to find line
+        boundaries, then reads only the needed region — achieving O(limit) I/O
+        instead of O(total_lines).
+
+        If the reverse-seek exceeds ``_MAX_SEEK_ITERATIONS`` chunks (e.g. a
+        corrupted file with very few newlines), it falls back to a simple
+        deque read to avoid an unbounded loop.
         """
+        file_size = file_path.stat().st_size
+
+        # For small files, simple read is faster (avoids seek overhead)
+        if file_size < 65_536:
+            with file_path.open("r", encoding="utf-8") as f:
+                return list(deque(f, maxlen=limit))
+
+        # Reverse seek: find line boundaries from the end without reading
+        # every line. We count newlines in binary chunks to locate the
+        # byte offset where the last N lines begin.
+        chunk_size = 8192
+        pos = file_size
+        newline_count = 0
+        target_newlines = limit + 1  # +1 because last line may not end with \n
+        iterations = 0
+
+        with file_path.open("rb") as f:
+            while pos > 0 and newline_count < target_newlines:
+                iterations += 1
+                if iterations > self._MAX_SEEK_ITERATIONS:
+                    log.warning(
+                        "Reverse-seek exceeded %d chunks for %s; "
+                        "falling back to deque read (file may be corrupted).",
+                        self._MAX_SEEK_ITERATIONS,
+                        file_path,
+                    )
+                    f.close()
+                    with file_path.open("r", encoding="utf-8") as fb:
+                        return list(deque(fb, maxlen=limit))
+
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                f.seek(pos)
+                chunk = f.read(read_size)
+
+                # Count newlines in this chunk
+                for i in range(len(chunk) - 1, -1, -1):
+                    if chunk[i] == ord("\n"):
+                        newline_count += 1
+                        if newline_count >= target_newlines:
+                            # pos + i + 1 is the byte offset of the first line we want
+                            pos = pos + i + 1
+                            break
+
+        # Read just the needed region as text
         with file_path.open("r", encoding="utf-8") as f:
-            # deque with maxlen discards old lines automatically — O(limit) memory
-            return list(deque(f, maxlen=limit))
+            f.seek(max(pos, 0))
+            remaining_text = f.read()
+
+        # Split and take last N lines, preserving order (oldest first)
+        all_lines = remaining_text.splitlines()
+        return all_lines[-limit:] if len(all_lines) > limit else all_lines
 
     # ── chats ──────────────────────────────────────────────────────────────
 
@@ -857,7 +1123,7 @@ class Database:
         now = time.time()
 
         async def _upsert():
-            async with self._chats_lock:
+            async with self._get_chats_lock():
                 if chat_id in self._chats:
                     self._chats[chat_id]["last_active"] = now
                     if name:
@@ -885,7 +1151,7 @@ class Database:
 
     async def flush_chats(self) -> None:
         """Force-flush dirty chat metadata to disk."""
-        async with self._chats_lock:
+        async with self._get_chats_lock():
             if self._chats_dirty:
                 await self._save_chats()
                 self._last_chats_save = time.time()
@@ -898,7 +1164,7 @@ class Database:
         Returns:
             List of chat dicts with 'chat_id', 'name', 'created_at', 'last_active'
         """
-        async with self._chats_lock:
+        async with self._get_chats_lock():
             chats = [
                 {
                     "chat_id": chat_id,

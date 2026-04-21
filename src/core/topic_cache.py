@@ -17,6 +17,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from src.constants import MAX_LRU_CACHE_SIZE
+from src.utils.path import sanitize_path_component
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class TopicCache:
         self._max_size = MAX_LRU_CACHE_SIZE
 
     def _summary_path(self, chat_id: str) -> Path:
-        safe = _safe_name(chat_id)
+        safe = sanitize_path_component(chat_id)
         return self._root / "whatsapp_data" / safe / SUMMARY_FILENAME
 
     def _ensure_dir(self, chat_id: str) -> Path:
@@ -117,8 +118,3 @@ def parse_meta(response: str) -> tuple[str, dict | None]:
     except json.JSONDecodeError:
         log.warning("Failed to parse META JSON from LLM response")
         return response, None
-
-
-def _safe_name(chat_id: str) -> str:
-    """Strip characters unsafe for filesystem paths."""
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in chat_id)

@@ -79,7 +79,19 @@ MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
 SendMediaCallback = Callable[[str, Path, str], Awaitable[None]]
 
 
-_safe_mode_lock = asyncio.Lock()
+_safe_mode_lock: asyncio.Lock | None = None
+
+
+def _get_safe_mode_lock() -> asyncio.Lock:
+    """Lazy-initialised asyncio.Lock for safe-mode serialisation.
+
+    Cannot be created at module level because asyncio.Lock() requires
+    a running event loop on Python 3.10+.
+    """
+    global _safe_mode_lock
+    if _safe_mode_lock is None:
+        _safe_mode_lock = asyncio.Lock()
+    return _safe_mode_lock
 
 
 class BaseChannel(ABC):
@@ -98,6 +110,7 @@ class BaseChannel(ABC):
     def __init__(self, safe_mode: bool = False, load_history: bool = False) -> None:
         self._safe_mode = safe_mode
         self._load_history = load_history
+        self._connected_event: asyncio.Event = asyncio.Event()
 
     def get_channel_prompt(self) -> str | None:
         """
@@ -110,6 +123,14 @@ class BaseChannel(ABC):
             Channel-specific prompt content, or None if no prompt needed.
         """
         return None
+
+    def mark_connected(self) -> None:
+        """Signal that the channel has successfully connected."""
+        self._connected_event.set()
+
+    async def wait_connected(self) -> None:
+        """Wait until the channel signals it is connected."""
+        await self._connected_event.wait()
 
     def should_process_historical(self, msg: IncomingMessage) -> bool:
         """
@@ -136,9 +157,7 @@ class BaseChannel(ABC):
         """
         ...
 
-    async def send_message(
-        self, chat_id: str, text: str, *, skip_delays: bool = False
-    ) -> None:
+    async def send_message(self, chat_id: str, text: str, *, skip_delays: bool = False) -> None:
         """Send a text reply. In safe mode, prompts Y/N before delegating.
 
         Args:
@@ -149,7 +168,7 @@ class BaseChannel(ABC):
         """
         if self._safe_mode:
             preview = text[:120] + "..." if len(text) > 120 else text
-            async with _safe_mode_lock:
+            async with _get_safe_mode_lock():
                 print(f"\n📤 Outgoing to {chat_id}:")
                 print(f"   {preview}")
                 if not await _confirm_send(chat_id):
@@ -158,9 +177,7 @@ class BaseChannel(ABC):
         await self._send_message(chat_id, text, skip_delays=skip_delays)
 
     @abstractmethod
-    async def _send_message(
-        self, chat_id: str, text: str, *, skip_delays: bool = False
-    ) -> None:
+    async def _send_message(self, chat_id: str, text: str, *, skip_delays: bool = False) -> None:
         """Channel-specific send implementation (called by send_message)."""
         ...
 
@@ -172,9 +189,7 @@ class BaseChannel(ABC):
         """
         ...
 
-    async def send_audio(
-        self, chat_id: str, file_path: Path, *, ptt: bool = False
-    ) -> None:
+    async def send_audio(self, chat_id: str, file_path: Path, *, ptt: bool = False) -> None:
         """Send an audio file to a chat.
 
         Args:
@@ -182,9 +197,7 @@ class BaseChannel(ABC):
             file_path: Path to the audio file on disk.
             ptt: If True, send as a voice note (push-to-talk) instead of a regular audio file.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support audio sending"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support audio sending")
 
     async def send_document(
         self,
@@ -202,9 +215,17 @@ class BaseChannel(ABC):
             caption: Optional caption shown below the document.
             filename: Display filename for the document (defaults to file_path name).
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support document sending"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support document sending")
+
+    @abstractmethod
+    async def close(self) -> None:
+        """Close channel connections and release resources."""
+        ...
+
+    @abstractmethod
+    def request_shutdown(self) -> None:
+        """Signal the channel to stop accepting new messages."""
+        ...
 
 
 async def _confirm_send(chat_id: str) -> bool:

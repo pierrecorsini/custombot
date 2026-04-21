@@ -19,23 +19,24 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, field, asdict, fields
+from dataclasses import asdict, dataclass, field, fields
+from dataclasses import MISSING as dataclasses_MISSING
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Type, TypeVar
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, TypeVar, get_type_hints
 
 from src.config.config_schema import (
-    validate_config_dict,
     add_schema_version,
     format_validation_errors,
+    validate_config_dict,
 )
 
 # Logger for configuration validation
 log = logging.getLogger(__name__)
 from src.constants import (
-    MAX_TOOL_ITERATIONS,
     DEFAULT_LLM_TIMEOUT,
     DEFAULT_MEMORY_MAX_HISTORY,
     DEFAULT_SHUTDOWN_TIMEOUT,
+    MAX_TOOL_ITERATIONS,
     WORKSPACE_DIR,
 )
 
@@ -109,6 +110,72 @@ def _check_deprecated_options(data: Dict[str, Any], file_path: Path) -> List[str
 
     check_recursive(data)
     return warnings
+
+
+def _collect_known_field_names(cls: Type) -> Dict[str, List[str]]:
+    """Recursively collect known field names for a dataclass hierarchy.
+
+    Returns:
+        Mapping of dot-path → list of valid field names at that level.
+        The root level uses the empty string as key.
+    """
+    result: Dict[str, List[str]] = {}
+
+    def _collect(dc: Type, path: str = "") -> None:
+        try:
+            hints = get_type_hints(dc)
+        except Exception:
+            hints = {}
+
+        names = [f.name for f in fields(dc)]  # type: ignore[arg-type]
+        result[path] = names
+
+        for f in fields(dc):  # type: ignore[arg-type]
+            ftype = hints.get(f.name)
+            if isinstance(ftype, type) and hasattr(ftype, "__dataclass_fields__"):
+                child = f"{path}.{f.name}" if path else f.name
+                _collect(ftype, child)
+
+    _collect(cls)
+    return result
+
+
+def _check_unknown_keys(data: dict, file_path: Path) -> None:
+    """Warn about unknown keys in *data* by comparing against known dataclass fields.
+
+    Uses :func:`difflib.get_close_matches` to suggest likely typos.
+    """
+    from difflib import get_close_matches
+
+    known = _collect_known_field_names(Config)
+
+    def _check(obj: dict, parent: str = "") -> None:
+        valid = known.get(parent, [])
+        for key in list(obj):
+            if key.startswith("$"):  # schema metadata
+                continue
+            if key not in valid:
+                full = f"{parent}.{key}" if parent else key
+                matches = get_close_matches(key, valid, n=1, cutoff=0.6)
+                if matches:
+                    log.warning(
+                        "Unknown config key '%s' in %s — did you mean '%s'?",
+                        full,
+                        file_path,
+                        matches[0],
+                    )
+                else:
+                    log.warning(
+                        "Unknown config key '%s' in %s — not recognised, will be ignored",
+                        full,
+                        file_path,
+                    )
+            elif isinstance(obj[key], dict):
+                child = f"{parent}.{key}" if parent else key
+                if child in known:
+                    _check(obj[key], child)
+
+    _check(data)
 
 
 def _get_default_values() -> Dict[str, Any]:
@@ -195,9 +262,7 @@ def _redact_secrets(data: Dict[str, Any]) -> Dict[str, Any]:
     def redact_recursive(obj: Any) -> Any:
         if isinstance(obj, dict):
             return {
-                key: "***REDACTED***"
-                if key in SECRET_FIELDS
-                else redact_recursive(value)
+                key: "***REDACTED***" if key in SECRET_FIELDS else redact_recursive(value)
                 for key, value in obj.items()
             }
         elif isinstance(obj, list):
@@ -248,6 +313,10 @@ def _log_effective_config(config: "Config", file_path: Path) -> None:
         config.log_verbosity,
         config.log_incoming_messages,
         config.log_routing_info,
+    )
+    log.debug(
+        "  Thread Pool: max_workers=%s",
+        config.max_thread_pool_workers if config.max_thread_pool_workers else "default",
     )
     if config.log_file:
         log.debug(
@@ -330,6 +399,11 @@ def _from_dict(cls: Type[T], data: dict) -> T:
     """Recursively instantiate a dataclass from a plain dict."""
     if not isinstance(data, dict):
         return cls()
+    # Resolve string annotations caused by `from __future__ import annotations`
+    try:
+        hints = get_type_hints(cls)
+    except Exception:
+        hints = {}
     kwargs: dict = {}
     for f in fields(cls):  # type: ignore[arg-type]
         val = data.get(f.name)
@@ -341,19 +415,13 @@ def _from_dict(cls: Type[T], data: dict) -> T:
                 kwargs[f.name] = f.default
             # else left as missing → dataclass will raise, which is intentional
         else:
-            # Recurse if the target type is itself a dataclass
-            ftype = f.type if isinstance(f.type, type) else None
-            if ftype and hasattr(ftype, "__dataclass_fields__"):
+            # Recurse if the resolved type is itself a dataclass
+            ftype = hints.get(f.name)
+            if isinstance(ftype, type) and hasattr(ftype, "__dataclass_fields__"):
                 kwargs[f.name] = _from_dict(ftype, val)
             else:
                 kwargs[f.name] = val
     return cls(**kwargs)  # type: ignore[call-arg]
-
-
-# Patch in the sentinel so the helper above works before runtime annotations
-import dataclasses as _dc
-
-dataclasses_MISSING = _dc.MISSING
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -373,12 +441,16 @@ class LLMConfig:
     max_tool_iterations: int = MAX_TOOL_ITERATIONS
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
+    # When True, LLM responses are streamed token-by-token to reduce perceived
+    # latency.  Falls back to non-streaming for tool-call turns.  Not all
+    # providers support streaming — disable if the provider returns errors.
+    stream_response: bool = False
 
     def __repr__(self) -> str:
-        if len(self.api_key) > 8:
+        if self.api_key:
             key_masked = f"***({len(self.api_key)} chars)"
         else:
-            return "***"
+            key_masked = "NOT_SET"
         return f"LLMConfig(model={self.model!r}, base_url={self.base_url!r}, api_key={key_masked!r}, temp={self.temperature})"
 
 
@@ -390,6 +462,52 @@ class NeonizeConfig:
 
     def __repr__(self) -> str:
         return f"NeonizeConfig(db_path={self.db_path!r})"
+
+
+@dataclass
+class ShellConfig:
+    """Shell skill security configuration — command allowlist/denylist."""
+
+    # Additional command patterns to block beyond the built-in denylist.
+    # Each entry is a regex pattern matched against the full command string.
+    command_denylist: List[str] = field(default_factory=list)
+    # Command patterns that bypass the denylist (allowlist takes precedence).
+    # If a command matches any allowlist pattern, it is allowed even if it
+    # would otherwise be blocked by the denylist.
+    command_allowlist: List[str] = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        return (
+            f"ShellConfig(denylist={len(self.command_denylist)} patterns, "
+            f"allowlist={len(self.command_allowlist)} patterns)"
+        )
+
+
+@dataclass
+class MiddlewareConfig:
+    """Middleware pipeline configuration.
+
+    Allows customizing the message-processing middleware chain without
+    editing source code.  Built-in middleware names are referenced by
+    string; custom middleware can be added via dotted import paths.
+
+    Built-in names:
+        operation_tracker, metrics, inbound_logging, preflight,
+        typing, error_handler, handle_message
+    """
+
+    # Ordered list of built-in middleware names to include.
+    # When empty (default), the full built-in order is used.
+    middleware_order: List[str] = field(default_factory=list)
+    # Dotted import paths for custom middleware factories
+    # (e.g. ``"my_package.middleware:my_factory"``).
+    extra_middleware_paths: List[str] = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        return (
+            f"MiddlewareConfig(order={self.middleware_order or 'default'}, "
+            f"extra={len(self.extra_middleware_paths)})"
+        )
 
 
 @dataclass
@@ -416,6 +534,8 @@ class WhatsAppConfig:
 class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     whatsapp: WhatsAppConfig = field(default_factory=WhatsAppConfig)
+    shell: ShellConfig = field(default_factory=ShellConfig)
+    middleware: MiddlewareConfig = field(default_factory=MiddlewareConfig)
     # Whether to process historical/offline messages that arrived before the bot connected
     load_history: bool = False
     # How many past messages to include in LLM context
@@ -423,9 +543,7 @@ class Config:
     # Whether to auto-load skills from skills_user_directory on startup
     skills_auto_load: bool = True
     # Directory for user-authored skill files (Python or skill.md)
-    skills_user_directory: str = field(
-        default_factory=lambda: f"{WORKSPACE_DIR}/skills"
-    )
+    skills_user_directory: str = field(default_factory=lambda: f"{WORKSPACE_DIR}/skills")
     # Logging options
     log_incoming_messages: bool = True  # Log incoming messages to console
     log_routing_info: bool = False  # Log routing rule matching details
@@ -441,10 +559,15 @@ class Config:
     log_verbosity: str = "normal"
     # LLM request/response logging: one JSON file per request and per response
     log_llm: bool = False
+    # Maximum worker threads for the asyncio ThreadPoolExecutor.
+    # Controls concurrency for asyncio.to_thread() calls (DB, file I/O, vector
+    # memory).  None means use DEFAULT_THREAD_POOL_WORKERS from constants.
+    max_thread_pool_workers: Optional[int] = None
 
     def __repr__(self) -> str:
         return (
             f"Config(llm={self.llm!r}, whatsapp={self.whatsapp!r}, "
+            f"shell={self.shell!r}, middleware={self.middleware!r}, "
             f"memory_max_history={self.memory_max_history})"
         )
 
@@ -452,6 +575,65 @@ class Config:
 # ─────────────────────────────────────────────────────────────────────────────
 # Load / Save helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _load_and_validate_file(path: Path) -> dict:
+    """Load, validate, and return config dict from a JSON file."""
+    log.debug("Reading config file: %s", path)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        log.debug("Successfully parsed JSON from %s", path)
+    except json.JSONDecodeError as e:
+        log.error("Failed to parse JSON from %s: %s", path, e)
+        raise
+
+    deprecation_warnings = _check_deprecated_options(data, path)
+    if deprecation_warnings:
+        log.warning("Found %d deprecated option(s) in %s", len(deprecation_warnings), path)
+
+    _log_default_values_used(data, path)
+
+    validation_result = validate_config_dict(data)
+    if not validation_result["valid"]:
+        _log_validation_errors(validation_result["errors"], path)
+        log.error(
+            "Full validation error report:\n%s",
+            format_validation_errors(validation_result["errors"]),
+        )
+        from src.exceptions import ConfigurationError
+
+        raise ConfigurationError(
+            f"Invalid configuration in {path}",
+            errors=validation_result["errors"],
+            error_count=len(validation_result["errors"]),
+        )
+
+    return data
+
+
+def _apply_env_overrides(config: Config) -> None:
+    """Apply environment variable overrides to a Config in-place."""
+    env_api_key = os.environ.get("OPENAI_API_KEY")
+    if env_api_key:
+        config.llm.api_key = env_api_key
+        log.debug("Using OPENAI_API_KEY from environment variable")
+
+    env_base_url = os.environ.get("OPENAI_BASE_URL")
+    if env_base_url:
+        config.llm.base_url = env_base_url
+        log.debug("Using OPENAI_BASE_URL from environment variable")
+
+
+def _validate_config_type(config: Config, path: Path) -> None:
+    """Run runtime type validation on a Config object."""
+    log.debug("Performing runtime type validation")
+    from src.utils.type_guards import is_valid_config
+
+    if not is_valid_config(config):
+        log.error("Runtime type validation failed for config from %s", path)
+        raise ValueError(f"Invalid configuration loaded from {path}")
+    log.debug("Runtime type validation passed")
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:
@@ -477,116 +659,31 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         ConfigurationError: If the config file fails schema validation.
         json.JSONDecodeError: If the file contains invalid JSON.
     """
-    # Step 1: Log configuration load attempt
     log.debug("Loading configuration from %s", path)
+
+    # Collect raw dict: empty when file missing, parsed JSON otherwise
+    data: dict = {}
 
     if not path.exists():
         log.info("Config file %s not found, using defaults", path)
-        config = Config()
-        _log_effective_config(config, path)
-        return config
+    else:
+        data = _load_and_validate_file(path)
 
-    # Step 2: Load and parse JSON
-    log.debug("Reading config file: %s", path)
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-        log.debug("Successfully parsed JSON from %s", path)
-    except json.JSONDecodeError as e:
-        log.error("Failed to parse JSON from %s: %s", path, e)
-        raise
+    # Warn about unknown keys before construction
+    if data:
+        _check_unknown_keys(data, path)
 
-    # Step 3: Check for deprecated options
-    log.debug("Checking for deprecated options in %s", path)
-    deprecation_warnings = _check_deprecated_options(data, path)
-    if deprecation_warnings:
-        log.warning(
-            "Found %d deprecated option(s) in %s", len(deprecation_warnings), path
-        )
+    # Unified construction via _from_dict for both paths
+    log.debug("Constructing Config object from %s", "file" if data else "defaults")
+    config = _from_dict(Config, data)
 
-    # Step 4: Log default values being used
-    log.debug("Identifying default values used for %s", path)
-    _log_default_values_used(data, path)
+    # Environment variable overrides (always applied)
+    _apply_env_overrides(config)
 
-    # Step 5: Validate against JSON schema
-    log.debug("Validating configuration against schema (version 1.0)")
-    validation_result = validate_config_dict(data)
+    # Runtime type validation
+    _validate_config_type(config, path)
 
-    if not validation_result["valid"]:
-        # Log detailed validation errors with suggestions
-        _log_validation_errors(validation_result["errors"], path)
-        log.error(
-            "Full validation error report:\n%s",
-            format_validation_errors(validation_result["errors"]),
-        )
-
-        from src.exceptions import ConfigurationError
-
-        raise ConfigurationError(
-            f"Invalid configuration in {path}",
-            errors=validation_result["errors"],
-            error_count=len(validation_result["errors"]),
-        )
-
-    log.debug("Configuration schema validation passed")
-
-    # Step 6: Construct Config object
-    log.debug("Constructing Config object from validated data")
-    # Manually handle nested dataclasses because type annotations are strings
-    # at runtime when using `from __future__ import annotations`.
-    llm = _from_dict(LLMConfig, data.get("llm", {}))
-
-    # Environment variable overrides for sensitive values
-    env_api_key = os.environ.get("OPENAI_API_KEY")
-    if env_api_key:
-        llm.api_key = env_api_key
-        log.debug("Using OPENAI_API_KEY from environment variable")
-
-    env_base_url = os.environ.get("OPENAI_BASE_URL")
-    if env_base_url:
-        llm.base_url = env_base_url
-        log.debug("Using OPENAI_BASE_URL from environment variable")
-
-    wa_data = data.get("whatsapp", {})
-    whatsapp = WhatsAppConfig(
-        provider=wa_data.get("provider", "neonize"),
-        neonize=_from_dict(NeonizeConfig, wa_data.get("neonize", {})),
-        allowed_numbers=wa_data.get("allowed_numbers", []),
-        allow_all=wa_data.get("allow_all", True),
-    )
-    config = Config(
-        llm=llm,
-        whatsapp=whatsapp,
-        load_history=data.get("load_history", False),
-        memory_max_history=data.get("memory_max_history", DEFAULT_MEMORY_MAX_HISTORY),
-        skills_auto_load=data.get("skills_auto_load", True),
-        skills_user_directory=data.get(
-            "skills_user_directory", f"{WORKSPACE_DIR}/skills"
-        ),
-        log_incoming_messages=data.get("log_incoming_messages", True),
-        log_routing_info=data.get("log_routing_info", False),
-        shutdown_timeout=data.get("shutdown_timeout", DEFAULT_SHUTDOWN_TIMEOUT),
-        log_format=data.get("log_format", "text"),
-        log_file=data.get("log_file", f"{WORKSPACE_DIR}/logs/custombot.log"),
-        log_max_bytes=data.get("log_max_bytes", 10 * 1024 * 1024),
-        log_backup_count=data.get("log_backup_count", 5),
-        log_verbosity=data.get("log_verbosity", "normal"),
-        log_llm=data.get("log_llm", False),
-    )
-
-    # Step 7: Runtime validation using type guard
-    log.debug("Performing runtime type validation")
-    from src.utils.type_guards import is_valid_config
-
-    if not is_valid_config(config):
-        log.error("Runtime type validation failed for config from %s", path)
-        raise ValueError(f"Invalid configuration loaded from {path}")
-
-    log.debug("Runtime type validation passed")
-
-    # Step 8: Log effective configuration (with secrets redacted)
     _log_effective_config(config, path)
-
     log.debug("Configuration loaded successfully from %s", path)
     return config
 
@@ -642,11 +739,3 @@ def save_config(config: Config, path: Path = CONFIG_PATH) -> None:
         json.dump(data_with_schema, fh, indent=2)
 
     log.info("Configuration saved successfully to %s", path)
-
-
-# Add MemoryConfig alias for backward compatibility
-@dataclass
-class MemoryConfig:
-    """Memory configuration (deprecated - use Config.memory_max_history directly)."""
-
-    max_history: int = DEFAULT_MEMORY_MAX_HISTORY

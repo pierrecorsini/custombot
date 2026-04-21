@@ -1,27 +1,715 @@
 """
-src/health/server.py — HTTP health check endpoint for monitoring.
+src/health/server.py — HTTP health check and metrics endpoints for monitoring.
 
-Provides a lightweight HTTP server with /health endpoint using aiohttp.
+Provides a lightweight HTTP server with:
+- /health  — JSON health check for service status
+- /ready   — Kubernetes-style readiness probe (200 when fully initialized)
+- /metrics — Prometheus-compatible metrics endpoint
+- /version — Bot version and Python runtime info
+
+Optional HMAC authentication via ``HEALTH_HMAC_SECRET`` env var:
+- If set, unauthenticated requests receive only a basic status code (200/503).
+- Authenticated requests (``Authorization: HMAC-SHA256 <timestamp>:<signature>``)
+  receive the full detailed response.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
+import os
+import time
+from collections import OrderedDict
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Optional
 
-from src.health.models import HealthStatus, ComponentHealth, HealthReport
 from src.health.checks import (
     check_database,
-    check_neonize,
+    check_disk_usage,
     check_llm_credentials,
+    check_llm_logs,
+    check_neonize,
+    check_scheduler,
+    check_wiring,
     get_token_usage_stats,
 )
+from src.health.models import ComponentHealth, HealthReport, HealthStatus
+from src.rate_limiter import SlidingWindowTracker
 
 if TYPE_CHECKING:
+    from src.bot import Bot
+    from src.channels.neonize_backend import NeonizeBackend
     from src.db import Database
-    from src.channels.whatsapp import NeonizeBackend
+    from src.scheduler import TaskScheduler
+    from src.shutdown import GracefulShutdown
 
 log = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-IP Rate Limiting for Health Server
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _load_rate_limit_config() -> tuple[int, float, int]:
+    """Load health HTTP rate limit settings from env or defaults."""
+    from src.constants import (
+        HEALTH_HTTP_RATE_LIMIT,
+        HEALTH_HTTP_RATE_MAX_TRACKED_IPS,
+        HEALTH_HTTP_RATE_WINDOW_SECONDS,
+    )
+
+    limit = os.environ.get("HEALTH_HTTP_RATE_LIMIT", "")
+    window = os.environ.get("HEALTH_HTTP_RATE_WINDOW", "")
+    max_ips = os.environ.get("HEALTH_HTTP_RATE_MAX_IPS", "")
+
+    return (
+        int(limit) if limit.isdigit() else HEALTH_HTTP_RATE_LIMIT,
+        float(window) if window else HEALTH_HTTP_RATE_WINDOW_SECONDS,
+        int(max_ips) if max_ips.isdigit() else HEALTH_HTTP_RATE_MAX_TRACKED_IPS,
+    )
+
+
+class _IPLimiter:
+    """Per-IP sliding window rate limiter with LRU eviction."""
+
+    def __init__(self, limit: int, window_seconds: float, max_ips: int) -> None:
+        self._limit = limit
+        self._window_seconds = window_seconds
+        self._max_ips = max_ips
+        self._trackers: OrderedDict[str, SlidingWindowTracker] = OrderedDict()
+        self._lock = Lock()
+
+    def _get_tracker(self, ip: str) -> SlidingWindowTracker:
+        with self._lock:
+            if ip in self._trackers:
+                self._trackers.move_to_end(ip)
+                return self._trackers[ip]
+            if len(self._trackers) >= self._max_ips:
+                # Evict oldest half (LRU)
+                for _ in range(len(self._trackers) // 2):
+                    self._trackers.popitem(last=False)
+            tracker = SlidingWindowTracker(self._window_seconds, self._limit)
+            self._trackers[ip] = tracker
+            return tracker
+
+    def check(self, ip: str) -> tuple[bool, int, float]:
+        """Check rate limit for an IP. Returns (allowed, remaining, retry_after)."""
+        tracker = self._get_tracker(ip)
+        allowed, remaining, reset_at = tracker.check_only()
+        if not allowed:
+            retry_after = max(0.0, reset_at - time.time())
+            return False, 0, retry_after
+        tracker.record()
+        return True, remaining, 0.0
+
+
+def _create_rate_limit_middleware(limiter: _IPLimiter) -> Any:
+    """Create an aiohttp middleware that rate-limits by client IP."""
+    from aiohttp import web
+
+    @web.middleware
+    async def rate_limit_middleware(request: web.Request, handler: Any) -> Any:
+        # Extract client IP — use X-Forwarded-For if behind a proxy, else remote
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        ip = forwarded.split(",")[0].strip() if forwarded else request.remote or "unknown"
+
+        allowed, remaining, retry_after = limiter.check(ip)
+        if not allowed:
+            log.warning("Health server rate limit exceeded for IP %s", ip)
+            resp = web.Response(
+                text="Too Many Requests",
+                status=429,
+                content_type="text/plain",
+            )
+            resp.headers["Retry-After"] = str(int(retry_after) + 1)
+            return resp
+
+        resp = await handler(request)
+        resp.headers["X-RateLimit-Remaining"] = str(remaining)
+        return resp
+
+    return rate_limit_middleware
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HMAC Request Verification
+# ─────────────────────────────────────────────────────────────────────────────
+
+_HMAC_MAX_SKEW_SECONDS = 300  # 5 minutes
+
+
+def _load_hmac_secret() -> str | None:
+    """Load the optional HMAC secret from the environment."""
+    secret = os.environ.get("HEALTH_HMAC_SECRET", "").strip()
+    return secret if secret else None
+
+
+def _verify_hmac(request: Any, secret: str) -> bool:
+    """Verify HMAC-SHA256 signature on an incoming request.
+
+    Expected header format::
+
+        Authorization: HMAC-SHA256 <timestamp>:<hex-signature>
+
+    Where ``signature = HMAC-SHA256(secret, f"{timestamp}{method}{path}")``.
+    Uses ``hmac.compare_digest`` for timing-safe comparison.
+    Rejects timestamps older than ``_HMAC_MAX_SKEW_SECONDS``.
+    """
+    from aiohttp import web
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("HMAC-SHA256 "):
+        return False
+
+    token = auth_header[len("HMAC-SHA256 "):]
+    if ":" not in token:
+        return False
+
+    timestamp_str, signature = token.split(":", 1)
+    try:
+        timestamp = float(timestamp_str)
+    except (ValueError, TypeError):
+        return False
+
+    if abs(time.time() - timestamp) > _HMAC_MAX_SKEW_SECONDS:
+        log.warning("HMAC verification failed: timestamp expired")
+        return False
+
+    method = request.method
+    path = request.path
+    message = f"{timestamp_str}{method}{path}"
+    expected = hmac.new(
+        secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(signature, expected):
+        log.warning("HMAC verification failed: invalid signature")
+        return False
+
+    return True
+
+
+def _create_hmac_middleware(secret: str) -> Any:
+    """Create an aiohttp middleware that enforces HMAC authentication.
+
+    When the secret is set:
+    - Authenticated requests → full detailed response (pass-through).
+    - Unauthenticated requests to ``/health`` or ``/ready`` → minimal
+      status code only (200 or 503) with no body details.
+    - Unauthenticated requests to ``/metrics`` → HTTP 401.
+    """
+    from aiohttp import web
+
+    @web.middleware
+    async def hmac_middleware(request: web.Request, handler: Any) -> Any:
+        if _verify_hmac(request, secret):
+            return await handler(request)
+
+        # Unauthenticated: return minimal response based on path
+        path = request.path
+        if path == "/metrics":
+            return web.Response(
+                text="Unauthorized",
+                status=401,
+                content_type="text/plain",
+            )
+
+        if path in ("/health", "/ready"):
+            # Return bare status code — handler still runs to determine
+            # healthy vs unhealthy, but we strip the body.
+            resp = await handler(request)
+            return web.Response(status=resp.status)
+
+        # Other paths (e.g. /) — pass through
+        return await handler(request)
+
+    return hmac_middleware
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prometheus Text Format Renderer
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _format_prometheus_metric(
+    name: str,
+    help_text: str,
+    metric_type: str,
+    value: float | int,
+    labels: dict[str, str] | None = None,
+) -> str:
+    """Format a single Prometheus metric line."""
+    label_str = ""
+    if labels:
+        parts = [f'{k}="{v}"' for k, v in labels.items()]
+        label_str = "{" + ",".join(parts) + "}"
+    return (
+        f"# HELP {name} {help_text}\n"
+        f"# TYPE {name} {metric_type}\n"
+        f"{name}{label_str} {value}\n"
+    )
+
+
+def _format_prometheus_summary(
+    name: str,
+    help_text: str,
+    count: int,
+    sum_ms: float | None = None,
+    quantiles: dict[str, float] | None = None,
+    labels: dict[str, str] | None = None,
+) -> str:
+    """Format a Prometheus summary metric with quantiles and optional labels."""
+    # Build label prefix for quantile lines (trailing comma) and full label
+    # string for _sum/_count lines (no trailing comma)
+    quantile_prefix = ""
+    suffix_labels = ""
+    if labels:
+        parts = [f'{k}="{v}"' for k, v in labels.items()]
+        joined = ",".join(parts)
+        quantile_prefix = f"{joined},"
+        suffix_labels = f"{{{joined}}}"
+
+    lines = [
+        f"# HELP {name} {help_text}\n",
+        f"# TYPE {name} summary\n",
+    ]
+    if quantiles:
+        for q_label, q_val in sorted(quantiles.items()):
+            lines.append(f'{name}{{{quantile_prefix}quantile="{q_label}"}} {q_val}\n')
+    if sum_ms is not None:
+        sum_suffix = f"_sum{suffix_labels}" if suffix_labels else "_sum"
+        lines.append(f"{name}{sum_suffix} {sum_ms}\n")
+    count_suffix = f"_count{suffix_labels}" if suffix_labels else "_count"
+    lines.append(f"{name}{count_suffix} {count}\n")
+    return "".join(lines)
+
+
+def _build_prometheus_output(
+    token_usage: dict[str, Any],
+    snapshot: Any,
+    llm_log_dir_bytes: int | None = None,
+    db_size_bytes: int | None = None,
+    workspace_size_bytes: int | None = None,
+) -> str:
+    """Build the full Prometheus text exposition from metrics data."""
+    lines: list[str] = []
+
+    # ── Token Usage ──────────────────────────────────────────────────────────
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_token_usage_prompt_total",
+            "Total prompt tokens consumed",
+            "counter",
+            token_usage.get("prompt_tokens", 0),
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_token_usage_completion_total",
+            "Total completion tokens consumed",
+            "counter",
+            token_usage.get("completion_tokens", 0),
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_token_usage_total",
+            "Total tokens consumed (prompt + completion)",
+            "counter",
+            token_usage.get("total_tokens", 0),
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_llm_requests_total",
+            "Total LLM API requests made",
+            "counter",
+            token_usage.get("request_count", 0),
+        )
+    )
+
+    # ── Message Metrics ─────────────────────────────────────────────────────
+    msg_lat = snapshot.message_latency
+    lines.append(
+        _format_prometheus_summary(
+            "custombot_message_latency_milliseconds",
+            "Message processing latency in milliseconds",
+            count=msg_lat.count,
+            sum_ms=round(msg_lat.mean_ms * msg_lat.count, 2) if msg_lat.count else 0,
+            quantiles={
+                "0.5": round(msg_lat.median_ms, 2),
+                "0.95": round(msg_lat.p95_ms, 2),
+                "0.99": round(msg_lat.p99_ms, 2),
+            }
+            if msg_lat.count
+            else None,
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_messages_processed_total",
+            "Total messages processed",
+            "counter",
+            snapshot.message_count,
+        )
+    )
+
+    # ── LLM Latency ─────────────────────────────────────────────────────────
+    llm_lat = snapshot.llm_latency
+    lines.append(
+        _format_prometheus_summary(
+            "custombot_llm_latency_milliseconds",
+            "LLM API call latency in milliseconds",
+            count=llm_lat.count,
+            sum_ms=round(llm_lat.mean_ms * llm_lat.count, 2) if llm_lat.count else 0,
+            quantiles={
+                "0.5": round(llm_lat.median_ms, 2),
+                "0.95": round(llm_lat.p95_ms, 2),
+                "0.99": round(llm_lat.p99_ms, 2),
+            }
+            if llm_lat.count
+            else None,
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_llm_calls_total",
+            "Total LLM API calls made",
+            "counter",
+            snapshot.llm_call_count,
+        )
+    )
+
+    # ── ReAct Iteration Metrics ──────────────────────────────────────────────
+    react_iters = snapshot.react_iterations
+    lines.append(
+        _format_prometheus_summary(
+            "custombot_react_iterations",
+            "Number of ReAct loop iterations per conversation",
+            count=react_iters.count,
+            sum_ms=round(react_iters.mean_ms * react_iters.count, 2)
+            if react_iters.count
+            else 0,
+            quantiles={
+                "0.5": round(react_iters.median_ms, 2),
+                "0.95": round(react_iters.p95_ms, 2),
+                "0.99": round(react_iters.p99_ms, 2),
+            }
+            if react_iters.count
+            else None,
+        )
+    )
+
+    # ── Database Metrics ────────────────────────────────────────────────────
+    db_lat = snapshot.db_latency
+    lines.append(
+        _format_prometheus_summary(
+            "custombot_db_latency_milliseconds",
+            "Database operation latency in milliseconds",
+            count=db_lat.count,
+            sum_ms=round(db_lat.mean_ms * db_lat.count, 2) if db_lat.count else 0,
+            quantiles={
+                "0.5": round(db_lat.median_ms, 2),
+                "0.95": round(db_lat.p95_ms, 2),
+                "0.99": round(db_lat.p99_ms, 2),
+            }
+            if db_lat.count
+            else None,
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_db_operations_total",
+            "Total database operations executed",
+            "counter",
+            snapshot.db_op_count,
+        )
+    )
+
+    # ── Queue Metrics ────────────────────────────────────────────────────────
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_queue_depth",
+            "Current message queue depth",
+            "gauge",
+            snapshot.queue_depth,
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_queue_max_depth",
+            "Maximum observed queue depth",
+            "gauge",
+            snapshot.queue_max_depth,
+        )
+    )
+
+    # ── Active Chats ─────────────────────────────────────────────────────────
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_active_chat_count",
+            "Number of currently active chats",
+            "gauge",
+            snapshot.active_chat_count,
+        )
+    )
+
+    # ── Memory Cache Metrics ─────────────────────────────────────────────────
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_memory_cache_hits_total",
+            "Total memory cache hits (mtime unchanged, content reused)",
+            "counter",
+            snapshot.memory_cache_hits,
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_memory_cache_misses_total",
+            "Total memory cache misses (file changed or not yet cached)",
+            "counter",
+            snapshot.memory_cache_misses,
+        )
+    )
+
+    # ── Skill Metrics ────────────────────────────────────────────────────────
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_skill_calls_total",
+            "Total skill executions",
+            "counter",
+            snapshot.skill_call_count,
+        )
+    )
+    for skill_name, skill_lat in snapshot.skill_latencies.items():
+        lines.append(
+            _format_prometheus_summary(
+                "custombot_skill_latency_milliseconds",
+                "Skill execution latency in milliseconds",
+                count=skill_lat.count,
+                sum_ms=round(skill_lat.mean_ms * skill_lat.count, 2)
+                if skill_lat.count
+                else 0,
+                quantiles={
+                    "0.5": round(skill_lat.median_ms, 2),
+                    "0.95": round(skill_lat.p95_ms, 2),
+                    "0.99": round(skill_lat.p99_ms, 2),
+                }
+                if skill_lat.count
+                else None,
+                labels={"skill": skill_name},
+            )
+        )
+        # Per-skill call count as a labeled metric
+        lines.append(
+            f'custombot_skill_calls_total{{skill="{skill_name}"}} {skill_lat.count}\n'
+        )
+
+    # ── Per-Skill Error Metrics ──────────────────────────────────────────────
+    for skill_name, sm in snapshot.skill_metrics.items():
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_skill_successes_total",
+                f"Successful executions for {skill_name}",
+                "counter",
+                sm.successes,
+                labels={"skill": skill_name},
+            )
+        )
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_skill_errors_total",
+                f"Failed executions for {skill_name}",
+                "counter",
+                sm.errors,
+                labels={"skill": skill_name},
+            )
+        )
+        for err_type, count in sm.error_types.items():
+            safe_err = err_type.replace('"', '\\"')
+            lines.append(
+                _format_prometheus_metric(
+                    "custombot_skill_errors_total",
+                    f"Failed executions for {skill_name} by error type",
+                    "counter",
+                    count,
+                    labels={"skill": skill_name, "error_type": safe_err},
+                )
+            )
+
+    # ── Per-Chat Message Counts ──────────────────────────────────────────────
+    for chat_metric in snapshot.top_chats:
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_chat_messages_total",
+                "Per-chat message count (top chats)",
+                "counter",
+                chat_metric.message_count,
+                labels={"chat_id": chat_metric.chat_id},
+            )
+        )
+
+    # ── Per-Chat Conversation Depth ──────────────────────────────────────────
+    for depth_entry in snapshot.top_chat_depths:
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_chat_conversation_depth",
+                "Last ReAct iteration count per chat (top chats by depth)",
+                "gauge",
+                depth_entry.depth,
+                labels={"chat_id": depth_entry.chat_id},
+            )
+        )
+
+    # ── System Metrics ───────────────────────────────────────────────────────
+    if snapshot.cpu_percent > 0:
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_cpu_percent",
+                "CPU usage percentage",
+                "gauge",
+                round(snapshot.cpu_percent, 1),
+            )
+        )
+    if snapshot.memory_percent > 0:
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_memory_percent",
+                "Memory usage percentage",
+                "gauge",
+                round(snapshot.memory_percent, 1),
+            )
+        )
+
+    # ── LLM Log Directory Size ──────────────────────────────────────────────
+    if llm_log_dir_bytes is not None:
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_llm_log_dir_bytes",
+                "Total size of LLM request/response log directory in bytes",
+                "gauge",
+                llm_log_dir_bytes,
+            )
+        )
+
+    # ── Disk Usage ──────────────────────────────────────────────────────────
+    if db_size_bytes is not None:
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_db_size_bytes",
+                "Total size of database directory (workspace/.data/) in bytes",
+                "gauge",
+                db_size_bytes,
+            )
+        )
+    if workspace_size_bytes is not None:
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_workspace_size_bytes",
+                "Total size of workspace directory in bytes",
+                "gauge",
+                workspace_size_bytes,
+            )
+        )
+
+    return "".join(lines)
+
+
+def _build_scheduler_prometheus_output(scheduler: Any) -> str:
+    """Build Prometheus metrics for the task scheduler."""
+    if scheduler is None:
+        return ""
+
+    status = scheduler.get_status()
+    lines: list[str] = []
+
+    running = 1 if status["running"] else 0
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_scheduler_running",
+            "Whether the task scheduler is running (1=yes, 0=no)",
+            "gauge",
+            running,
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_scheduler_tasks_total",
+            "Total number of scheduled tasks",
+            "gauge",
+            status["total_tasks"],
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_scheduler_enabled_tasks",
+            "Number of enabled scheduled tasks",
+            "gauge",
+            status["enabled_tasks"],
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_scheduler_chats_with_tasks",
+            "Number of chats with at least one scheduled task",
+            "gauge",
+            status["chats_with_tasks"],
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_scheduler_successes_total",
+            "Total successful scheduled task executions",
+            "counter",
+            status["success_count"],
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_scheduler_failures_total",
+            "Total failed scheduled task executions",
+            "counter",
+            status["failure_count"],
+        )
+    )
+
+    return "".join(lines)
+
+
+def _build_circuit_breaker_prometheus_output(circuit_breaker: Any) -> str:
+    """Build Prometheus metrics for the LLM circuit breaker."""
+    if circuit_breaker is None:
+        return ""
+
+    from src.utils.circuit_breaker import CircuitState
+
+    state = circuit_breaker.state
+    state_value = {
+        CircuitState.CLOSED: 0,
+        CircuitState.HALF_OPEN: 1,
+        CircuitState.OPEN: 2,
+    }.get(state, 0)
+
+    lines: list[str] = []
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_llm_circuit_breaker_state",
+            "Circuit breaker state (0=closed, 1=half-open, 2=open)",
+            "gauge",
+            state_value,
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_llm_circuit_breaker_failures_total",
+            "Total consecutive LLM failures recorded by the circuit breaker",
+            "counter",
+            circuit_breaker.failure_count,
+        )
+    )
+    return "".join(lines)
 
 
 class HealthServer:
@@ -38,6 +726,12 @@ class HealthServer:
         check_memory: bool = True,
         check_performance: bool = True,
         include_token_usage: bool = True,
+        token_usage: Any = None,
+        bot: Optional["Bot"] = None,
+        scheduler: Optional["TaskScheduler"] = None,
+        llm_log_dir: Optional[str] = None,
+        workspace_dir: Optional[str] = None,
+        shutdown_mgr: Optional["GracefulShutdown"] = None,
     ) -> None:
         self._db = db
         self._neonize_backend = neonize_backend
@@ -48,6 +742,12 @@ class HealthServer:
         self._check_memory = check_memory
         self._check_performance = check_performance
         self._include_token_usage = include_token_usage
+        self._token_usage = token_usage
+        self._bot = bot
+        self._scheduler = scheduler
+        self._llm_log_dir = llm_log_dir
+        self._workspace_dir = workspace_dir
+        self._shutdown_mgr = shutdown_mgr
         self._runner: Optional[Any] = None
         self._site: Optional[Any] = None
         self._port: int = 8080
@@ -71,9 +771,7 @@ class HealthServer:
             components.append(await check_neonize(self._neonize_backend))
 
         if self._check_llm and self._llm_api_key:
-            components.append(
-                await check_llm_credentials(self._llm_api_key, self._llm_base_url)
-            )
+            components.append(await check_llm_credentials(self._llm_api_key, self._llm_base_url))
 
         if self._check_memory:
             try:
@@ -125,19 +823,96 @@ class HealthServer:
                     )
                 )
 
+        # Wiring validation (startup component wiring)
+        if self._bot is not None:
+            try:
+                wiring_result = self._bot.validate_wiring()
+                components.append(check_wiring(wiring_result))
+            except Exception as e:
+                log.debug("Wiring health check error: %s", e)
+                components.append(
+                    ComponentHealth(
+                        name="wiring",
+                        status=HealthStatus.UNHEALTHY,
+                        message=f"Wiring check failed: {type(e).__name__}",
+                    )
+                )
+
+        # Scheduler status
+        try:
+            components.append(check_scheduler(self._scheduler))
+        except Exception as e:
+            log.debug("Scheduler health check error: %s", e)
+            components.append(
+                ComponentHealth(
+                    name="scheduler",
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"Scheduler check failed: {type(e).__name__}",
+                )
+            )
+
+        # LLM log directory status
+        try:
+            components.append(check_llm_logs(self._llm_log_dir))
+        except Exception as e:
+            log.debug("LLM logs health check error: %s", e)
+            components.append(
+                ComponentHealth(
+                    name="llm_logs",
+                    status=HealthStatus.DEGRADED,
+                    message=f"LLM logs check failed: {type(e).__name__}",
+                )
+            )
+
+        # Disk usage for database and workspace directories
+        if self._workspace_dir:
+            try:
+                components.append(check_disk_usage(self._workspace_dir))
+            except Exception as e:
+                log.debug("Disk usage health check error: %s", e)
+                components.append(
+                    ComponentHealth(
+                        name="disk_usage",
+                        status=HealthStatus.DEGRADED,
+                        message=f"Disk usage check failed: {type(e).__name__}",
+                    )
+                )
+
+            # Workspace monitor cleanup stats
+            try:
+                from src.monitoring.workspace_monitor import check_workspace_health
+
+                ws_result = await check_workspace_health(self._workspace_dir)
+                if "component" in ws_result:
+                    components.append(ws_result["component"])
+            except Exception as e:
+                log.debug("Workspace health check error: %s", e)
+
         token_usage = None
         if self._include_token_usage:
-            token_usage = get_token_usage_stats()
+            token_usage = get_token_usage_stats(self._token_usage)
 
         return HealthReport(components=components, token_usage=token_usage)
 
     async def _handle_health(self, request: Any) -> Any:
-        """Handle GET /health requests."""
+        """Handle GET /health requests.
+
+        Returns HTTP 200 for HEALTHY, HTTP 200 with X-Health-Status header
+        for DEGRADED (so monitoring tools can detect it), and HTTP 503 for
+        UNHEALTHY.
+        """
         from aiohttp import web
 
         report = await self._get_health_report()
-        status_code = 200 if report.status != HealthStatus.UNHEALTHY else 503
-        return web.json_response(report.to_dict(), status=status_code)
+        if report.status == HealthStatus.UNHEALTHY:
+            status_code = 503
+        else:
+            status_code = 200
+
+        response = web.json_response(report.to_dict(), status=status_code)
+        if report.status == HealthStatus.DEGRADED:
+            response.headers["X-Health-Status"] = "degraded"
+        return response
 
     async def _handle_root(self, request: Any) -> Any:
         """Handle GET / requests with basic info."""
@@ -146,24 +921,162 @@ class HealthServer:
         return web.json_response(
             {
                 "name": "custombot",
-                "message": "Bot is running. Use /health for health check.",
+                "message": (
+                    "Bot is running. Use /health for health check, "
+                    "/metrics for Prometheus metrics, /version for version info."
+                ),
             }
         )
 
-    async def start(self, port: int = 8080, host: str = "0.0.0.0") -> None:
-        """Start the health check HTTP server."""
+    async def _handle_ready(self, request: Any) -> Any:
+        """Handle GET /ready — Kubernetes-style readiness probe.
+
+        Returns HTTP 200 only when all components (including the WhatsApp
+        channel) are fully initialized and the bot is accepting messages.
+        Returns HTTP 503 otherwise, listing the reasons the bot is not ready.
+        """
+        from aiohttp import web
+
+        from src.health.checks import check_readiness
+
+        ready, reasons = check_readiness(
+            shutdown_accepting=(
+                self._shutdown_mgr.accepting_messages
+                if self._shutdown_mgr is not None
+                else False
+            ),
+            neonize_backend=self._neonize_backend,
+            bot_wired=self._bot is not None,
+            db_available=self._db is not None,
+        )
+
+        body: dict[str, Any] = {"ready": ready}
+        if reasons:
+            body["reasons"] = reasons
+
+        return web.json_response(body, status=200 if ready else 503)
+
+    async def _handle_version(self, request: Any) -> Any:
+        """Handle GET /version — return bot version and Python runtime info."""
+        import platform
+
+        from aiohttp import web
+
+        from src.__version__ import __version__
+
+        return web.json_response(
+            {
+                "version": __version__,
+                "python": platform.python_version(),
+            }
+        )
+
+    async def _handle_metrics(self, request: Any) -> Any:
+        """Handle GET /metrics requests in Prometheus text exposition format."""
+        from aiohttp import web
+
+        try:
+            token_usage = get_token_usage_stats(self._token_usage)
+            from src.monitoring.performance import get_metrics_collector
+
+            metrics = get_metrics_collector()
+            await metrics.refresh_system_metrics()
+            snapshot = metrics.get_snapshot(include_system=True)
+
+            # Collect LLM log directory size
+            llm_log_bytes: int | None = None
+            if self._llm_log_dir:
+                from src.logging.llm_logging import _dir_size
+                from pathlib import Path
+
+                llm_log_bytes = _dir_size(Path(self._llm_log_dir))
+
+            # Collect disk usage for database and workspace
+            db_size_bytes: int | None = None
+            workspace_size_bytes: int | None = None
+            if self._workspace_dir:
+                from pathlib import Path
+
+                from src.health.checks import _recursive_dir_size
+
+                ws = Path(self._workspace_dir)
+                data_dir = ws / ".data"
+                db_size_bytes = _recursive_dir_size(data_dir) if data_dir.exists() else 0
+                workspace_size_bytes = _recursive_dir_size(ws)
+
+            output = _build_prometheus_output(
+                token_usage, snapshot, llm_log_bytes, db_size_bytes, workspace_size_bytes
+            )
+            output += _build_scheduler_prometheus_output(self._scheduler)
+            # Circuit breaker metrics (via public Bot accessor)
+            cb = self._bot.get_llm_status() if self._bot is not None else None
+            output += _build_circuit_breaker_prometheus_output(cb)
+            return web.Response(
+                text=output,
+                content_type="text/plain",
+                charset="utf-8",
+            )
+        except Exception as e:
+            log.error("Metrics endpoint error: %s", e, exc_info=True)
+            return web.Response(
+                text=f"# Error generating metrics: {type(e).__name__}\n",
+                status=500,
+                content_type="text/plain",
+                charset="utf-8",
+            )
+
+    @staticmethod
+    async def _add_security_headers(request: Any, response: Any) -> None:
+        """Inject security headers into every response."""
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Security-Policy"] = "default-src 'none'"
+
+    async def start(self, port: int = 8080, host: str = "127.0.0.1") -> None:
+        """Start the health check HTTP server.
+
+        Default binds to localhost only to prevent exposing internal state
+        (DB status, token counts, connection info) to the network.
+        Set host="0.0.0.0" to expose to all interfaces.
+        """
         from aiohttp import web
 
         self._port = port
-        app = web.Application()
+
+        # Build middleware stack
+        middlewares: list[Any] = []
+
+        # Per-IP rate limiting middleware
+        limit, window, max_ips = _load_rate_limit_config()
+        ip_limiter = _IPLimiter(limit, window, max_ips)
+        middlewares.append(_create_rate_limit_middleware(ip_limiter))
+
+        # Optional HMAC authentication middleware
+        hmac_secret = _load_hmac_secret()
+        if hmac_secret:
+            middlewares.append(_create_hmac_middleware(hmac_secret))
+
+        app = web.Application(middlewares=middlewares)
+        app.on_response_prepare.append(self._add_security_headers)
         app.router.add_get("/", self._handle_root)
         app.router.add_get("/health", self._handle_health)
+        app.router.add_get("/ready", self._handle_ready)
+        app.router.add_get("/version", self._handle_version)
+        app.router.add_get("/metrics", self._handle_metrics)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, host, port)
         await self._site.start()
-        log.info("Health check server started on http://%s:%d", host, port)
+
+        auth_status = "HMAC enabled" if hmac_secret else "no auth"
+        log.info(
+            "Health check server started on http://%s:%d (%s, rate limit: %d req/%ds per IP)",
+            host,
+            port,
+            auth_status,
+            limit,
+            int(window),
+        )
 
     async def stop(self) -> None:
         """Stop the health check HTTP server."""
@@ -184,12 +1097,14 @@ async def run_health_server(
     neonize_backend: Optional["NeonizeBackend"] = None,
     port: int = 8080,
     check_whatsapp: bool = True,
+    token_usage: Any = None,
 ) -> HealthServer:
     """Create and start a health server. Convenience function for quick setup."""
     server = HealthServer(
         db=db,
         neonize_backend=neonize_backend,
         check_whatsapp=check_whatsapp,
+        token_usage=token_usage,
     )
     await server.start(port=port)
     return server

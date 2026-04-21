@@ -3,12 +3,12 @@ Tests for src/llm.py — OpenAI-compatible async LLM client.
 
 Unit tests covering:
   - TokenUsage dataclass: defaults, add(), to_dict()
-  - Global session token usage: get_token_usage(), reset_token_usage()
   - LLMClient.__init__: config validation, AsyncOpenAI construction, log_llm mode
   - LLMClient.chat: async API call, kwargs building, token tracking, tool support
   - LLMClient.chat: retry_with_backoff decorator integration
   - LLMClient.chat: LLM file logging (request/response)
   - LLMClient.tool_call_to_dict: static conversion of tool-call messages
+  - serialize_tool_call_message: standalone tool-call serialization
   - Error handling and edge cases
 """
 
@@ -17,16 +17,16 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from src.config import LLMConfig
+from src.exceptions import ErrorCode, LLMError
 from src.llm import (
     LLMClient,
     TokenUsage,
-    get_token_usage,
-    reset_token_usage,
+    _classify_llm_error,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -135,14 +135,6 @@ def _make_mock_tool_call(
     return tc
 
 
-@pytest.fixture(autouse=True)
-def _reset_global_token_usage():
-    """Reset global token usage before and after each test."""
-    reset_token_usage()
-    yield
-    reset_token_usage()
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # TokenUsage dataclass
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,51 +234,51 @@ class TestTokenUsageToDict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Global session token usage
+# LLMClient.token_usage property (DI-based, no global)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestGetTokenUsage:
-    """Tests for get_token_usage() global tracker."""
+class TestClientTokenUsage:
+    """Tests for LLMClient.token_usage property (injected via constructor)."""
 
-    def test_returns_token_usage_instance(self):
-        result = get_token_usage()
-        assert isinstance(result, TokenUsage)
+    @patch("src.llm.AsyncOpenAI")
+    def test_returns_token_usage_instance(self, mock_openai, valid_cfg):
+        """token_usage property should return a TokenUsage instance."""
+        client = LLMClient(valid_cfg)
+        assert isinstance(client.token_usage, TokenUsage)
 
-    def test_returns_same_instance(self):
-        """get_token_usage() should always return the same global object."""
-        a = get_token_usage()
-        b = get_token_usage()
-        assert a is b
+    @patch("src.llm.AsyncOpenAI")
+    def test_creates_fresh_instance_by_default(self, mock_openai, valid_cfg):
+        """Without explicit injection, each client gets its own TokenUsage."""
+        client = LLMClient(valid_cfg)
+        assert client.token_usage.prompt_tokens == 0
+        assert client.token_usage.request_count == 0
 
+    @patch("src.llm.AsyncOpenAI")
+    def test_accepts_injected_token_usage(self, mock_openai, valid_cfg):
+        """Constructor should accept and use an externally created TokenUsage."""
+        shared = TokenUsage()
+        shared.add(prompt=42, completion=10)
+        client = LLMClient(valid_cfg, token_usage=shared)
+        assert client.token_usage is shared
+        assert client.token_usage.prompt_tokens == 42
 
-class TestResetTokenUsage:
-    """Tests for reset_token_usage() function."""
+    @patch("src.llm.AsyncOpenAI")
+    def test_each_client_gets_independent_tracker(self, mock_openai, valid_cfg):
+        """Two clients without shared injection have independent trackers."""
+        client1 = LLMClient(valid_cfg)
+        client2 = LLMClient(valid_cfg)
+        assert client1.token_usage is not client2.token_usage
 
-    def test_resets_to_defaults(self):
-        usage = get_token_usage()
-        usage.add(prompt=100, completion=200)
-        reset_token_usage()
-        fresh = get_token_usage()
-        assert fresh.prompt_tokens == 0
-        assert fresh.completion_tokens == 0
-        assert fresh.total_tokens == 0
-        assert fresh.request_count == 0
-
-    def test_creates_new_instance(self):
-        """reset_token_usage() should create a fresh TokenUsage object."""
-        old = get_token_usage()
-        old.add(prompt=10, completion=10)
-        reset_token_usage()
-        new = get_token_usage()
-        assert old is not new
-
-    def test_get_after_reset_is_fresh(self):
-        get_token_usage().add(prompt=50, completion=50)
-        reset_token_usage()
-        usage = get_token_usage()
-        assert usage.request_count == 0
-        assert usage.total_tokens == 0
+    @patch("src.llm.AsyncOpenAI")
+    def test_shared_token_usage_across_clients(self, mock_openai, valid_cfg):
+        """Two clients sharing the same TokenUsage instance see each other's data."""
+        shared = TokenUsage()
+        client1 = LLMClient(valid_cfg, token_usage=shared)
+        client2 = LLMClient(valid_cfg, token_usage=shared)
+        client1.token_usage.add(prompt=10, completion=5)
+        assert client2.token_usage.prompt_tokens == 10
+        assert client2.token_usage is client1.token_usage
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -300,20 +292,21 @@ class TestLLMClientInit:
     @patch("src.llm.AsyncOpenAI")
     def test_creates_client_with_valid_config(self, mock_openai, valid_cfg):
         client = LLMClient(valid_cfg)
-        mock_openai.assert_called_once_with(
+        call_kwargs = mock_openai.assert_called_once_with(
             api_key="sk-test-key",
             base_url="https://api.openai.com/v1",
+            http_client=client._http_client,
         )
         assert client._cfg is valid_cfg
+        assert isinstance(client._http_client, httpx.AsyncClient)
 
     @patch("src.llm.AsyncOpenAI")
-    def test_uses_no_key_fallback_when_api_key_empty(
-        self, mock_openai, valid_cfg_no_api_key
-    ):
-        LLMClient(valid_cfg_no_api_key)
+    def test_uses_no_key_fallback_when_api_key_empty(self, mock_openai, valid_cfg_no_api_key):
+        client = LLMClient(valid_cfg_no_api_key)
         mock_openai.assert_called_once_with(
             api_key="sk-no-key",
             base_url="http://localhost:11434/v1",
+            http_client=client._http_client,
         )
 
     @patch("src.llm.AsyncOpenAI")
@@ -337,9 +330,7 @@ class TestLLMClientInit:
     @patch("src.llm.AsyncOpenAI")
     @patch("src.logging.llm_logging.LLMLogger")
     @patch("src.llm.WORKSPACE_DIR", "/tmp/test_workspace")
-    def test_llm_logger_enabled_when_requested(
-        self, mock_logger_cls, mock_openai, valid_cfg
-    ):
+    def test_llm_logger_enabled_when_requested(self, mock_logger_cls, mock_openai, valid_cfg):
         client = LLMClient(valid_cfg, log_llm=True)
         assert client._llm_logger is not None
         mock_logger_cls.assert_called_once_with("/tmp/test_workspace/logs/llm")
@@ -349,6 +340,22 @@ class TestLLMClientInit:
         """When log_llm=False, LLMLogger should not be imported/initialized."""
         client = LLMClient(valid_cfg, log_llm=False)
         assert client._llm_logger is None
+
+    @patch("src.llm.AsyncOpenAI")
+    def test_http_client_has_connection_pooling(self, mock_openai, valid_cfg):
+        """LLMClient should create an httpx.AsyncClient with pool limits."""
+        client = LLMClient(valid_cfg)
+        assert isinstance(client._http_client, httpx.AsyncClient)
+        # Verify the http_client was passed to AsyncOpenAI
+        call_kwargs = mock_openai.call_args[1]
+        assert call_kwargs["http_client"] is client._http_client
+
+    @pytest.mark.asyncio
+    @patch("src.llm.AsyncOpenAI")
+    async def test_close_cleans_up_http_client(self, mock_openai, valid_cfg):
+        """close() should close the underlying httpx connection pool."""
+        client = LLMClient(valid_cfg)
+        await client.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -367,9 +374,7 @@ class TestLLMClientChat:
             content="Hi there!", usage=_make_mock_usage(10, 20, 30)
         )
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
@@ -385,9 +390,7 @@ class TestLLMClientChat:
         """chat() should pass model, messages, temperature, max_tokens, timeout."""
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage())
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
@@ -407,9 +410,7 @@ class TestLLMClientChat:
         """When timeout is None, should use config.timeout."""
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage())
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
@@ -420,15 +421,11 @@ class TestLLMClientChat:
 
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
-    async def test_chat_omits_max_tokens_when_none(
-        self, mock_openai, valid_cfg_no_max_tokens
-    ):
+    async def test_chat_omits_max_tokens_when_none(self, mock_openai, valid_cfg_no_max_tokens):
         """When max_tokens is None, it should NOT be in the API kwargs."""
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage())
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg_no_max_tokens)
@@ -443,9 +440,7 @@ class TestLLMClientChat:
         """When max_tokens is set, it should be in the API kwargs."""
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage())
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
@@ -460,9 +455,7 @@ class TestLLMClientChat:
         """chat() should include tools and tool_choice when tools are provided."""
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage())
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
@@ -482,9 +475,7 @@ class TestLLMClientChat:
         """chat() should NOT include tools/tool_choice when no tools given."""
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage())
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
@@ -500,9 +491,7 @@ class TestLLMClientChat:
         """An empty tools list should be treated as no tools (falsy)."""
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage())
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
@@ -524,24 +513,18 @@ class TestChatTokenTracking:
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="corr-123")
-    async def test_updates_session_usage_from_object(
-        self, mock_corr, mock_openai, valid_cfg
-    ):
+    async def test_updates_session_usage_from_object(self, mock_corr, mock_openai, valid_cfg):
         """Token usage should be tracked from response.usage (object form)."""
-        usage_obj = _make_mock_usage(
-            prompt_tokens=50, completion_tokens=100, total_tokens=150
-        )
+        usage_obj = _make_mock_usage(prompt_tokens=50, completion_tokens=100, total_tokens=150)
         mock_response = _make_mock_chat_completion(usage=usage_obj)
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
         await client.chat([{"role": "user", "content": "Hi"}])
 
-        session = get_token_usage()
+        session = client.token_usage
         assert session.prompt_tokens == 50
         assert session.completion_tokens == 100
         assert session.total_tokens == 150
@@ -550,24 +533,20 @@ class TestChatTokenTracking:
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value=None)
-    async def test_updates_session_usage_from_dict(
-        self, mock_corr, mock_openai, valid_cfg
-    ):
+    async def test_updates_session_usage_from_dict(self, mock_corr, mock_openai, valid_cfg):
         """Token usage should be tracked from response.usage (dict form)."""
         usage_dict = _make_mock_usage(
             prompt_tokens=25, completion_tokens=75, total_tokens=100, as_dict=True
         )
         mock_response = _make_mock_chat_completion(usage=usage_dict)
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
         await client.chat([{"role": "user", "content": "Hi"}])
 
-        session = get_token_usage()
+        session = client.token_usage
         assert session.prompt_tokens == 25
         assert session.completion_tokens == 75
         assert session.total_tokens == 100
@@ -576,9 +555,7 @@ class TestChatTokenTracking:
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="corr-xyz")
-    async def test_accumulates_across_multiple_calls(
-        self, mock_corr, mock_openai, valid_cfg
-    ):
+    async def test_accumulates_across_multiple_calls(self, mock_corr, mock_openai, valid_cfg):
         """Token usage should accumulate across multiple chat() calls."""
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
@@ -595,7 +572,7 @@ class TestChatTokenTracking:
         mock_client_instance.chat.completions.create = AsyncMock(return_value=resp2)
         await client.chat([{"role": "user", "content": "Two"}])
 
-        session = get_token_usage()
+        session = client.token_usage
         assert session.prompt_tokens == 50
         assert session.completion_tokens == 80
         assert session.total_tokens == 130
@@ -604,21 +581,17 @@ class TestChatTokenTracking:
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value=None)
-    async def test_no_tracking_when_usage_is_none(
-        self, mock_corr, mock_openai, valid_cfg
-    ):
+    async def test_no_tracking_when_usage_is_none(self, mock_corr, mock_openai, valid_cfg):
         """If response.usage is None, session usage should not be updated."""
         mock_response = _make_mock_chat_completion(usage=None)
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
         await client.chat([{"role": "user", "content": "Hi"}])
 
-        session = get_token_usage()
+        session = client.token_usage
         assert session.request_count == 0
         assert session.total_tokens == 0
 
@@ -627,20 +600,16 @@ class TestChatTokenTracking:
     @patch("src.llm.get_correlation_id", return_value="c1")
     async def test_handles_zero_token_fields(self, mock_corr, mock_openai, valid_cfg):
         """Token fields that are 0 should still be tracked (not treated as None)."""
-        usage_obj = _make_mock_usage(
-            prompt_tokens=0, completion_tokens=0, total_tokens=0
-        )
+        usage_obj = _make_mock_usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
         mock_response = _make_mock_chat_completion(usage=usage_obj)
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
         await client.chat([{"role": "user", "content": "Hi"}])
 
-        session = get_token_usage()
+        session = client.token_usage
         assert session.prompt_tokens == 0
         assert session.completion_tokens == 0
         assert session.total_tokens == 0
@@ -649,22 +618,18 @@ class TestChatTokenTracking:
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="c2")
-    async def test_dict_usage_computes_total_when_missing(
-        self, mock_corr, mock_openai, valid_cfg
-    ):
+    async def test_dict_usage_computes_total_when_missing(self, mock_corr, mock_openai, valid_cfg):
         """Dict usage without total_tokens should compute it from prompt + completion."""
         usage_dict = {"prompt_tokens": 30, "completion_tokens": 70}
         mock_response = _make_mock_chat_completion(usage=usage_dict)
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
         await client.chat([{"role": "user", "content": "Hi"}])
 
-        session = get_token_usage()
+        session = client.token_usage
         assert session.prompt_tokens == 30
         assert session.completion_tokens == 70
         assert session.total_tokens == 100
@@ -682,15 +647,11 @@ class TestChatLLMLogging:
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="corr-log")
-    async def test_logs_request_and_response_when_enabled(
-        self, mock_corr, mock_openai, valid_cfg
-    ):
+    async def test_logs_request_and_response_when_enabled(self, mock_corr, mock_openai, valid_cfg):
         """When log_llm=True, both request and response should be logged."""
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage())
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         with patch("src.logging.llm_logging.LLMLogger") as mock_logger_cls:
@@ -728,9 +689,7 @@ class TestChatLLMLogging:
         """When log_llm=False (default), no logging methods should be called."""
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage())
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
@@ -767,10 +726,8 @@ class TestChatRetryBehavior:
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="corr-retry2")
-    @patch("src.llm.asyncio.sleep", new_callable=AsyncMock)
-    async def test_retries_on_transient_error(
-        self, mock_sleep, mock_corr, mock_openai, valid_cfg
-    ):
+    @patch("src.utils.retry.asyncio.sleep", new_callable=AsyncMock)
+    async def test_retries_on_transient_error(self, mock_sleep, mock_corr, mock_openai, valid_cfg):
         """chat() should retry on transient errors (e.g. rate limit)."""
         from openai import RateLimitError
 
@@ -782,9 +739,7 @@ class TestChatRetryBehavior:
 
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage())
         mock_client_instance = MagicMock()
-        mock_create = AsyncMock(
-            side_effect=[rate_limit_err, rate_limit_err, mock_response]
-        )
+        mock_create = AsyncMock(side_effect=[rate_limit_err, rate_limit_err, mock_response])
         mock_client_instance.chat.completions.create = mock_create
         mock_openai.return_value = mock_client_instance
 
@@ -799,11 +754,11 @@ class TestChatRetryBehavior:
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="corr-retry3")
-    @patch("src.llm.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.utils.retry.asyncio.sleep", new_callable=AsyncMock)
     async def test_raises_after_max_retries_exhausted(
         self, mock_sleep, mock_corr, mock_openai, valid_cfg
     ):
-        """chat() should raise after 3 retries on persistent transient errors."""
+        """chat() should raise LLMError after 3 retries on persistent transient errors."""
         from openai import RateLimitError
 
         rate_limit_err = RateLimitError(
@@ -818,19 +773,21 @@ class TestChatRetryBehavior:
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
-        with pytest.raises(RateLimitError):
+        with pytest.raises(LLMError, match="rate limit") as exc_info:
             await client.chat([{"role": "user", "content": "Hi"}])
 
+        # Should be classified as rate-limited error
+        assert exc_info.value.error_code == ErrorCode.LLM_RATE_LIMITED
+        # Original OpenAI error should be in the cause chain
+        assert isinstance(exc_info.value.__cause__, RateLimitError)
         # 1 initial + 3 retries = 4 total calls
         assert mock_create.call_count == 4
 
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="corr-noretry")
-    async def test_does_not_retry_on_non_transient_error(
-        self, mock_corr, mock_openai, valid_cfg
-    ):
-        """Non-transient errors should be raised immediately without retry."""
+    async def test_does_not_retry_on_non_transient_error(self, mock_corr, mock_openai, valid_cfg):
+        """Non-transient errors should be raised as LLMError without retry."""
         from openai import BadRequestError
 
         bad_request_err = BadRequestError(
@@ -845,9 +802,11 @@ class TestChatRetryBehavior:
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
-        with pytest.raises(BadRequestError):
+        with pytest.raises(LLMError, match="bad request") as exc_info:
             await client.chat([{"role": "user", "content": "Hi"}])
 
+        assert exc_info.value.error_code == ErrorCode.LLM_INVALID_REQUEST
+        assert isinstance(exc_info.value.__cause__, BadRequestError)
         assert mock_create.call_count == 1
 
 
@@ -857,9 +816,11 @@ class TestChatRetryBehavior:
 
 
 class TestToolCallToDict:
-    """Tests for LLMClient.tool_call_to_dict() static method."""
+    """Tests for serialize_tool_call_message() and LLMClient backward-compat."""
 
     def test_converts_single_tool_call(self):
+        from src.core.serialization import serialize_tool_call_message
+
         tc = _make_mock_tool_call(
             call_id="call_001", name="get_weather", arguments='{"city": "Paris"}'
         )
@@ -867,7 +828,7 @@ class TestToolCallToDict:
         message.content = "Let me check the weather."
         message.tool_calls = [tc]
 
-        result = LLMClient.tool_call_to_dict(message)
+        result = serialize_tool_call_message(message)
 
         assert result == {
             "role": "assistant",
@@ -885,17 +846,15 @@ class TestToolCallToDict:
         }
 
     def test_converts_multiple_tool_calls(self):
-        tc1 = _make_mock_tool_call(
-            call_id="call_1", name="func_a", arguments='{"x": 1}'
-        )
-        tc2 = _make_mock_tool_call(
-            call_id="call_2", name="func_b", arguments='{"y": 2}'
-        )
+        from src.core.serialization import serialize_tool_call_message
+
+        tc1 = _make_mock_tool_call(call_id="call_1", name="func_a", arguments='{"x": 1}')
+        tc2 = _make_mock_tool_call(call_id="call_2", name="func_b", arguments='{"y": 2}')
         message = MagicMock()
         message.content = None
         message.tool_calls = [tc1, tc2]
 
-        result = LLMClient.tool_call_to_dict(message)
+        result = serialize_tool_call_message(message)
 
         assert len(result["tool_calls"]) == 2
         assert result["tool_calls"][0]["id"] == "call_1"
@@ -904,11 +863,13 @@ class TestToolCallToDict:
 
     def test_empty_tool_calls_list(self):
         """Message with tool_calls=[] should produce empty list in output."""
+        from src.core.serialization import serialize_tool_call_message
+
         message = MagicMock()
         message.content = "No tools needed."
         message.tool_calls = []
 
-        result = LLMClient.tool_call_to_dict(message)
+        result = serialize_tool_call_message(message)
 
         assert result == {
             "role": "assistant",
@@ -918,11 +879,13 @@ class TestToolCallToDict:
 
     def test_none_tool_calls(self):
         """Message with tool_calls=None should produce empty list in output."""
+        from src.core.serialization import serialize_tool_call_message
+
         message = MagicMock()
         message.content = "Just text."
         message.tool_calls = None
 
-        result = LLMClient.tool_call_to_dict(message)
+        result = serialize_tool_call_message(message)
 
         assert result == {
             "role": "assistant",
@@ -932,28 +895,28 @@ class TestToolCallToDict:
 
     def test_preserves_complex_arguments(self):
         """Complex JSON arguments should be preserved as-is."""
-        complex_args = (
-            '{"filters": {"date": "2024-01-01", "tags": ["a", "b"]}, "limit": 10}'
-        )
-        tc = _make_mock_tool_call(
-            call_id="call_complex", name="search", arguments=complex_args
-        )
+        from src.core.serialization import serialize_tool_call_message
+
+        complex_args = '{"filters": {"date": "2024-01-01", "tags": ["a", "b"]}, "limit": 10}'
+        tc = _make_mock_tool_call(call_id="call_complex", name="search", arguments=complex_args)
         message = MagicMock()
         message.content = "Searching..."
         message.tool_calls = [tc]
 
-        result = LLMClient.tool_call_to_dict(message)
+        result = serialize_tool_call_message(message)
 
         assert result["tool_calls"][0]["function"]["arguments"] == complex_args
 
-    def test_is_static_method(self):
-        """tool_call_to_dict should be callable without an instance."""
+    def test_llm_client_backward_compat(self):
+        """LLMClient.tool_call_to_dict should delegate to standalone function."""
         message = MagicMock()
         message.content = "test"
         message.tool_calls = None
-        # Should not raise
+
         result = LLMClient.tool_call_to_dict(message)
+
         assert isinstance(result, dict)
+        assert result["role"] == "assistant"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -967,17 +930,13 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="edge-1")
-    async def test_returns_response_even_without_usage(
-        self, mock_corr, mock_openai, valid_cfg
-    ):
+    async def test_returns_response_even_without_usage(self, mock_corr, mock_openai, valid_cfg):
         """chat() should return the response even when usage is None."""
         mock_response = _make_mock_chat_completion(
             content="Done!", finish_reason="stop", usage=None
         )
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
@@ -993,9 +952,7 @@ class TestEdgeCases:
         """chat() should pass through all messages to the API."""
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage())
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
@@ -1013,35 +970,31 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="edge-3")
-    async def test_session_usage_independent_across_clients(
+    async def test_shared_token_usage_across_clients(
         self, mock_corr, mock_openai, valid_cfg
     ):
-        """Token usage is global — two clients share the same session tracker."""
+        """Two clients sharing a TokenUsage instance accumulate together."""
+        shared = TokenUsage()
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage(10, 20, 30))
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
-        client1 = LLMClient(valid_cfg)
-        client2 = LLMClient(valid_cfg)
+        client1 = LLMClient(valid_cfg, token_usage=shared)
+        client2 = LLMClient(valid_cfg, token_usage=shared)
 
         await client1.chat([{"role": "user", "content": "From client 1"}])
         await client2.chat([{"role": "user", "content": "From client 2"}])
 
-        session = get_token_usage()
-        # Both calls should be tracked
-        assert session.request_count == 2
-        assert session.prompt_tokens == 20  # 10 + 10
-        assert session.completion_tokens == 40  # 20 + 20
+        # Both calls tracked in the shared instance
+        assert shared.request_count == 2
+        assert shared.prompt_tokens == 20  # 10 + 10
+        assert shared.completion_tokens == 40  # 20 + 20
 
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="edge-4")
-    async def test_dict_usage_with_none_token_fields(
-        self, mock_corr, mock_openai, valid_cfg
-    ):
+    async def test_dict_usage_with_none_token_fields(self, mock_corr, mock_openai, valid_cfg):
         """Dict usage with None token fields should default to 0."""
         usage_dict = {
             "prompt_tokens": None,
@@ -1050,26 +1003,21 @@ class TestEdgeCases:
         }
         mock_response = _make_mock_chat_completion(usage=usage_dict)
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
         await client.chat([{"role": "user", "content": "Hi"}])
 
-        session = get_token_usage()
-        assert session.prompt_tokens == 0
-        assert session.completion_tokens == 0
-        assert session.total_tokens == 0
-        assert session.request_count == 1
+        assert client.token_usage.prompt_tokens == 0
+        assert client.token_usage.completion_tokens == 0
+        assert client.token_usage.total_tokens == 0
+        assert client.token_usage.request_count == 1
 
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="edge-5")
-    async def test_object_usage_with_none_token_fields(
-        self, mock_corr, mock_openai, valid_cfg
-    ):
+    async def test_object_usage_with_none_token_fields(self, mock_corr, mock_openai, valid_cfg):
         """Object usage with None token fields should default to 0."""
         usage_obj = MagicMock()
         usage_obj.prompt_tokens = None
@@ -1077,16 +1025,241 @@ class TestEdgeCases:
         usage_obj.total_tokens = None
         mock_response = _make_mock_chat_completion(usage=usage_obj)
         mock_client_instance = MagicMock()
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_openai.return_value = mock_client_instance
 
         client = LLMClient(valid_cfg)
         await client.chat([{"role": "user", "content": "Hi"}])
 
-        session = get_token_usage()
-        assert session.prompt_tokens == 0
-        assert session.completion_tokens == 0
-        assert session.total_tokens == 0
-        assert session.request_count == 1
+        assert client.token_usage.prompt_tokens == 0
+        assert client.token_usage.completion_tokens == 0
+        assert client.token_usage.total_tokens == 0
+        assert client.token_usage.request_count == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Edge case: empty choices, connection errors, auth errors
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEmptyChoices:
+    """Tests for handling empty response.choices from LLM API."""
+
+    @pytest.mark.asyncio
+    @patch("src.llm.AsyncOpenAI")
+    @patch("src.llm.get_correlation_id", return_value="corr-123")
+    async def test_empty_choices_raises_llm_error(self, mock_corr, mock_openai, valid_cfg):
+        """Empty choices (content filtered) should raise LLMError, not IndexError."""
+        mock_response = MagicMock()
+        mock_response.choices = []
+        mock_response.usage = _make_mock_usage(10, 0, 10)
+        mock_client_instance = MagicMock()
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
+        mock_openai.return_value = mock_client_instance
+
+        client = LLMClient(valid_cfg)
+        with pytest.raises(LLMError, match="empty choices"):
+            await client.chat([{"role": "user", "content": "test"}])
+
+
+class TestConnectionAndAuthErrors:
+    """Tests for API connection and authentication error handling."""
+
+    @pytest.mark.asyncio
+    @patch("src.llm.AsyncOpenAI")
+    @patch("src.llm.get_correlation_id", return_value="corr-123")
+    async def test_api_connection_error_retries(self, mock_corr, mock_openai, valid_cfg):
+        """APIConnectionError should be retried as a transient error."""
+        from openai import APIConnectionError
+
+        mock_client_instance = MagicMock()
+        mock_response = _make_mock_chat_completion()
+        mock_client_instance.chat.completions.create = AsyncMock(
+            side_effect=[
+                APIConnectionError(request=MagicMock()),
+                mock_response,
+            ]
+        )
+        mock_openai.return_value = mock_client_instance
+
+        client = LLMClient(valid_cfg)
+        result = await client.chat([{"role": "user", "content": "test"}])
+        assert result is not None
+        assert mock_client_instance.chat.completions.create.call_count == 2
+
+    @pytest.mark.asyncio
+    @patch("src.llm.AsyncOpenAI")
+    @patch("src.llm.get_correlation_id", return_value="corr-123")
+    async def test_authentication_error_no_retry(self, mock_corr, mock_openai, valid_cfg):
+        """AuthenticationError (401) should NOT be retried; wrapped as LLMError."""
+        from openai import AuthenticationError
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.chat.completions.create = AsyncMock(
+            side_effect=AuthenticationError(
+                message="Invalid API key",
+                response=MagicMock(status_code=401),
+                body=None,
+            )
+        )
+        mock_openai.return_value = mock_client_instance
+
+        client = LLMClient(valid_cfg)
+        with pytest.raises(LLMError, match="authentication") as exc_info:
+            await client.chat([{"role": "user", "content": "test"}])
+
+        assert exc_info.value.error_code == ErrorCode.LLM_API_KEY_INVALID
+        # Should have been called exactly once (no retries)
+        assert mock_client_instance.chat.completions.create.call_count == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _classify_llm_error — structured error classification
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestClassifyLLMError:
+    """Tests for _classify_llm_error() mapping of OpenAI errors to LLMError."""
+
+    def test_authentication_error(self):
+        """AuthenticationError → LLM_API_KEY_INVALID."""
+        from openai import AuthenticationError
+
+        err = AuthenticationError(
+            message="Bad key",
+            response=MagicMock(status_code=401),
+            body=None,
+        )
+        result = _classify_llm_error(err)
+        assert isinstance(result, LLMError)
+        assert result.error_code == ErrorCode.LLM_API_KEY_INVALID
+        assert "authentication" in result.message.lower()
+
+    def test_permission_denied_error(self):
+        """PermissionDeniedError → LLM_API_KEY_INVALID."""
+        from openai import PermissionDeniedError
+
+        err = PermissionDeniedError(
+            message="No access",
+            response=MagicMock(status_code=403),
+            body=None,
+        )
+        result = _classify_llm_error(err)
+        assert result.error_code == ErrorCode.LLM_API_KEY_INVALID
+        assert "permission" in result.message.lower()
+
+    def test_rate_limit_error(self):
+        """RateLimitError → LLM_RATE_LIMITED."""
+        from openai import RateLimitError
+
+        err = RateLimitError(
+            message="Slow down",
+            response=MagicMock(status_code=429),
+            body=None,
+        )
+        result = _classify_llm_error(err)
+        assert result.error_code == ErrorCode.LLM_RATE_LIMITED
+        assert "rate limit" in result.message.lower()
+
+    def test_timeout_error(self):
+        """APITimeoutError → LLM_TIMEOUT."""
+        from openai import APITimeoutError
+
+        err = APITimeoutError(request=MagicMock())
+        result = _classify_llm_error(err)
+        assert result.error_code == ErrorCode.LLM_TIMEOUT
+        assert "timed out" in result.message.lower()
+
+    def test_not_found_error(self):
+        """NotFoundError → LLM_MODEL_UNAVAILABLE."""
+        from openai import NotFoundError
+
+        err = NotFoundError(
+            message="Model gpt-5 not found",
+            response=MagicMock(status_code=404),
+            body=None,
+        )
+        result = _classify_llm_error(err)
+        assert result.error_code == ErrorCode.LLM_MODEL_UNAVAILABLE
+        assert "not found" in result.message.lower()
+
+    def test_connection_error(self):
+        """APIConnectionError → LLM_CONNECTION_FAILED."""
+        from openai import APIConnectionError
+
+        err = APIConnectionError(request=MagicMock())
+        result = _classify_llm_error(err)
+        assert result.error_code == ErrorCode.LLM_CONNECTION_FAILED
+        assert "connect" in result.message.lower()
+
+    def test_bad_request_error_generic(self):
+        """Generic BadRequestError → LLM_INVALID_REQUEST."""
+        from openai import BadRequestError
+
+        err = BadRequestError(
+            message="Something went wrong",
+            response=MagicMock(status_code=400),
+            body=None,
+        )
+        result = _classify_llm_error(err)
+        assert result.error_code == ErrorCode.LLM_INVALID_REQUEST
+        assert "bad request" in result.message.lower()
+
+    def test_bad_request_context_length_exceeded(self):
+        """BadRequestError with context_length → LLM_CONTEXT_LENGTH_EXCEEDED."""
+        from openai import BadRequestError
+
+        err = BadRequestError(
+            message="This model's maximum context length is 4096 tokens",
+            response=MagicMock(status_code=400),
+            body=None,
+        )
+        result = _classify_llm_error(err)
+        assert result.error_code == ErrorCode.LLM_CONTEXT_LENGTH_EXCEEDED
+        assert "context length" in result.message.lower()
+
+    def test_bad_request_max_tokens(self):
+        """BadRequestError with 'too many tokens' → LLM_CONTEXT_LENGTH_EXCEEDED."""
+        from openai import BadRequestError
+
+        err = BadRequestError(
+            message="Too many tokens in request",
+            response=MagicMock(status_code=400),
+            body=None,
+        )
+        result = _classify_llm_error(err)
+        assert result.error_code == ErrorCode.LLM_CONTEXT_LENGTH_EXCEEDED
+
+    def test_generic_exception_fallback(self):
+        """Unknown exception type → generic LLMError without error code."""
+        result = _classify_llm_error(RuntimeError("something broke"))
+        assert isinstance(result, LLMError)
+        assert result.error_code == ErrorCode.UNKNOWN
+        assert "something broke" in result.message
+
+    def test_all_results_are_llm_error(self):
+        """Every classification should produce an LLMError with a suggestion."""
+        from openai import (
+            APIConnectionError,
+            APITimeoutError,
+            AuthenticationError,
+            BadRequestError,
+            NotFoundError,
+            PermissionDeniedError,
+            RateLimitError,
+        )
+
+        errors = [
+            AuthenticationError(message="x", response=MagicMock(status_code=401), body=None),
+            PermissionDeniedError(message="x", response=MagicMock(status_code=403), body=None),
+            RateLimitError(message="x", response=MagicMock(status_code=429), body=None),
+            APITimeoutError(request=MagicMock()),
+            NotFoundError(message="x", response=MagicMock(status_code=404), body=None),
+            APIConnectionError(request=MagicMock()),
+            BadRequestError(message="x", response=MagicMock(status_code=400), body=None),
+            RuntimeError("unknown"),
+        ]
+        for err in errors:
+            result = _classify_llm_error(err)
+            assert isinstance(result, LLMError), f"Expected LLMError for {type(err).__name__}"
+            assert result.suggestion, f"Missing suggestion for {type(err).__name__}"

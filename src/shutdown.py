@@ -35,12 +35,24 @@ class GracefulShutdown:
     def __init__(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT) -> None:
         self._timeout = timeout
         self._shutdown_event = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._in_flight_count = 0
         self._in_flight_ops: dict[int, str] = {}
         self._next_op_id = 0
-        self._in_flight_lock = asyncio.Lock()
+        self._in_flight_lock: asyncio.Lock | None = None
         self._accepting_messages = True
         self._log = logging.getLogger(__name__)
+
+    def _get_lock(self) -> asyncio.Lock:
+        """Lazy-initialised asyncio.Lock for in-flight operation tracking.
+
+        Cannot be created in ``__init__`` because ``asyncio.Lock()``
+        may bind to a stale or wrong event loop on Windows with
+        ``ProactorEventLoop``.  Initialised on first use instead.
+        """
+        if self._in_flight_lock is None:
+            self._in_flight_lock = asyncio.Lock()
+        return self._in_flight_lock
 
     @property
     def is_shutting_down(self) -> bool:
@@ -53,9 +65,16 @@ class GracefulShutdown:
         return self._accepting_messages and not self.is_shutting_down
 
     def request_shutdown(self) -> None:
-        """Signal that shutdown has been requested."""
-        self._shutdown_event.set()
+        """Signal that shutdown has been requested.
+
+        Thread-safe: uses ``loop.call_soon_threadsafe`` to set the
+        asyncio Event from signal handlers that run outside the event loop.
+        """
         self._accepting_messages = False
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._shutdown_event.set)
+        else:
+            self._shutdown_event.set()
         self._log.info("Shutdown requested - stopping new message acceptance")
 
     async def enter_operation(self, description: str = "unknown") -> int | None:
@@ -66,7 +85,7 @@ class GracefulShutdown:
         """
         if self.is_shutting_down:
             return None
-        async with self._in_flight_lock:
+        async with self._get_lock():
             if self.is_shutting_down:
                 return None
             self._in_flight_count += 1
@@ -77,7 +96,7 @@ class GracefulShutdown:
 
     async def exit_operation(self, op_id: int | None = None) -> None:
         """Register completion of an in-flight operation."""
-        async with self._in_flight_lock:
+        async with self._get_lock():
             self._in_flight_count = max(0, self._in_flight_count - 1)
             if op_id is not None:
                 self._in_flight_ops.pop(op_id, None)
@@ -97,7 +116,7 @@ class GracefulShutdown:
         logged_initial = False
 
         while True:
-            async with self._in_flight_lock:
+            async with self._get_lock():
                 count = self._in_flight_count
                 ops_snapshot = dict(self._in_flight_ops)
 
@@ -153,14 +172,11 @@ class GracefulShutdown:
         Handles SIGINT (Ctrl+C) and SIGTERM on Unix.
         Handles SIGINT and SIGBREAK on Windows.
         """
+        self._loop = loop
         shutdown_manager = self
 
         def handle_signal(signum: int, frame) -> None:
-            signal_name = (
-                signal.Signals(signum).name
-                if hasattr(signal, "Signals")
-                else str(signum)
-            )
+            signal_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
             shutdown_manager._log.info(
                 "Received signal %s, initiating graceful shutdown", signal_name
             )
@@ -181,6 +197,4 @@ class GracefulShutdown:
                     sig.name if hasattr(sig, "name") else sig,
                 )
             except (ValueError, OSError) as e:
-                shutdown_manager._log.debug(
-                    "Could not register handler for signal %s: %s", sig, e
-                )
+                shutdown_manager._log.debug("Could not register handler for signal %s: %s", sig, e)

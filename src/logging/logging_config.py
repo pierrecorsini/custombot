@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-from logging.handlers import RotatingFileHandler
 import os
 import re
 import sys
@@ -24,6 +23,7 @@ import uuid
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from enum import Enum
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -198,9 +198,7 @@ class SensitiveDataRedactor:
             enabled: Whether redaction is enabled (default True).
         """
         self.enabled = enabled
-        self._patterns = (
-            patterns if patterns is not None else DEFAULT_REDACTION_PATTERNS
-        )
+        self._patterns = patterns if patterns is not None else DEFAULT_REDACTION_PATTERNS
         self._phone_patterns = (
             phone_patterns if phone_patterns is not None else DEFAULT_PHONE_PATTERNS
         )
@@ -245,9 +243,7 @@ class SensitiveDataRedactor:
             True if pattern was found and removed, False otherwise.
         """
         original_len = len(self._compiled_patterns)
-        self._compiled_patterns = [
-            (n, p, r) for n, p, r in self._compiled_patterns if n != name
-        ]
+        self._compiled_patterns = [(n, p, r) for n, p, r in self._compiled_patterns if n != name]
         return len(self._compiled_patterns) < original_len
 
     def redact(self, text: str) -> str:
