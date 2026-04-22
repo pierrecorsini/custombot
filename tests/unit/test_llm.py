@@ -1361,3 +1361,100 @@ class TestChatStreamPartialDelivery:
         # The buffered text should have been flushed in the finally block
         combined = "".join(received_chunks)
         assert "partial response" in combined
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# chat_stream() early exception on create() (PLAN Phase 10)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestChatStreamEarlyException:
+    """Verify chat_stream handles exceptions raised by create() before any chunks."""
+
+    async def test_no_unbound_local_error_on_immediate_failure(self, valid_cfg):
+        """When create() raises immediately, no UnboundLocalError should escape."""
+        from openai import APIConnectionError
+
+        client = LLMClient(valid_cfg)
+
+        with patch.object(
+            client._client.chat.completions,
+            "create",
+            AsyncMock(side_effect=APIConnectionError(request=MagicMock())),
+        ):
+            with pytest.raises(LLMError) as exc_info:
+                await client.chat_stream(
+                    messages=[{"role": "user", "content": "hi"}],
+                    on_chunk=AsyncMock(),
+                )
+
+            # Verify no UnboundLocalError — the LLMError was raised cleanly
+            assert exc_info.value.error_code == ErrorCode.LLM_CONNECTION_FAILED
+            assert "connect" in exc_info.value.message.lower()
+
+    async def test_error_classified_as_llm_error(self, valid_cfg):
+        """The raw exception should be classified into an LLMError with correct code."""
+        from openai import AuthenticationError
+
+        client = LLMClient(valid_cfg)
+
+        auth_err = AuthenticationError(
+            message="Invalid API key",
+            response=MagicMock(status_code=401),
+            body=None,
+        )
+
+        with patch.object(
+            client._client.chat.completions,
+            "create",
+            AsyncMock(side_effect=auth_err),
+        ):
+            with pytest.raises(LLMError) as exc_info:
+                await client.chat_stream(
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+
+            assert exc_info.value.error_code == ErrorCode.LLM_API_KEY_INVALID
+            assert isinstance(exc_info.value.__cause__, AuthenticationError)
+
+    async def test_circuit_breaker_records_failure(self, valid_cfg):
+        """Circuit breaker should record a failure when create() raises immediately."""
+        from openai import APIConnectionError
+
+        client = LLMClient(valid_cfg)
+        cb = client.circuit_breaker
+        assert cb.failure_count == 0
+
+        with patch.object(
+            client._client.chat.completions,
+            "create",
+            AsyncMock(side_effect=APIConnectionError(request=MagicMock())),
+        ):
+            with pytest.raises(LLMError):
+                await client.chat_stream(
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+
+        assert cb.failure_count == 1
+
+    async def test_finally_block_does_not_call_on_chunk_with_empty_buffer(
+        self, valid_cfg
+    ):
+        """When create() fails immediately, on_chunk should NOT be called (buffer is empty)."""
+        from openai import APIConnectionError
+
+        client = LLMClient(valid_cfg)
+        on_chunk = AsyncMock()
+
+        with patch.object(
+            client._client.chat.completions,
+            "create",
+            AsyncMock(side_effect=APIConnectionError(request=MagicMock())),
+        ):
+            with pytest.raises(LLMError):
+                await client.chat_stream(
+                    messages=[{"role": "user", "content": "hi"}],
+                    on_chunk=on_chunk,
+                )
+
+        on_chunk.assert_not_called()

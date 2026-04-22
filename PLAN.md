@@ -130,7 +130,7 @@ gaps, and operational resilience not addressed in Phases 1–9.
 
 - [x] **Add regression test for `handle_message()` indentation — verify normal messages reach `_process()`** — Create a test that sends a valid, non-rate-limited message through `handle_message()` and verifies that: (a) `_process()` is called, (b) the chat lock is acquired and released, (c) the message queue is updated, (d) metrics are tracked. This guards against future re-introduction of the indentation bug. (`tests/unit/test_bot.py`)
 
-- [ ] **Add test for `chat_stream()` early-exception handling** — Simulate a stream that raises immediately on `create()` (before any chunks). Verify that: (a) no `UnboundLocalError` is raised from the `finally` block, (b) the error is classified and raised as an `LLMError`, (c) the circuit breaker records a failure. (`tests/unit/test_llm.py`)
+- [x] **Add test for `chat_stream()` early-exception handling** — Simulate a stream that raises immediately on `create()` (before any chunks). Verify that: (a) no `UnboundLocalError` is raised from the `finally` block, (b) the error is classified and raised as an `LLMError`, (c) the circuit breaker records a failure. (`tests/unit/test_llm.py`)
 
 - [ ] **Add test for `wire_llm_clients()` resilience — one failing skill doesn't break others** — Register 3 skills where the middle one's `wire_llm()` raises an exception. Verify that: (a) the other 2 skills still receive the LLM client, (b) the error is logged, (c) no exception propagates from `wire_llm_clients()`. (`tests/unit/test_builder.py`)
 
