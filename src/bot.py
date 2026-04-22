@@ -187,7 +187,6 @@ class Bot:
         self._dedup: DeduplicationService | None = dedup
         # Rate limiter for skill execution
         self._rate_limiter = RateLimiter()
-        self._rate_limiter = RateLimiter()
         # Per-chat message rate limiter
         self._chat_rate_limiter = RateLimiter()
         # Memory monitor for tracking resource usage
