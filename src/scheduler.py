@@ -89,12 +89,14 @@ class TaskScheduler:
     def configure(
         self,
         workspace: Path,
-        on_trigger: Callable[[str, str], Awaitable[str]],
+        on_trigger: Callable[[str, str], Awaitable[str]] | None = None,
         on_send: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> None:
         self._workspace = workspace
-        self._on_trigger = on_trigger
-        self._on_send = on_send
+        if on_trigger is not None:
+            self._on_trigger = on_trigger
+        if on_send is not None:
+            self._on_send = on_send
 
     def set_on_send(self, callback: Callable[[str, str], Awaitable[None]]) -> None:
         """Set the callback for delivering scheduled task results."""

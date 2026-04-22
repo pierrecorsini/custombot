@@ -170,12 +170,9 @@ async def _step_scheduler(ctx: StartupContext) -> str | None:
     workspace = Path(WORKSPACE_DIR)
     scheduler = TaskScheduler()
     scheduler.set_dedup_service(ctx.components.dedup)
-    scheduler.configure(
-        workspace=workspace,
-        on_trigger=lambda chat_id, prompt: ctx.components.bot.process_scheduled(
-            chat_id, prompt
-        ),
-    )
+    # on_trigger/on_send are wired later by _step_wire_scheduler, which has
+    # access to the channel needed for callback routing.
+    scheduler.configure(workspace=workspace)
     set_scheduler_instance(scheduler)
     await scheduler.load_all()
     scheduler.start()
@@ -262,30 +259,27 @@ async def _step_workspace_monitor(ctx: StartupContext) -> str | None:
 
 async def _step_config_watcher(ctx: StartupContext) -> str | None:
     """Start config hot-reload watcher (polling-based)."""
-    from src.channels.whatsapp import WhatsAppChannel
-    from src.config.config_watcher import ConfigChangeApplier, ConfigWatcher
+    from src.config.config_watcher import ConfigWatcher
 
     channel = ctx.channel
 
-    if not isinstance(channel, WhatsAppChannel):
+    applier: Any = channel.create_config_applier(
+        app_config=ctx.config,
+        bot=ctx.components.bot,
+        llm=ctx.components.llm,
+        shutdown_mgr=ctx.shutdown_mgr,
+        reconfigure_logging=ctx.app._reconfigure_logging,
+    )
+    if applier is None:
         log.debug(
-            "Config watcher: channel is not WhatsAppChannel — using no-op applier"
+            "Config watcher: channel does not support hot-reload — using no-op applier"
         )
 
         class _NoOpApplier:
             def apply(self, old_config, new_config):
                 log.debug("Config change detected but channel is mocked — skipping apply")
 
-        applier: Any = _NoOpApplier()
-    else:
-        applier = ConfigChangeApplier(
-            app_config=ctx.config,
-            bot=ctx.components.bot,
-            channel=channel,
-            llm=ctx.components.llm,
-            shutdown_mgr=ctx.shutdown_mgr,
-            reconfigure_logging=ctx.app._reconfigure_logging,
-        )
+        applier = _NoOpApplier()
 
     watcher = ConfigWatcher(
         config_path=CONFIG_PATH,
