@@ -98,7 +98,7 @@ gaps, and operational resilience not addressed in Phases 1–9.
 
 - [x] **Guard `SkillRegistry.wire_llm_clients()` against per-skill wiring failures** — If a single skill's `wire_llm()` raises an exception, the entire loop terminates and all subsequent skills remain unwired. Wrap each `skill.wire_llm(llm)` call in a try/except that logs the error and continues, so one broken skill doesn't prevent others from receiving the LLM client. (`src/skills/__init__.py:83-91`)
 
-- [ ] **Add graceful degradation for `DeduplicationService` when DB is unavailable** — `is_inbound_duplicate()` awaits `self._db.message_exists()` which can raise `DatabaseError` on disk I/O failure. Currently this propagates to `handle_message()` and crashes message processing. Catch the exception, log a warning, and return `False` (allow the message through) so the bot remains functional during transient DB outages. (`src/core/dedup.py:82-93`)
+- [x] **Add graceful degradation for `DeduplicationService` when DB is unavailable** — `is_inbound_duplicate()` awaits `self._db.message_exists()` which can raise `DatabaseError` on disk I/O failure. Currently this propagates to `handle_message()` and crashes message processing. Catch the exception, log a warning, and return `False` (allow the message through) so the bot remains functional during transient DB outages. (`src/core/dedup.py:82-93`)
 
 ### Refactoring
 
