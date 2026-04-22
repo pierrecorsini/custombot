@@ -73,6 +73,12 @@ DEFAULT_HTTPX_MAX_KEEPALIVE_CONNECTIONS: int = 10
 # Prevents infinite loops when tools keep triggering more tools.
 MAX_TOOL_ITERATIONS: int = 10
 
+# Maximum number of parallel tool calls the LLM can request in a single turn.
+# A confused or prompt-injected LLM could request 50+ concurrent tool calls,
+# exhausting system resources (file handles, thread pool, memory).  Excess
+# calls are rejected with a warning fed back to the LLM so it can prioritise.
+MAX_TOOL_CALLS_PER_TURN: int = 10
+
 # Maximum tokens for LLM responses.
 # GPT-4 models typically have 4096 output token limits.
 DEFAULT_MAX_TOKENS: int = 4096
@@ -254,6 +260,37 @@ CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
 CIRCUIT_BREAKER_COOLDOWN_SECONDS: float = 60.0
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Database Write Circuit Breaker Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Number of consecutive database write failures before opening the write
+# circuit breaker.  When the filesystem is degraded (disk full, NFS dropout),
+# every DB write individually times out after DEFAULT_DB_TIMEOUT (10s).
+# Under sustained failure this creates a backlog of blocked coroutines
+# starving the event loop.  The write breaker fast-fails once this many
+# consecutive writes have failed.
+DB_WRITE_CIRCUIT_FAILURE_THRESHOLD: int = 5
+
+# Duration (seconds) the DB write circuit breaker stays OPEN before
+# transitioning to HALF_OPEN to probe whether the filesystem has recovered.
+# Shorter than the LLM cooldown because disk issues often resolve quickly
+# (e.g. NFS reconnect, temp space freed).
+DB_WRITE_CIRCUIT_COOLDOWN_SECONDS: float = 30.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ReAct Loop Retry Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of retry attempts for transient LLM errors inside _react_loop.
+# Retries rate-limit, timeout, and connection errors before propagating to the
+# caller.  2 retries keeps total worst-case latency manageable (~3× LLM call).
+REACT_LOOP_MAX_RETRIES: int = 2
+
+# Initial delay (seconds) before the first retry of a transient LLM error.
+# Uses exponential backoff with jitter (see calculate_delay_with_jitter).
+REACT_LOOP_RETRY_INITIAL_DELAY: float = 1.0
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Scheduler Retry Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -302,6 +339,14 @@ LLM_LOG_CLEANUP_INTERVAL: int = 20
 # Messages exceeding this are rejected before reaching the LLM API,
 # preventing token overflow and excessive costs.
 MAX_MESSAGE_LENGTH: int = 50_000
+
+# Maximum allowed length for chat_id in characters.
+# Enforced at the IncomingMessage boundary as a defense-in-depth guard:
+# prevents excessively long strings from reaching filesystem operations
+# (workspace directory names, JSONL paths, metric labels).  200 chars is
+# well above any real chat ID (~50 chars for WhatsApp JIDs) while staying
+# within filesystem name limits (255 bytes).
+MAX_CHAT_ID_LENGTH: int = 200
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Message Queue Limits

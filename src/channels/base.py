@@ -13,15 +13,73 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
+    from src.config import Config
     from src.utils.protocols import Channel
 
 log = logging.getLogger(__name__)
+
+# Known valid channel types. Future channel implementations should register
+# their identifier here. Unknown alphanumeric strings are also accepted so
+# that third-party / experimental channels work without code changes, but
+# strings containing special characters (path separators, punctuation, etc.)
+# are rejected to prevent injection into logs, metrics, or cache keys.
+VALID_CHANNEL_TYPES: frozenset[str] = frozenset({"whatsapp", "cli", ""})
+
+# Alphanumeric + underscore pattern for unknown-but-safe channel identifiers.
+_CHANNEL_TYPE_RE = re.compile(r"^[a-z0-9_]+$")
+
+# Pattern for valid chat_id at the message boundary.
+# Allows: alphanumeric, dash, underscore, dot, and @.
+# Real-world values: "1234567890@s.whatsapp.net", "120363abc@g.us",
+# "12345678-1234-1234-1234-123456789012" (CLI UUID).
+# Rejects: path separators (/ \), dots-only (.. traversal), control chars,
+# whitespace, and other characters that could corrupt filesystem paths,
+# log lines, or metric labels.
+_CHAT_ID_RE = re.compile(r"^[a-zA-Z0-9_\-.@]+$")
+
+
+def _validate_chat_id(chat_id: object, *, max_length: int = 200) -> None:
+    """Validate ``chat_id`` at the IncomingMessage boundary.
+
+    Defense-in-depth check that catches malicious or malformed chat IDs
+    *before* they reach any filesystem operation (workspace directories,
+    JSONL files, scheduler paths, etc.).
+
+    Args:
+        chat_id: Value to validate.
+        max_length: Maximum allowed length (default matches MAX_CHAT_ID_LENGTH).
+
+    Raises:
+        TypeError: If ``chat_id`` is not a string.
+        ValueError: If ``chat_id`` is empty, too long, or contains unsafe
+            characters.
+    """
+    from src.constants import MAX_CHAT_ID_LENGTH
+
+    if not isinstance(chat_id, str):
+        raise TypeError(
+            f"IncomingMessage.chat_id must be a str, got {type(chat_id).__name__}"
+        )
+    if not chat_id:
+        raise ValueError("IncomingMessage.chat_id must not be empty")
+    effective_max = max_length or MAX_CHAT_ID_LENGTH
+    if len(chat_id) > effective_max:
+        raise ValueError(
+            f"IncomingMessage.chat_id exceeds maximum length "
+            f"({len(chat_id)} > {effective_max}): {chat_id[:40]!r}..."
+        )
+    if not _CHAT_ID_RE.match(chat_id):
+        raise ValueError(
+            f"IncomingMessage.chat_id contains invalid characters: {chat_id!r}. "
+            "Only alphanumeric characters, dash, underscore, dot, and @ are allowed."
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -62,6 +120,22 @@ class IncomingMessage:
     is_historical: bool = False
     correlation_id: Optional[str] = None
     raw: Optional[dict] = None
+
+    def __post_init__(self) -> None:
+        # Defense-in-depth: validate chat_id before it reaches any filesystem op.
+        _validate_chat_id(self.chat_id)
+
+        if self.channel_type in VALID_CHANNEL_TYPES:
+            return
+        if not isinstance(self.channel_type, str):
+            raise TypeError(
+                f"IncomingMessage.channel_type must be a str, got {type(self.channel_type).__name__}"
+            )
+        if not _CHANNEL_TYPE_RE.match(self.channel_type):
+            raise ValueError(
+                f"IncomingMessage.channel_type contains invalid characters: {self.channel_type!r}. "
+                f"Must be one of {sorted(VALID_CHANNEL_TYPES - {''})!r} or a lowercase alphanumeric string."
+            )
 
     def __repr__(self) -> str:
         text_preview = self.text[:40] + "..." if len(self.text) > 40 else self.text
@@ -123,6 +197,27 @@ class BaseChannel(ABC):
             Channel-specific prompt content, or None if no prompt needed.
         """
         return None
+
+    def create_config_applier(self, **kwargs: object) -> object:
+        """Return a config-change applier for hot-reload, or ``None``.
+
+        Channels that support live config updates should override this
+        and return an object with an ``apply(old_config, new_config)`` method.
+        The base implementation returns ``None`` (no hot-reload support).
+        """
+        return None
+
+    def apply_channel_config(self, new_config: Config, changed: set[str]) -> None:
+        """Apply channel-specific config changes during hot-reload.
+
+        Override in channel implementations to handle config field changes
+        relevant to that channel. The base implementation is a no-op.
+
+        Args:
+            new_config: The full new configuration.
+            changed: Set of dot-path field names that changed.
+        """
+        pass
 
     def mark_connected(self) -> None:
         """Signal that the channel has successfully connected."""
