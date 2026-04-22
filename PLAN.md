@@ -73,3 +73,69 @@ addressed in Phases 1–8.
 - [x] **Add test for scheduled task prompt injection detection** — Create a scheduled task with a prompt containing common injection patterns (e.g., "Ignore all previous instructions..."). Verify that `process_scheduled()` sanitizes or flags the prompt before passing it to the LLM, consistent with how incoming messages are handled. (`tests/unit/test_bot.py`)
 
 - [x] **Add test for `Database.save_messages_batch()` atomicity** — `save_messages_batch()` writes multiple messages to the JSONL file. Add a test that verifies: (a) if the write fails mid-way, no partial messages are persisted, (b) the message index is updated only after the full batch succeeds, (c) concurrent calls to `save_messages_batch()` for the same chat are serialized correctly. (`tests/unit/test_db.py`)
+
+---
+
+## Phase 10 — Senior Review (2026-04-22)
+
+Generated from a tenth-pass codebase audit focusing on critical bugs
+introduced during Phases 8–9 refactoring, dead code paths, data integrity
+gaps, and operational resilience not addressed in Phases 1–9.
+
+---
+
+### Critical Bugs
+
+- [x] **Fix indentation bug in `Bot.handle_message()` — main processing path is dead code** — Lines 548–616 in `bot.py` (the `async with self._chat_locks.acquire` block, message queue enqueue, `_process()` call, try/except/finally) are indented inside the `if not rate_result.allowed:` block at line 532. This means the entire processing pipeline (workspace creation, context assembly, ReAct loop, message persistence) only executes when a rate-limited message is sent AND the channel send at line 541 returns — which it doesn't because it's followed by `clear_correlation_id()` and `return None`. Normal, non-rate-limited messages never enter this block and fall through to the end of the method with no return value. De-indent lines 548–616 so they execute after the rate-limit check passes, restoring the normal message processing flow. (`src/bot.py:526-616`)
+
+- [ ] **Fix duplicate `RateLimiter()` instantiation in `Bot.__init__`** — `self._rate_limiter` is assigned twice on consecutive lines (189 and 190), creating an orphaned `RateLimiter` instance that is immediately garbage-collected. Remove the duplicate line. (`src/bot.py:189-190`)
+
+- [ ] **Fix `generation` variable undefined in `Bot._process()`** — `generation` is captured at line 554 via `self._db.get_generation(msg.chat_id)` inside the incorrectly-indented block. When the indentation bug is fixed, `generation` must be moved to `_process()` or `_build_turn_context()` so it is available at line 927 where `check_generation()` is called. Without this, `NameError` will be raised at runtime, or the write-conflict detection is silently skipped. (`src/bot.py:554, 927`)
+
+### Error Handling & Resilience
+
+- [ ] **Fix potential `UnboundLocalError` in `LLMClient.chat_stream()` finally block** — If an exception occurs very early in the `try` block (e.g., `self._client.chat.completions.create` raises before `buffered_chunk` is assigned), the `finally` block at line 598 references `buffered_chunk` which may be undefined. Initialize `buffered_chunk = ""` before the `try` block (it is currently only initialized inside the `try` at line 465). (`src/llm.py:462-603`)
+
+- [ ] **Guard `SkillRegistry.wire_llm_clients()` against per-skill wiring failures** — If a single skill's `wire_llm()` raises an exception, the entire loop terminates and all subsequent skills remain unwired. Wrap each `skill.wire_llm(llm)` call in a try/except that logs the error and continues, so one broken skill doesn't prevent others from receiving the LLM client. (`src/skills/__init__.py:83-91`)
+
+- [ ] **Add graceful degradation for `DeduplicationService` when DB is unavailable** — `is_inbound_duplicate()` awaits `self._db.message_exists()` which can raise `DatabaseError` on disk I/O failure. Currently this propagates to `handle_message()` and crashes message processing. Catch the exception, log a warning, and return `False` (allow the message through) so the bot remains functional during transient DB outages. (`src/core/dedup.py:82-93`)
+
+### Refactoring
+
+- [ ] **Extract message processing pipeline from `handle_message()` into a dedicated method** — After the indentation fix, `handle_message()` will be ~160 lines with deep nesting (validation → dedup → rate limit → lock → enqueue → try/except/finally). Extract the core processing block (acquire lock → enqueue → process → track metrics → complete queue) into `_handle_message_inner()` to keep `handle_message()` as a thin validation + orchestration wrapper. This makes the processing path easier to test in isolation. (`src/bot.py:453-616`)
+
+- [ ] **Move `import asyncio` to module-level in `llm.py`** — `import asyncio` appears inside the `try` block of `chat_stream()` at line 471 as a late addition. Move it to the module-level imports (which already has other stdlib imports) for consistency and minor import-caching performance. (`src/llm.py:471`)
+
+- [ ] **Eliminate double emission of per-chat token metrics in `HealthServer._handle_metrics`** — `_build_prometheus_output()` already receives and emits `per_chat_tokens` (lines 349–369). Then `_handle_metrics` additionally iterates `self._token_usage.get_top_chats()` and emits the same metrics again (lines 1182–1201). Remove the duplicate loop in `_handle_metrics` so each per-chat metric appears once. (`src/health/server.py:1182-1201`)
+
+### Performance Optimization
+
+- [ ] **Add TTL-based cleanup for `_chat_generations` dict in `Database`** — `self._chat_generations` grows without bound as new chat IDs are encountered. For long-running bots with thousands of chats, this dict consumes increasing memory. Add a periodic sweep (e.g., evict entries older than 24 hours since last write) or cap the dict size with LRU eviction similar to `_message_id_index`. (`src/db/db.py:285`)
+
+- [ ] **Replace `scheduler.py` synchronous `_persist_sync()` with async alternative** — `_persist_sync()` performs blocking file I/O (`path.write_text()`) which can stall the event loop when called from `add_task()`. The sync variant exists for backward compatibility but skills execute in an async context. Replace all call sites with `_persist_async()` or wrap `_persist_sync()` in `asyncio.to_thread()`. (`src/scheduler.py:235-242`)
+
+### Security
+
+- [ ] **Add `name` field sanitization in `Database._build_message_record()`** — The `name` parameter (sender name or tool name) is persisted directly to JSONL without sanitization. While not as dangerous as user content, a malicious or malformed sender name could contain control characters or excessively long strings. Truncate `name` to a reasonable length (e.g., 200 chars) and strip control characters before persisting. (`src/db/db.py:871-916`)
+
+- [ ] **Add `HEALTH_HMAC_SECRET` masking in health check logs** — When HMAC authentication fails, the `Authorization` header value is logged at DEBUG level by aiohttp. If the secret is accidentally sent in the wrong field, it could appear in logs. Add a log filter or explicit header stripping in the middleware to ensure the HMAC token is never logged in full. (`src/health/server.py:218-240`)
+
+### Observability & Monitoring
+
+- [ ] **Add structured event emission from `Application._on_message()` with correlation ID propagation** — The message pipeline (`_on_message` → `pipeline.execute()`) does not emit an `error_occurred` event when the pipeline raises. Add a try/except wrapper that emits `Event(name="error_occurred")` with the exception details and correlation ID, so error-monitoring subscribers are notified of pipeline failures. (`src/app.py:401-409`)
+
+- [ ] **Add per-skill timeout histogram to Prometheus metrics** — Each skill declares a `timeout_seconds` attribute, but there is no metric tracking how close skill executions get to their timeout. Add a gauge metric (`custombot_skill_timeout_ratio`) that tracks the ratio of actual execution time to declared timeout, so operators can identify skills that are consistently near their timeout limit and need either optimization or a higher timeout. (`src/monitoring/performance.py`, `src/health/server.py`)
+
+### Test Coverage
+
+- [ ] **Add regression test for `handle_message()` indentation — verify normal messages reach `_process()`** — Create a test that sends a valid, non-rate-limited message through `handle_message()` and verifies that: (a) `_process()` is called, (b) the chat lock is acquired and released, (c) the message queue is updated, (d) metrics are tracked. This guards against future re-introduction of the indentation bug. (`tests/unit/test_bot.py`)
+
+- [ ] **Add test for `chat_stream()` early-exception handling** — Simulate a stream that raises immediately on `create()` (before any chunks). Verify that: (a) no `UnboundLocalError` is raised from the `finally` block, (b) the error is classified and raised as an `LLMError`, (c) the circuit breaker records a failure. (`tests/unit/test_llm.py`)
+
+- [ ] **Add test for `wire_llm_clients()` resilience — one failing skill doesn't break others** — Register 3 skills where the middle one's `wire_llm()` raises an exception. Verify that: (a) the other 2 skills still receive the LLM client, (b) the error is logged, (c) no exception propagates from `wire_llm_clients()`. (`tests/unit/test_builder.py`)
+
+- [ ] **Add test for `DeduplicationService` graceful degradation on DB failure** — Mock the database to raise `DatabaseError` on `message_exists()`. Verify that: (a) `is_inbound_duplicate()` returns `False` (allowing the message through), (b) a warning is logged, (c) no exception propagates. (`tests/unit/test_dedup.py`)
+
+- [ ] **Add test for `_chat_generations` bounded growth** — Add test that verifies: (a) `get_generation()` returns 0 for unknown chat IDs, (b) `_bump_generation()` increments correctly, (c) after exceeding a maximum size, oldest entries are evicted. This prevents silent memory leak in long-running bots. (`tests/unit/test_db.py`)
+
+- [ ] **Add integration test for end-to-end scheduled task with write-conflict detection** — Send a user message and trigger a scheduled task for the same chat concurrently. Verify that: (a) both responses are persisted without corruption, (b) the generation check logs a warning when a conflict is detected, (c) the conversation history remains valid and parseable. (`tests/integration/test_scheduled_pipeline.py`)

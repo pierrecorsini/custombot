@@ -545,13 +545,13 @@ class Bot:
             clear_correlation_id()
             return None
 
-            # Acquire per-chat lock via context manager (tracks ref count for safe eviction)
-            async with self._chat_locks.acquire(msg.chat_id):
-                # Track message processing time
-                start_time = time.perf_counter()
+        # Acquire per-chat lock via context manager (tracks ref count for safe eviction)
+        async with self._chat_locks.acquire(msg.chat_id):
+            # Track message processing time
+            start_time = time.perf_counter()
 
-                # Snapshot generation for write-conflict detection
-                generation = self._db.get_generation(msg.chat_id)
+            # Snapshot generation for write-conflict detection
+            generation = self._db.get_generation(msg.chat_id)
 
             # Enqueue message for crash recovery (before processing)
             if self._message_queue:
