@@ -104,7 +104,7 @@ gaps, and operational resilience not addressed in Phases 1–9.
 
 - [x] **Extract message processing pipeline from `handle_message()` into a dedicated method** — After the indentation fix, `handle_message()` will be ~160 lines with deep nesting (validation → dedup → rate limit → lock → enqueue → try/except/finally). Extract the core processing block (acquire lock → enqueue → process → track metrics → complete queue) into `_handle_message_inner()` to keep `handle_message()` as a thin validation + orchestration wrapper. This makes the processing path easier to test in isolation. (`src/bot.py:453-616`)
 
-- [ ] **Move `import asyncio` to module-level in `llm.py`** — `import asyncio` appears inside the `try` block of `chat_stream()` at line 471 as a late addition. Move it to the module-level imports (which already has other stdlib imports) for consistency and minor import-caching performance. (`src/llm.py:471`)
+- [x] **Move `import asyncio` to module-level in `llm.py`** — `import asyncio` appears inside the `try` block of `chat_stream()` at line 471 as a late addition. Move it to the module-level imports (which already has other stdlib imports) for consistency and minor import-caching performance. (`src/llm.py:471`)
 
 - [ ] **Eliminate double emission of per-chat token metrics in `HealthServer._handle_metrics`** — `_build_prometheus_output()` already receives and emits `per_chat_tokens` (lines 349–369). Then `_handle_metrics` additionally iterates `self._token_usage.get_top_chats()` and emits the same metrics again (lines 1182–1201). Remove the duplicate loop in `_handle_metrics` so each per-chat metric appears once. (`src/health/server.py:1182-1201`)
 
