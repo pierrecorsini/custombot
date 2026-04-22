@@ -158,7 +158,7 @@ addressed in Phases 1–10.
 
 - [x] **Consolidate the three `RateLimiter` instances in `Bot` and `ToolExecutor`** — `Bot.__init__` creates `self._rate_limiter` (skill execution) and `self._chat_rate_limiter` (message rate) separately, while `ToolExecutor` also receives a `rate_limiter`. Document why separate instances are needed (different configs? different eviction?) or unify into a single `RateLimiter` with namespaced configs, reducing the total objects and making rate-limit policy visible in one place. (`src/bot.py:189-191`, `src/core/tool_executor.py`)
 
-- [ ] **Extract `_react_loop` max-iteration message formatting into a helper** — The max-iteration warning block (lines 1053-1064 in `bot.py`) builds an informative message with tool summary formatting inline. Extract into `_format_max_iterations_message(iterations, tool_log)` to keep `_react_loop` focused on loop control and make the formatting independently testable. (`src/bot.py:1045-1065`)
+- [x] **Extract `_react_loop` max-iteration message formatting into a helper** — The max-iteration warning block (lines 1053-1064 in `bot.py`) builds an informative message with tool summary formatting inline. Extract into `_format_max_iterations_message(iterations, tool_log)` to keep `_react_loop` focused on loop control and make the formatting independently testable. (`src/bot.py:1045-1065`)
 
 - [ ] **Move `_wire_scheduler` double-set of `on_trigger` into a single authoritative wiring point** — `Application._wire_scheduler()` calls `scheduler.set_on_trigger()` at line 369, but `_init_scheduler()` already set it at line 283 during construction. The second call at line 369 adds `channel=channel` to the lambda — verify this isn't a race and consolidate into one wiring call. (`src/app.py:283, 358-372`)
 

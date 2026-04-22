@@ -1051,18 +1051,26 @@ class Bot:
         )
         self._metrics.track_react_iterations(max_iter)
         self._metrics.track_conversation_depth(chat_id, max_iter)
-        # Build informative truncation message with tool summary
+        return (
+            self._format_max_iterations_message(max_iter, tool_log),
+            tool_log,
+            buffered_persist,
+        )
+
+    @staticmethod
+    def _format_max_iterations_message(iterations: int, tool_log: list[ToolLogEntry]) -> str:
+        """Build an informative message when the ReAct loop hits the iteration cap."""
         tool_summary = ""
         if tool_log:
             tool_names = [entry.name for entry in tool_log]
-            unique_tools = dict.fromkeys(tool_names)  # preserve order, deduplicate
-            tool_summary = f"\n\n🔧 Tools used ({len(tool_log)} calls): {', '.join(unique_tools)}"
+            unique_tools = dict.fromkeys(tool_names)
+            tool_summary = (
+                f"\n\n🔧 Tools used ({len(tool_log)} calls): {', '.join(unique_tools)}"
+            )
         return (
-            f"⚠️ Reached maximum tool iterations ({max_iter}). "
+            f"⚠️ Reached maximum tool iterations ({iterations}). "
             f"The task may be too complex for a single request. "
-            f"Try breaking it into smaller steps.{tool_summary}",
-            tool_log,
-            buffered_persist,
+            f"Try breaking it into smaller steps.{tool_summary}"
         )
 
     async def _process_tool_calls(
