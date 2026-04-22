@@ -139,3 +139,87 @@ gaps, and operational resilience not addressed in Phases 1–9.
 - [x] **Add test for `_chat_generations` bounded growth** — Add test that verifies: (a) `get_generation()` returns 0 for unknown chat IDs, (b) `_bump_generation()` increments correctly, (c) after exceeding a maximum size, oldest entries are evicted. This prevents silent memory leak in long-running bots. (`tests/unit/test_db.py`)
 
 - [x] **Add integration test for end-to-end scheduled task with write-conflict detection** — Send a user message and trigger a scheduled task for the same chat concurrently. Verify that: (a) both responses are persisted without corruption, (b) the generation check logs a warning when a conflict is detected, (c) the conversation history remains valid and parseable. (`tests/integration/test_scheduled_pipeline.py`)
+
+---
+
+## Phase 11 — Senior Review (2026-04-22)
+
+Generated from an eleventh-pass codebase audit focusing on architectural
+debt, resilience gaps, security hardening, and test coverage not
+addressed in Phases 1–10.
+
+---
+
+### Refactoring
+
+- [x] **Extract `Application._startup()` into a declarative component registry** — `_startup()` is ~80 lines with 10 sequential initialization blocks following the same pattern (`_log_component_init` → create → `_log_component_ready` → `progress.advance`). Extract into a `StartupOrchestrator` that accepts a list of `ComponentSpec(name, factory, depends_on)` and runs them in dependency order. This makes the startup graph explicit, testable, and easily extensible without modifying `_startup()` directly. (`src/app.py:191-272`, new file `src/core/startup.py`)
+
+- [ ] **Replace `isinstance` channel-type checks with protocol-based dispatch** — `_init_config_watcher()` uses `isinstance(self._channel, WhatsAppChannel)` to select the config applier. Adding a new channel type requires modifying `Application`. Replace with a `SupportsConfigHotReload` protocol or a `get_config_applier()` method on `BaseChannel`, so the dispatch is driven by the channel itself rather than the application. (`src/app.py:294-317`, `src/channels/base.py`)
+
+- [ ] **Consolidate the three `RateLimiter` instances in `Bot` and `ToolExecutor`** — `Bot.__init__` creates `self._rate_limiter` (skill execution) and `self._chat_rate_limiter` (message rate) separately, while `ToolExecutor` also receives a `rate_limiter`. Document why separate instances are needed (different configs? different eviction?) or unify into a single `RateLimiter` with namespaced configs, reducing the total objects and making rate-limit policy visible in one place. (`src/bot.py:189-191`, `src/core/tool_executor.py`)
+
+- [ ] **Extract `_react_loop` max-iteration message formatting into a helper** — The max-iteration warning block (lines 1053-1064 in `bot.py`) builds an informative message with tool summary formatting inline. Extract into `_format_max_iterations_message(iterations, tool_log)` to keep `_react_loop` focused on loop control and make the formatting independently testable. (`src/bot.py:1045-1065`)
+
+- [ ] **Move `_wire_scheduler` double-set of `on_trigger` into a single authoritative wiring point** — `Application._wire_scheduler()` calls `scheduler.set_on_trigger()` at line 369, but `_init_scheduler()` already set it at line 283 during construction. The second call at line 369 adds `channel=channel` to the lambda — verify this isn't a race and consolidate into one wiring call. (`src/app.py:283, 358-372`)
+
+### Performance Optimization
+
+- [ ] **Configure HTTPx connection pooling on the OpenAI client** — `LLMClient` creates an `AsyncOpenAI` client but doesn't set `max_connections` or `max_keepalive_connections` on the underlying `httpx.AsyncClient`. Under high concurrency (many concurrent chats hitting the LLM), connection establishment overhead adds latency. Configure explicit pool limits (e.g., `max_connections=20, max_keepalive_connections=10`) to reuse TCP connections. (`src/llm.py`)
+
+- [ ] **Implement invalidation-based tool-definitions cache on `SkillRegistry`** — `_react_loop()` calls `self._skills.tool_definitions` on every iteration, which rebuilds OpenAI tool schemas from all registered skills (15+ Pydantic model serializations per call). Add a cached property on `SkillRegistry` that invalidates only when skills are added/removed (which only happens at startup and config reload). (`src/bot.py:893, 704`, `src/skills/__init__.py`)
+
+- [ ] **Enrich compressed conversation summaries with vector embeddings** — When `compress_chat_history()` archives old messages, the summary is a static string like "1500 messages archived". Optionally embed the summary in `VectorMemory` so the `memory_recall` skill can semantically retrieve archived conversations instead of losing them to time-based truncation. This is a low-priority enhancement — the summary text is already informative, but vector-enrichment would enable semantic search over archived history. (`src/db/db.py:1285-1292`, `src/vector_memory.py`)
+
+### Error Handling & Resilience
+
+- [ ] **Handle individual `asyncio.gather` failures in `ContextAssembler.assemble()`** — The 5 concurrent reads in `assemble()` (memory, agents_md, project_ctx, topic_cache, compressed_summary) use `asyncio.gather()` without `return_exceptions=True`. A single disk I/O failure (e.g., corrupted AGENTS.md) crashes the entire context assembly. Wrap with `return_exceptions=True` and handle each result individually: log the failure, substitute a sensible default, and proceed with the remaining context. (`src/core/context_assembler.py:101-113`)
+
+- [ ] **Add circuit-breaker pattern for database write operations** — When the filesystem is degraded (disk full, NFS dropout), every DB write individually times out after `DEFAULT_DB_TIMEOUT` (10s). Under sustained failure, this creates a backlog of blocked coroutines starving the event loop. Add a lightweight write-circuit-breaker on `Database` that fast-fails writes when the last N consecutive writes all failed, preventing thundering-herd timeouts. (`src/db/db.py`, `src/utils/circuit_breaker.py`)
+
+- [ ] **Handle `read_agents_md()` `FileNotFoundError` in `ContextAssembler`** — `Memory.read_agents_md()` raises `FileNotFoundError` if AGENTS.md doesn't exist (e.g., `ensure_workspace()` wasn't called yet for a new scheduled task). `ContextAssembler.assemble()` doesn't catch this — it propagates up and aborts the scheduled task. Catch and substitute the default agents content in the assembler. (`src/core/context_assembler.py:108`, `src/memory.py:395-417`)
+
+- [ ] **Add retry with exponential backoff for transient LLM errors in `_react_loop`** — `_react_loop()` catches `LLMError` for circuit-breaker-open but re-raises all other LLM errors (rate-limit, timeout, server error). These are often transient. Add a limited retry (1-2 attempts with backoff) for retryable error codes before propagating, reducing message-processing failures from temporary provider issues. (`src/bot.py:984-1010`)
+
+### Security
+
+- [ ] **Add per-turn tool-call count limit** — `_process_tool_calls()` executes all requested tool calls in parallel with no cap on how many tools the LLM can request in a single turn. A confused or prompt-injected LLM could request 50+ concurrent tool calls, exhausting system resources (file handles, thread pool, memory). Add a `MAX_TOOL_CALLS_PER_TURN` constant (e.g., 10) and truncate/reject excessive requests with a warning to the LLM. (`src/bot.py:1067-1179`, `src/constants.py`)
+
+- [ ] **Centralize `chat_id` validation at the `IncomingMessage` boundary** — While `db.py` has `_validate_chat_id()` and `sanitize_path_component()`, `chat_id` flows through `memory.py`, `workspace_integrity.py`, and `scheduler.py` with varying levels of sanitization. Add validation in `IncomingMessage.__post_init__()` or at the top of `handle_message()` to catch malicious chat IDs before they reach any filesystem operation, as a defense-in-depth layer. (`src/channels/base.py:38-88`, `src/bot.py:452-547`)
+
+- [ ] **Add request size limits to health server middleware** — The health server has IP-based rate limiting but no request body or URL length limits. An attacker could send oversized requests to consume server memory. Add middleware to reject requests with bodies > 1KB or URL paths > 2KB — health endpoints only serve short GET requests. (`src/health/server.py`)
+
+- [ ] **Audit and restrict environment variable reading in `RateLimiter.from_env()`** — `RateLimitConfig.from_env()` reads `RATE_LIMIT_CHAT_PER_MINUTES` and `RATE_LIMIT_EXPENSIVE_PER_MINUTES` from env vars without validating the range. A misconfigured env var (e.g., `RATE_LIMIT_CHAT_PER_MINUTES=999999`) effectively disables rate limiting. Add sensible bounds (min=1, max=100) and log the effective values at startup. (`src/rate_limiter.py:83-95`)
+
+### Observability & Monitoring
+
+- [ ] **Propagate correlation IDs through database operations** — Database operations in `db.py` log `chat_id` but don't include the correlation ID that the message pipeline sets via contextvars. Propagate the current correlation ID through to DB log statements for end-to-end request tracing in production logs. (`src/db/db.py`, `src/logging/logging_config.py`)
+
+- [ ] **Add fixed-bucket histogram for LLM latency percentiles** — The `/metrics` endpoint exposes average LLM latency, but operators need percentiles (p50, p95, p99) for alerting. Implement a fixed-bucket histogram approach (e.g., buckets at 0.5s, 1s, 2s, 5s, 10s, 30s, 60s, 120s) in `PerformanceMetrics` and expose `custombot_llm_latency_bucket` in the Prometheus output. (`src/monitoring/performance.py`, `src/health/server.py`)
+
+- [ ] **Add workspace disk-usage growth rate metric** — `WorkspaceMonitor` tracks total size but doesn't compute the derivative (MB/hour). Add a growth-rate computation (current_size - previous_size / elapsed_time) and expose it as `custombot_workspace_growth_mb_per_hour` so operators can detect sudden spikes (e.g., a runaway skill generating large files). (`src/monitoring/workspace_monitor.py`, `src/health/server.py`)
+
+- [ ] **Add per-skill execution count and error-rate metrics** — `PerformanceMetrics` tracks per-skill latency but not execution count or error rate. Add counters (`custombot_skill_executions_total`, `custombot_skill_errors_total`) so operators can identify which skills are used most and which fail most often. (`src/monitoring/performance.py`, `src/core/tool_executor.py`)
+
+### Test Coverage
+
+- [ ] **Add integration test for config hot-reload applying changes to a running bot** — `ConfigWatcher` polls for changes and `ConfigChangeApplier` applies them, but there's no integration test verifying that a config change (e.g., changing `max_tool_iterations` from 10 to 5) takes effect on the next message without restart. (`tests/integration/test_application_lifecycle.py`)
+
+- [ ] **Add chaos test for concurrent `save_messages_batch` and `compress_chat_history`** — Both operations acquire per-chat locks, but `compress_chat_history` is triggered asynchronously after writes (in `save_message` and `save_messages_batch`). There's a window where a write triggers compression, which then rewrites the file while another write is pending. Add a test that exercises this race: write a batch, then immediately write another batch, and verify no data loss. (`tests/unit/test_db.py`)
+
+- [ ] **Add test for `Memory` mtime cache consistency after external file modification** — `Memory.read_memory()` uses mtime-based caching. If an external process (e.g., a skill modifying MEMORY.md) changes the file between reads, the cache should be invalidated. Add a test that modifies the file's content and mtime between reads and verifies the second read returns the updated content. (`tests/unit/test_memory.py`)
+
+- [ ] **Add test for `TaskScheduler` DST transition handling** — The scheduler caches the local UTC offset and refreshes it hourly. DST transitions (e.g., spring forward) could cause scheduled daily tasks to fire an hour early or skip entirely. Add a test with mocked `datetime.now()` to verify correct behavior across DST boundaries. (`tests/unit/test_scheduler.py`)
+
+- [ ] **Add test for `_process_tool_calls` salvage on `BaseException`** — Phase 9 added a `BaseException` handler in `_process_tool_calls()` that salvages partial results from completed tasks. Add a test that simulates a `KeyboardInterrupt` during TaskGroup execution and verifies that already-completed tool results are returned rather than lost. (`tests/unit/test_bot.py`)
+
+- [ ] **Add regression test for `handle_message` returning `None` on oversized messages** — `handle_message()` rejects messages exceeding `MAX_MESSAGE_LENGTH` and returns `None`. Add a test verifying the exact boundary behavior: a message at `MAX_MESSAGE_LENGTH - 1` is processed, and a message at `MAX_MESSAGE_LENGTH + 1` is rejected with `None`. (`tests/unit/test_bot.py`)
+
+### DevOps / Infrastructure
+
+- [ ] **Pin Dockerfile base image to a specific patch release** — `python:3.11-slim` floats to the latest 3.11.x. A Docker Hub patch release could introduce subtle runtime changes. Pin to a specific version (e.g., `python:3.11.12-slim-bookworm`) and update deliberately during scheduled maintenance. (`Dockerfile:20, 44`)
+
+- [ ] **Expand `.dockerignore` to exclude all development artifacts** — The `.dockerignore` may not exclude `.pytest_cache/`, `.ruff_cache/`, `.mypy_cache/`, `.hypothesis/`, `.tmp/`, `.opencode/`, `.agents/`, `.claude/`, and `*.pyc` files. These inflate the build context sent to the Docker daemon, slowing builds. Audit and add all dev-only paths. (`.dockerignore`)
+
+- [ ] **Add `--cov-fail-under` threshold increase roadmap to CI** — Current CI requires 60% coverage (`--cov-fail-under=60`). Add a plan to incrementally raise this threshold (60 → 65 → 70 → 75) over subsequent phases, ensuring each phase contributes test coverage improvements. Document the target timeline. (`.github/workflows/ci.yml:79`, `PLAN.md`)
+
+- [ ] **Add `pip-audit` or `safety` scan to CI pipeline** — Dependencies are pinned to major versions (e.g., `openai~=2.29.0`) but there's no automated vulnerability scanning. Add a `pip-audit` step to CI to catch known CVEs in transitive dependencies before they reach production. (`.github/workflows/ci.yml`)
