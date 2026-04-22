@@ -98,7 +98,30 @@ _JSONL_MIGRATIONS: list[tuple[int, list[Any]]] = []  # (target_version, [migrati
 # Pattern for valid chat_id (safe for file paths)
 _CHAT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\.\@]+$")
 
+# Maximum length for the 'name' field persisted to JSONL (prevents unbounded storage).
+_MAX_NAME_LENGTH = 200
+
+# Control characters (C0 + C1 ranges, except common whitespace) stripped from names.
+_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
 from src.utils.path import sanitize_path_component as _sanitize_chat_id_for_path
+
+
+def _sanitize_name(name: Optional[str]) -> Optional[str]:
+    """Sanitize a sender/tool name before persisting to JSONL.
+
+    Strips control characters and truncates to ``_MAX_NAME_LENGTH``.
+    Returns ``None`` if the name is empty after sanitization.
+    """
+    if not name:
+        return None
+    cleaned = _CONTROL_CHAR_PATTERN.sub("", name)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > _MAX_NAME_LENGTH:
+        cleaned = cleaned[:_MAX_NAME_LENGTH]
+    return cleaned
 
 
 def _validate_chat_id(chat_id: str) -> None:
@@ -912,7 +935,7 @@ class Database:
             "id": mid,
             "role": role,
             "content": content,
-            "name": name,
+            "name": _sanitize_name(name),
             "timestamp": timestamp,
             "_checksum": checksum,
             "_sanitized": _sanitized,

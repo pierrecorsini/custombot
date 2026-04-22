@@ -1,9 +1,11 @@
-"""Tests for Database.save_messages_batch() atomicity and generation counter.
+"""Tests for Database.save_messages_batch() atomicity, generation counter,
+and name field sanitization.
 
 Verifies:
 - save_messages_batch persists all messages in a single lock acquisition
 - Generation counter increments on each write
 - Concurrent calls for the same chat are serialized
+- Name field is sanitized (control chars stripped, truncated)
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from src.db.db import Database
+from src.db.db import Database, _sanitize_name
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -133,3 +135,70 @@ class TestBatchWriteAtomicity:
 
         # Generation should be 2 (one per batch)
         assert db.get_generation("chat_1") == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Name sanitization
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestNameSanitization:
+    """Verify _sanitize_name strips control chars and truncates."""
+
+    def test_none_returns_none(self) -> None:
+        assert _sanitize_name(None) is None
+
+    def test_empty_string_returns_none(self) -> None:
+        assert _sanitize_name("") is None
+
+    def test_whitespace_only_returns_none(self) -> None:
+        assert _sanitize_name("   \t  ") is None
+
+    def test_normal_name_unchanged(self) -> None:
+        assert _sanitize_name("Alice") == "Alice"
+
+    def test_strips_control_characters(self) -> None:
+        assert _sanitize_name("Alice\x00Bob\x1f") == "AliceBob"
+
+    def test_strips_c1_control_range(self) -> None:
+        assert _sanitize_name("Name\x80\x9fEnd") == "NameEnd"
+
+    def test_preserves_common_whitespace(self) -> None:
+        assert _sanitize_name("Alice Smith") == "Alice Smith"
+
+    def test_strips_leading_trailing_whitespace(self) -> None:
+        assert _sanitize_name("  Alice  ") == "Alice"
+
+    def test_truncates_long_name(self) -> None:
+        long_name = "A" * 300
+        result = _sanitize_name(long_name)
+        assert result is not None
+        assert len(result) == 200
+
+    def test_name_with_emoji_preserved(self) -> None:
+        assert _sanitize_name("Alice 😊") == "Alice 😊"
+
+    async def test_build_message_record_sanitizes_name(
+        self, initialized_db: Database
+    ) -> None:
+        db = initialized_db
+        await db.upsert_chat("chat_1", "Alice")
+        await db.save_message("chat_1", "user", "hello", "Bob\x00 Evil")
+
+        rows = await db.get_recent_messages("chat_1", limit=10)
+        content_rows = [r for r in rows if r.get("content")]
+        assert len(content_rows) == 1
+        assert content_rows[0]["name"] == "Bob Evil"
+
+    async def test_build_message_record_truncates_long_name(
+        self, initialized_db: Database
+    ) -> None:
+        db = initialized_db
+        await db.upsert_chat("chat_1", "Alice")
+        long_name = "X" * 300
+        await db.save_message("chat_1", "user", "hello", long_name)
+
+        rows = await db.get_recent_messages("chat_1", limit=10)
+        content_rows = [r for r in rows if r.get("content")]
+        assert len(content_rows) == 1
+        assert content_rows[0]["name"] == "X" * 200
