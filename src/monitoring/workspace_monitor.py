@@ -29,6 +29,7 @@ import os
 import shutil
 import tarfile
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -45,6 +46,9 @@ from src.constants import (
 from src.utils.singleton import get_or_create_singleton, reset_singleton
 
 log = logging.getLogger(__name__)
+
+# Max samples for growth-rate tracking (288 × 5min ≈ 24h of history)
+_MAX_GROWTH_SAMPLES = 288
 
 
 @dataclass
@@ -64,6 +68,7 @@ class WorkspaceStats:
     errors: int = 0
 
     timestamp: float = field(default_factory=time.time)
+    growth_mb_per_hour: float | None = None
 
     @property
     def workspace_mb(self) -> float:
@@ -79,7 +84,7 @@ class WorkspaceStats:
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
-        return {
+        result = {
             "workspace_mb": round(self.workspace_mb, 1),
             "data_mb": round(self.data_mb, 1),
             "logs_mb": round(self.logs_mb, 1),
@@ -93,6 +98,9 @@ class WorkspaceStats:
             },
             "timestamp": self.timestamp,
         }
+        if self.growth_mb_per_hour is not None:
+            result["growth_mb_per_hour"] = round(self.growth_mb_per_hour, 3)
+        return result
 
 
 def _recursive_dir_size(directory: Path) -> int:
@@ -323,6 +331,9 @@ class WorkspaceMonitor:
         self._task: Optional[asyncio.Task[None]] = None
         self._running = False
         self._last_stats: Optional[WorkspaceStats] = None
+        self._size_samples: deque[tuple[float, int]] = deque(
+            maxlen=_MAX_GROWTH_SAMPLES,
+        )
 
     def get_stats(self) -> WorkspaceStats:
         """Compute current workspace size statistics (blocking I/O)."""
@@ -334,14 +345,31 @@ class WorkspaceMonitor:
         archives_dir = self._workspace / ".data" / "archives"
         archives_bytes = _recursive_dir_size(archives_dir) if archives_dir.exists() else 0
 
+        now = time.time()
+        self._size_samples.append((now, workspace_bytes))
+        growth = self._compute_growth_mb_per_hour()
+
         stats = WorkspaceStats(
             workspace_bytes=workspace_bytes,
             data_bytes=data_bytes,
             logs_bytes=logs_bytes,
             archives_bytes=archives_bytes,
+            growth_mb_per_hour=growth,
         )
         self._last_stats = stats
         return stats
+
+    def _compute_growth_mb_per_hour(self) -> float | None:
+        """Derive growth rate (MB/hour) from accumulated samples."""
+        if len(self._size_samples) < 2:
+            return None
+        oldest_t, oldest_bytes = self._size_samples[0]
+        newest_t, newest_bytes = self._size_samples[-1]
+        elapsed_hours = (newest_t - oldest_t) / 3600.0
+        if elapsed_hours < 1e-6:
+            return None
+        delta_mb = (newest_bytes - oldest_bytes) / (1024 * 1024)
+        return delta_mb / elapsed_hours
 
     def _run_cleanup(self) -> WorkspaceStats:
         """Execute all cleanup tasks (blocking). Returns updated stats."""

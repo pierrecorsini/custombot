@@ -196,7 +196,7 @@ addressed in Phases 1–10.
 
 - [x] **Add fixed-bucket histogram for LLM latency percentiles** — The `/metrics` endpoint exposes average LLM latency, but operators need percentiles (p50, p95, p99) for alerting. Implement a fixed-bucket histogram approach (e.g., buckets at 0.5s, 1s, 2s, 5s, 10s, 30s, 60s, 120s) in `PerformanceMetrics` and expose `custombot_llm_latency_bucket` in the Prometheus output. (`src/monitoring/performance.py`, `src/health/server.py`)
 
-- [ ] **Add workspace disk-usage growth rate metric** — `WorkspaceMonitor` tracks total size but doesn't compute the derivative (MB/hour). Add a growth-rate computation (current_size - previous_size / elapsed_time) and expose it as `custombot_workspace_growth_mb_per_hour` so operators can detect sudden spikes (e.g., a runaway skill generating large files). (`src/monitoring/workspace_monitor.py`, `src/health/server.py`)
+- [x] **Add workspace disk-usage growth rate metric** — `WorkspaceMonitor` tracks total size but doesn't compute the derivative (MB/hour). Add a growth-rate computation (current_size - previous_size / elapsed_time) and expose it as `custombot_workspace_growth_mb_per_hour` so operators can detect sudden spikes (e.g., a runaway skill generating large files). (`src/monitoring/workspace_monitor.py`, `src/health/server.py`)
 
 - [ ] **Add per-skill execution count and error-rate metrics** — `PerformanceMetrics` tracks per-skill latency but not execution count or error rate. Add counters (`custombot_skill_executions_total`, `custombot_skill_errors_total`) so operators can identify which skills are used most and which fail most often. (`src/monitoring/performance.py`, `src/core/tool_executor.py`)
 

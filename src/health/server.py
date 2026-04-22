@@ -480,6 +480,7 @@ def _build_prometheus_output(
     llm_log_dir_bytes: int | None = None,
     db_size_bytes: int | None = None,
     workspace_size_bytes: int | None = None,
+    workspace_growth_mb_per_hour: float | None = None,
     disk_free_bytes: int | None = None,
     disk_total_bytes: int | None = None,
     per_chat_tokens: list[dict[str, Any]] | None = None,
@@ -903,6 +904,15 @@ def _build_prometheus_output(
                 "Total size of workspace directory in bytes",
                 "gauge",
                 workspace_size_bytes,
+            )
+        )
+    if workspace_growth_mb_per_hour is not None:
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_workspace_growth_mb_per_hour",
+                "Workspace disk usage growth rate in MB per hour",
+                "gauge",
+                round(workspace_growth_mb_per_hour, 3),
             )
         )
 
@@ -1410,6 +1420,7 @@ class HealthServer:
             # Collect disk usage for database and workspace
             db_size_bytes: int | None = None
             workspace_size_bytes: int | None = None
+            workspace_growth: float | None = None
             disk_free_bytes: int | None = None
             disk_total_bytes: int | None = None
             if self._workspace_dir:
@@ -1421,6 +1432,19 @@ class HealthServer:
                 data_dir = ws / ".data"
                 db_size_bytes = _recursive_dir_size(data_dir) if data_dir.exists() else 0
                 workspace_size_bytes = _recursive_dir_size(ws)
+
+                # Growth rate from WorkspaceMonitor's accumulated samples
+                try:
+                    from src.monitoring.workspace_monitor import get_global_workspace_monitor
+
+                    monitor = get_global_workspace_monitor(
+                        workspace_dir=self._workspace_dir,
+                    )
+                    last = monitor.last_stats
+                    if last is not None and last.growth_mb_per_hour is not None:
+                        workspace_growth = last.growth_mb_per_hour
+                except Exception:
+                    pass
 
                 # Filesystem-level free/total via existing disk utility
                 try:
@@ -1439,7 +1463,8 @@ class HealthServer:
 
             output = _build_prometheus_output(
                 token_usage, snapshot, llm_log_bytes, db_size_bytes,
-                workspace_size_bytes, disk_free_bytes, disk_total_bytes,
+                workspace_size_bytes, workspace_growth,
+                disk_free_bytes, disk_total_bytes,
                 per_chat_tokens=per_chat,
             )
             output += _build_scheduler_prometheus_output(self._scheduler)
