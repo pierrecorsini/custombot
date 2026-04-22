@@ -310,6 +310,11 @@ class Database:
         # unbounded memory growth for long-running bots with many chats.
         self._chat_generations: OrderedDict[str, int] = OrderedDict()
 
+        # Optional vector memory store for embedding compression summaries.
+        # Set via set_vector_memory() after construction. Enables semantic
+        # retrieval of archived conversation history via the memory_recall skill.
+        self._vector_memory: Any = None
+
     def _get_chats_lock(self) -> asyncio.Lock:
         """Return the chats lock, creating it on first use.
 
@@ -363,6 +368,15 @@ class Database:
                 operation=operation,
                 timeout=timeout,
             )
+
+    def set_vector_memory(self, vector_memory: Any) -> None:
+        """Set the optional vector memory store for embedding compression summaries.
+
+        When set, compression summaries are embedded so the memory_recall skill
+        can semantically retrieve archived conversations.  Failures to embed are
+        logged but never prevent compression from succeeding.
+        """
+        self._vector_memory = vector_memory
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -1161,6 +1175,19 @@ class Database:
                         self._message_id_index.pop(mid, None)
                     self._index_dirty = True
 
+            # Best-effort: embed compression summary for semantic retrieval
+            summary_text = result.get("summary_text")
+            if summary_text and self._vector_memory is not None:
+                try:
+                    await self._vector_memory.save(
+                        chat_id, summary_text, category="compression_summary",
+                    )
+                except Exception:
+                    log.debug(
+                        "Failed to embed compression summary for %s (non-critical)",
+                        chat_id,
+                    )
+
         return bool(result.get("compressed"))
 
     def _compress_chat_history_sync(
@@ -1341,7 +1368,11 @@ class Database:
             msg_file.name,
         )
 
-        return {"compressed": True, "removed_ids": removed_ids}
+        return {
+            "compressed": True,
+            "removed_ids": removed_ids,
+            "summary_text": summary_text,
+        }
 
     async def _update_index(self, message_ids: list[str]) -> None:
         """Add message IDs to the in-memory index with debounce flush."""

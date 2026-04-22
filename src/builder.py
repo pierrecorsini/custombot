@@ -24,6 +24,7 @@ from src.progress import ProgressBar, maybe_spinner_async
 
 if TYPE_CHECKING:
     from src.bot import Bot
+    from src.core.dedup import DeduplicationService
     from src.db import Database
     from src.llm import LLMClient, TokenUsage
     from src.message_queue import MessageQueue
@@ -45,12 +46,14 @@ class BotComponents:
     token_usage: TokenUsage
     message_queue: MessageQueue
     llm: LLMClient
+    dedup: DeduplicationService
     component_durations: dict[str, float] = field(default_factory=dict)
 
 
 async def _build_bot(config: Config, session_metrics: "SessionMetrics | None" = None) -> BotComponents:
     """Instantiate and wire all components with progress indicators."""
     from src.bot import Bot, BotConfig
+    from src.core.dedup import DeduplicationService
     from src.db import Database
     from src.llm import LLMClient, TokenUsage
     from src.memory import Memory
@@ -99,6 +102,9 @@ async def _build_bot(config: Config, session_metrics: "SessionMetrics | None" = 
         component_durations["Database"] = time.monotonic() - t0
         _log_component_ready("Database", f"path={workspace / '.data'}")
         progress.advance()
+
+        # Step 1b: Unified dedup service (needs DB for inbound checks)
+        dedup = DeduplicationService(db=db)
 
         # Step 2: LLM client
         _log_component_init("LLM Client", "started")
@@ -156,6 +162,10 @@ async def _build_bot(config: Config, session_metrics: "SessionMetrics | None" = 
             )
         component_durations["Vector Memory"] = time.monotonic() - t0
         progress.advance()
+
+        # Wire vector memory into DB for embedding compression summaries
+        if vector_memory is not None:
+            db.set_vector_memory(vector_memory)
 
         # Step 5: Project store
         _log_component_init("Project Store", "started")
@@ -257,6 +267,7 @@ async def _build_bot(config: Config, session_metrics: "SessionMetrics | None" = 
             message_queue=message_queue,
             session_metrics=session_metrics,
             instruction_loader=instruction_loader,
+            dedup=dedup,
         )
         component_durations["Bot"] = time.monotonic() - t0
         _log_component_ready("Bot", "orchestrator initialized")
@@ -270,5 +281,6 @@ async def _build_bot(config: Config, session_metrics: "SessionMetrics | None" = 
         token_usage=token_usage,
         message_queue=message_queue,
         llm=llm,
+        dedup=dedup,
         component_durations=component_durations,
     )
