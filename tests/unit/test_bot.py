@@ -305,9 +305,12 @@ class TestBotInit:
         bot = _make_bot()
         assert hasattr(bot, "_rate_limiter")
 
-    def test_chat_rate_limiter_initialized(self):
+    def test_rate_limiter_handles_message_rate(self):
+        """Single RateLimiter instance supports both skill and message rate checks."""
         bot = _make_bot()
-        assert hasattr(bot, "_chat_rate_limiter")
+        assert hasattr(bot, "_rate_limiter")
+        assert hasattr(bot._rate_limiter, "check_message_rate")
+        assert hasattr(bot._rate_limiter, "check_rate_limit")
 
     def test_metrics_initialized(self):
         bot = _make_bot()
@@ -519,7 +522,7 @@ class TestHandleMessageRateLimiting:
             limit_type="message_rate",
             limit_value=30,
         )
-        bot._chat_rate_limiter.check_message_rate = MagicMock(return_value=rate_result)
+        bot._rate_limiter.check_message_rate = MagicMock(return_value=rate_result)
 
         result = await bot.handle_message(msg)
         assert result is None
@@ -536,7 +539,7 @@ class TestHandleMessageRateLimiting:
             limit_type="message_rate",
             limit_value=30,
         )
-        bot._chat_rate_limiter.check_message_rate = MagicMock(return_value=rate_result)
+        bot._rate_limiter.check_message_rate = MagicMock(return_value=rate_result)
 
         channel = AsyncMock()
         result = await bot.handle_message(msg, channel=channel)
@@ -884,7 +887,7 @@ class TestHandleMessageIndentationRegression:
             limit_type="message_rate",
             limit_value=30,
         )
-        bot._chat_rate_limiter.check_message_rate = MagicMock(return_value=rate_result)
+        bot._rate_limiter.check_message_rate = MagicMock(return_value=rate_result)
 
         with patch.object(bot, "_process", new_callable=AsyncMock) as mock_process:
             result = await bot.handle_message(msg)

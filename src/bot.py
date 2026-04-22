@@ -185,10 +185,11 @@ class Bot:
         # (content-hash) strategies.  Falls back to direct DB check when not
         # provided (backward-compat for tests that construct Bot directly).
         self._dedup: DeduplicationService | None = dedup
-        # Rate limiter for skill execution
+        # Unified rate limiter for both skill execution and per-chat message
+        # rate limiting.  A single RateLimiter instance maintains separate
+        # internal dicts (_chat_limiters, _skill_limiters, _message_rate_limiters)
+        # so the three tiers are isolated without needing separate objects.
         self._rate_limiter = RateLimiter()
-        # Per-chat message rate limiter
-        self._chat_rate_limiter = RateLimiter()
         # Memory monitor for tracking resource usage
         self._memory_monitor: MemoryMonitor | None = None
         # Performance metrics collector
@@ -523,7 +524,7 @@ class Bot:
             return None
 
         # Check per-chat message rate limit
-        rate_result = self._chat_rate_limiter.check_message_rate(
+        rate_result = self._rate_limiter.check_message_rate(
             msg.chat_id,
             limit=DEFAULT_CHAT_RATE_LIMIT,
             window_seconds=RATE_LIMIT_WINDOW_SECONDS,
@@ -702,7 +703,7 @@ class Bot:
 
                 # Run the ReAct loop
                 tools = self._skills.tool_definitions
-                response_text, _ = await self._react_loop(
+                response_text, _, _ = await self._react_loop(
                     chat_id=chat_id,
                     messages=[m.to_api_dict() for m in messages],
                     tools=tools if tools else None,
