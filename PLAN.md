@@ -124,11 +124,11 @@ gaps, and operational resilience not addressed in Phases 1–9.
 
 - [x] **Add structured event emission from `Application._on_message()` with correlation ID propagation** — The message pipeline (`_on_message` → `pipeline.execute()`) does not emit an `error_occurred` event when the pipeline raises. Add a try/except wrapper that emits `Event(name="error_occurred")` with the exception details and correlation ID, so error-monitoring subscribers are notified of pipeline failures. (`src/app.py:401-409`)
 
-- [ ] **Add per-skill timeout histogram to Prometheus metrics** — Each skill declares a `timeout_seconds` attribute, but there is no metric tracking how close skill executions get to their timeout. Add a gauge metric (`custombot_skill_timeout_ratio`) that tracks the ratio of actual execution time to declared timeout, so operators can identify skills that are consistently near their timeout limit and need either optimization or a higher timeout. (`src/monitoring/performance.py`, `src/health/server.py`)
+- [x] **Add per-skill timeout histogram to Prometheus metrics** — Each skill declares a `timeout_seconds` attribute, but there is no metric tracking how close skill executions get to their timeout. Add a gauge metric (`custombot_skill_timeout_ratio`) that tracks the ratio of actual execution time to declared timeout, so operators can identify skills that are consistently near their timeout limit and need either optimization or a higher timeout. (`src/monitoring/performance.py`, `src/health/server.py`)
 
 ### Test Coverage
 
-- [ ] **Add regression test for `handle_message()` indentation — verify normal messages reach `_process()`** — Create a test that sends a valid, non-rate-limited message through `handle_message()` and verifies that: (a) `_process()` is called, (b) the chat lock is acquired and released, (c) the message queue is updated, (d) metrics are tracked. This guards against future re-introduction of the indentation bug. (`tests/unit/test_bot.py`)
+- [x] **Add regression test for `handle_message()` indentation — verify normal messages reach `_process()`** — Create a test that sends a valid, non-rate-limited message through `handle_message()` and verifies that: (a) `_process()` is called, (b) the chat lock is acquired and released, (c) the message queue is updated, (d) metrics are tracked. This guards against future re-introduction of the indentation bug. (`tests/unit/test_bot.py`)
 
 - [ ] **Add test for `chat_stream()` early-exception handling** — Simulate a stream that raises immediately on `create()` (before any chunks). Verify that: (a) no `UnboundLocalError` is raised from the `finally` block, (b) the error is classified and raised as an `LLMError`, (c) the circuit breaker records a failure. (`tests/unit/test_llm.py`)
 

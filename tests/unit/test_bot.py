@@ -87,6 +87,11 @@ def _make_bot(
     skills.tool_definitions = tool_definitions or []
     skills.all = MagicMock(return_value=[])
 
+    # Mock dedup service — default: no messages are duplicates
+    dedup = AsyncMock()
+    dedup.is_inbound_duplicate = AsyncMock(return_value=False)
+    dedup.is_outbound_duplicate = MagicMock(return_value=False)
+
     return Bot(
         config=cfg,
         db=db,
@@ -95,6 +100,7 @@ def _make_bot(
         skills=skills,
         routing=routing,
         message_queue=message_queue,
+        dedup=dedup,
     )
 
 
@@ -763,6 +769,151 @@ class TestHandleMessageMetrics:
         ):
             await bot.handle_message(msg)
             mock_metrics.update_queue_depth.assert_called_once_with(5)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bot.handle_message Tests — Indentation Regression Guard (Phase 10)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestHandleMessageIndentationRegression:
+    """Regression guard: verify normal, non-rate-limited messages reach _process().
+
+    In a prior bug, the main processing path inside handle_message() was
+    incorrectly indented inside the rate-limit rejection block, causing all
+    normal messages to silently fall through with no response.  These tests
+    ensure that a valid message traverses the full pipeline:
+    _process() is invoked, the chat lock is acquired/released, the message
+    queue is updated, and metrics are tracked.
+    """
+
+    @pytest.fixture()
+    def _setup_bot(self):
+        """Create a fully-wired bot with mocked _process()."""
+        queue = AsyncMock()
+        queue.get_pending_count = AsyncMock(return_value=0)
+        bot = _make_bot(message_queue=queue)
+        mock_metrics = MagicMock()
+        bot._metrics = mock_metrics
+
+        routing = MagicMock()
+        rule = _make_routing_rule(showErrors=True)
+        routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
+        bot._routing = routing
+
+        return bot, queue, mock_metrics
+
+    async def test_process_is_called_for_valid_message(self, _setup_bot):
+        """(a) _process() is called with the correct message."""
+        bot, _, _ = _setup_bot
+        msg = _make_message()
+
+        with (
+            patch.object(bot, "_process", new_callable=AsyncMock, return_value="Hello!") as mock_process,
+            patch("src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]),
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Hello!"),
+            patch.object(bot, "_load_instruction", return_value="prompt"),
+        ):
+            result = await bot.handle_message(msg)
+
+        assert result == "Hello!"
+        mock_process.assert_awaited_once()
+        assert mock_process.call_args[0][0] is msg
+
+    async def test_chat_lock_acquired_and_released(self, _setup_bot):
+        """(b) The per-chat lock is acquired during processing and released after."""
+        bot, _, _ = _setup_bot
+        msg = _make_message(chat_id="chat_lock_test")
+
+        with (
+            patch.object(bot, "_process", new_callable=AsyncMock, return_value="ok"),
+            patch("src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]),
+            patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
+            patch.object(bot, "_load_instruction", return_value="prompt"),
+        ):
+            await bot.handle_message(msg)
+
+        # After handle_message returns, the lock should be fully released —
+        # no outstanding references remain for this chat_id.
+        assert "chat_lock_test" not in bot._chat_locks._ref_counts
+
+    async def test_message_queue_updated(self, _setup_bot):
+        """(c) Message queue enqueue and complete are both called on success."""
+        bot, queue, _ = _setup_bot
+        msg = _make_message()
+
+        with (
+            patch.object(bot, "_process", new_callable=AsyncMock, return_value="ok"),
+            patch("src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]),
+            patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
+            patch.object(bot, "_load_instruction", return_value="prompt"),
+        ):
+            await bot.handle_message(msg)
+
+        queue.enqueue.assert_awaited_once_with(msg)
+        queue.complete.assert_awaited_once_with(msg.message_id)
+
+    async def test_metrics_tracked_on_success(self, _setup_bot):
+        """(d) Latency, chat message count, queue depth, and active chats are tracked."""
+        bot, queue, mock_metrics = _setup_bot
+        msg = _make_message()
+
+        with (
+            patch.object(bot, "_process", new_callable=AsyncMock, return_value="ok"),
+            patch("src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]),
+            patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
+            patch.object(bot, "_load_instruction", return_value="prompt"),
+        ):
+            await bot.handle_message(msg)
+
+        mock_metrics.track_message_latency.assert_called_once()
+        mock_metrics.track_chat_message.assert_called_once_with(msg.chat_id)
+        mock_metrics.update_queue_depth.assert_called_once()
+        mock_metrics.update_active_chat_count.assert_called_once()
+
+    async def test_process_not_called_for_rate_limited_message(self):
+        """Regression guard: rate-limited messages must NOT reach _process()."""
+        bot = _make_bot()
+        msg = _make_message()
+
+        rate_result = RateLimitResult(
+            allowed=False,
+            remaining=0,
+            reset_at=time.time() + 60,
+            retry_after=30.0,
+            limit_type="message_rate",
+            limit_value=30,
+        )
+        bot._chat_rate_limiter.check_message_rate = MagicMock(return_value=rate_result)
+
+        with patch.object(bot, "_process", new_callable=AsyncMock) as mock_process:
+            result = await bot.handle_message(msg)
+
+        assert result is None
+        mock_process.assert_not_awaited()
+
+    async def test_process_not_called_for_duplicate_message(self):
+        """Regression guard: duplicate messages must NOT reach _process()."""
+        bot = _make_bot()
+        msg = _make_message()
+        bot._dedup.is_inbound_duplicate = AsyncMock(return_value=True)
+
+        with patch.object(bot, "_process", new_callable=AsyncMock) as mock_process:
+            result = await bot.handle_message(msg)
+
+        assert result is None
+        mock_process.assert_not_awaited()
+
+    async def test_process_not_called_for_empty_message(self):
+        """Regression guard: empty messages must NOT reach _process()."""
+        bot = _make_bot()
+        msg = _make_message(text="")
+
+        with patch.object(bot, "_process", new_callable=AsyncMock) as mock_process:
+            result = await bot.handle_message(msg)
+
+        assert result is None
+        mock_process.assert_not_awaited()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
