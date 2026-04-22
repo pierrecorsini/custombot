@@ -164,7 +164,7 @@ addressed in Phases 1–10.
 
 ### Performance Optimization
 
-- [ ] **Configure HTTPx connection pooling on the OpenAI client** — `LLMClient` creates an `AsyncOpenAI` client but doesn't set `max_connections` or `max_keepalive_connections` on the underlying `httpx.AsyncClient`. Under high concurrency (many concurrent chats hitting the LLM), connection establishment overhead adds latency. Configure explicit pool limits (e.g., `max_connections=20, max_keepalive_connections=10`) to reuse TCP connections. (`src/llm.py`)
+- [x] **Configure HTTPx connection pooling on the OpenAI client** — `LLMClient` creates an `AsyncOpenAI` client but doesn't set `max_connections` or `max_keepalive_connections` on the underlying `httpx.AsyncClient`. Under high concurrency (many concurrent chats hitting the LLM), connection establishment overhead adds latency. Configure explicit pool limits (e.g., `max_connections=20, max_keepalive_connections=10`) to reuse TCP connections. (`src/llm.py`)
 
 - [ ] **Implement invalidation-based tool-definitions cache on `SkillRegistry`** — `_react_loop()` calls `self._skills.tool_definitions` on every iteration, which rebuilds OpenAI tool schemas from all registered skills (15+ Pydantic model serializations per call). Add a cached property on `SkillRegistry` that invalidates only when skills are added/removed (which only happens at startup and config reload). (`src/bot.py:893, 704`, `src/skills/__init__.py`)
 

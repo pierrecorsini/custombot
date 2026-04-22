@@ -29,6 +29,8 @@ from src.config import LLMConfig
 from src.constants import (
     CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+    DEFAULT_HTTPX_MAX_CONNECTIONS,
+    DEFAULT_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
     STREAM_MIN_CHUNK_CHARS,
     WORKSPACE_DIR,
 )
@@ -209,8 +211,8 @@ class LLMClient:
         self._token_usage = token_usage if token_usage is not None else TokenUsage()
         self._http_client = httpx.AsyncClient(
             limits=httpx.Limits(
-                max_connections=20,
-                max_keepalive_connections=10,
+                max_connections=DEFAULT_HTTPX_MAX_CONNECTIONS,
+                max_keepalive_connections=DEFAULT_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
             ),
             timeout=httpx.Timeout(
                 timeout=cfg.timeout or 120.0,
