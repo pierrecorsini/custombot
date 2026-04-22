@@ -136,6 +136,69 @@ def _create_rate_limit_middleware(limiter: _IPLimiter) -> Any:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Request Size Limits
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _load_request_size_config() -> tuple[int, int]:
+    """Load health HTTP request size limits from env or defaults."""
+    from src.constants import HEALTH_MAX_REQUEST_BODY_BYTES, HEALTH_MAX_URL_LENGTH
+
+    body_str = os.environ.get("HEALTH_MAX_BODY_BYTES", "")
+    url_str = os.environ.get("HEALTH_MAX_URL_LENGTH", "")
+
+    return (
+        int(body_str) if body_str.isdigit() else HEALTH_MAX_REQUEST_BODY_BYTES,
+        int(url_str) if url_str.isdigit() else HEALTH_MAX_URL_LENGTH,
+    )
+
+
+def _create_request_size_limit_middleware(
+    max_body_bytes: int, max_url_length: int
+) -> Any:
+    """Create an aiohttp middleware that rejects oversized requests.
+
+    Health endpoints serve short GET requests.  Rejecting bodies > *max_body_bytes*
+    and URL paths > *max_url_length* prevents memory exhaustion from malicious or
+    misconfigured clients.
+    """
+    from aiohttp import web
+
+    @web.middleware
+    async def request_size_limit_middleware(
+        request: web.Request, handler: Any
+    ) -> Any:
+        if len(request.path) > max_url_length:
+            log.warning(
+                "Health server rejected oversized URL path (%d chars, max %d)",
+                len(request.path),
+                max_url_length,
+            )
+            return web.Response(
+                text="URI Too Long",
+                status=414,
+                content_type="text/plain",
+            )
+
+        content_length = request.content_length
+        if content_length is not None and content_length > max_body_bytes:
+            log.warning(
+                "Health server rejected oversized request body (%d bytes, max %d)",
+                content_length,
+                max_body_bytes,
+            )
+            return web.Response(
+                text="Payload Too Large",
+                status=413,
+                content_type="text/plain",
+            )
+
+        return await handler(request)
+
+    return request_size_limit_middleware
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # HMAC Request Verification
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -362,6 +425,55 @@ def _format_prometheus_summary(
     return "".join(lines)
 
 
+def _format_prometheus_histogram(
+    name: str,
+    help_text: str,
+    histogram: dict[str, Any],
+    labels: dict[str, str] | None = None,
+) -> str:
+    """Format a Prometheus histogram metric with ``le``-bucket lines, ``_sum``, and ``_count``.
+
+    *histogram* is expected to have the shape produced by
+    ``LatencyHistogram.to_dict()``::
+
+        {
+            "buckets": {"500": 3, "1000": 5, ..., "+Inf": 10},
+            "count": 10,
+            "sum_ms": 12345.67,
+        }
+    """
+    if not histogram or histogram.get("count", 0) == 0:
+        return ""
+
+    # Build label prefix for bucket lines (trailing comma) and full label
+    # string for _sum/_count lines
+    bucket_prefix = ""
+    suffix_labels = ""
+    if labels:
+        parts = [f'{k}="{v}"' for k, v in labels.items()]
+        joined = ",".join(parts)
+        bucket_prefix = f"{joined},"
+        suffix_labels = f"{{{joined}}}"
+
+    lines = [
+        f"# HELP {name} {help_text}\n",
+        f"# TYPE {name} histogram\n",
+    ]
+
+    for le_label, count in histogram.get("buckets", {}).items():
+        lines.append(
+            f'{name}_bucket{{{bucket_prefix}le="{le_label}"}} {count}\n'
+        )
+
+    sum_suffix = f"_sum{suffix_labels}" if suffix_labels else "_sum"
+    lines.append(f"{name}{sum_suffix} {histogram.get('sum_ms', 0)}\n")
+
+    count_suffix = f"_count{suffix_labels}" if suffix_labels else "_count"
+    lines.append(f"{name}{count_suffix} {histogram.get('count', 0)}\n")
+
+    return "".join(lines)
+
+
 def _build_prometheus_output(
     token_usage: dict[str, Any],
     snapshot: Any,
@@ -481,6 +593,15 @@ def _build_prometheus_output(
             "Total LLM API calls made",
             "counter",
             snapshot.llm_call_count,
+        )
+    )
+
+    # ── LLM Latency Histogram ──────────────────────────────────────────────
+    lines.append(
+        _format_prometheus_histogram(
+            "custombot_llm_latency",
+            "LLM API call latency histogram in milliseconds (fixed buckets)",
+            snapshot.llm_latency_histogram,
         )
     )
 
@@ -640,6 +761,45 @@ def _build_prometheus_output(
                     labels={"skill": skill_name, "error_type": safe_err},
                 )
             )
+
+    # ── Per-Skill Timeout Ratio ──────────────────────────────────────────────
+    for skill_name, tr in snapshot.skill_timeout_ratios.items():
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_skill_timeout_ratio_mean",
+                "Mean ratio of actual execution time to declared skill timeout",
+                "gauge",
+                round(tr.mean_ratio, 4),
+                labels={"skill": skill_name},
+            )
+        )
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_skill_timeout_ratio_max",
+                "Maximum observed ratio of actual time to declared skill timeout",
+                "gauge",
+                round(tr.max_ratio, 4),
+                labels={"skill": skill_name},
+            )
+        )
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_skill_timeout_ratio_p95",
+                "P95 ratio of actual execution time to declared skill timeout",
+                "gauge",
+                round(tr.p95_ratio, 4),
+                labels={"skill": skill_name},
+            )
+        )
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_skill_timeout_ratio_samples",
+                "Number of timeout-ratio samples collected per skill",
+                "gauge",
+                tr.count,
+                labels={"skill": skill_name},
+            )
+        )
 
     # ── Per-Chat Message Counts ──────────────────────────────────────────────
     for chat_metric in snapshot.top_chats:
@@ -857,6 +1017,40 @@ def _build_circuit_breaker_prometheus_output(circuit_breaker: Any) -> str:
         _format_prometheus_metric(
             "custombot_llm_circuit_breaker_failures_total",
             "Total consecutive LLM failures recorded by the circuit breaker",
+            "counter",
+            circuit_breaker.failure_count,
+        )
+    )
+    return "".join(lines)
+
+
+def _build_db_write_breaker_prometheus_output(circuit_breaker: Any) -> str:
+    """Build Prometheus metrics for the database write circuit breaker."""
+    if circuit_breaker is None:
+        return ""
+
+    from src.utils.circuit_breaker import CircuitState
+
+    state = circuit_breaker.state
+    state_value = {
+        CircuitState.CLOSED: 0,
+        CircuitState.HALF_OPEN: 1,
+        CircuitState.OPEN: 2,
+    }.get(state, 0)
+
+    lines: list[str] = []
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_db_write_circuit_breaker_state",
+            "DB write circuit breaker state (0=closed, 1=half-open, 2=open)",
+            "gauge",
+            state_value,
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_db_write_circuit_breaker_failures_total",
+            "Consecutive DB write failures recorded by the circuit breaker",
             "counter",
             circuit_breaker.failure_count,
         )
@@ -1252,6 +1446,9 @@ class HealthServer:
             # Circuit breaker metrics (via public Bot accessor)
             cb = self._bot.get_llm_status() if self._bot is not None else None
             output += _build_circuit_breaker_prometheus_output(cb)
+            # DB write circuit breaker metrics
+            db_cb = self._bot.get_db_write_breaker() if self._bot is not None else None
+            output += _build_db_write_breaker_prometheus_output(db_cb)
             # Dedup service metrics (via public Bot accessor)
             dedup_stats = self._bot.get_dedup_stats() if self._bot is not None else None
             output += _build_dedup_prometheus_output(dedup_stats)
@@ -1289,6 +1486,12 @@ class HealthServer:
         # Build middleware stack
         middlewares: list[Any] = []
 
+        # Request size limits (applied first — cheapest check)
+        max_body, max_url = _load_request_size_config()
+        middlewares.append(
+            _create_request_size_limit_middleware(max_body, max_url)
+        )
+
         # Per-IP rate limiting middleware
         limit, window, max_ips = _load_rate_limit_config()
         ip_limiter = _IPLimiter(limit, window, max_ips)
@@ -1314,12 +1517,14 @@ class HealthServer:
 
         auth_status = "HMAC enabled" if hmac_secret else "no auth"
         log.info(
-            "Health check server started on http://%s:%d (%s, rate limit: %d req/%ds per IP)",
+            "Health check server started on http://%s:%d (%s, rate limit: %d req/%ds per IP, max body: %dB, max URL: %d chars)",
             host,
             port,
             auth_status,
             limit,
             int(window),
+            max_body,
+            max_url,
         )
 
         # Defense-in-depth: install a log filter that redacts any HMAC

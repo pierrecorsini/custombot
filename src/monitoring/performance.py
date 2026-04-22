@@ -103,6 +103,16 @@ DEFAULT_METRICS_LOG_INTERVAL: float = 60.0
 # method driven by periodic logging and health-check callers.
 SYSTEM_METRICS_TTL: float = 30.0
 
+# Sliding-window sizes (seconds) for error rate tracking.
+ERROR_WINDOW_SECONDS: tuple[int, ...] = (300, 900, 3600)  # 5m, 15m, 60m
+
+# Fixed bucket boundaries (milliseconds) for the LLM latency histogram.
+# Prometheus histograms use cumulative counts per bucket, enabling
+# server-side percentile computation over arbitrary time windows.
+LLM_LATENCY_HISTOGRAM_BUCKETS_MS: tuple[float, ...] = (
+    500.0, 1000.0, 2000.0, 5000.0, 10000.0, 30000.0, 60000.0, 120000.0,
+)
+
 
 @dataclass
 class LatencyStats:
@@ -154,6 +164,28 @@ class SkillMetrics:
 
 
 @dataclass
+class SkillTimeoutRatio:
+    """Per-skill timeout ratio tracking (actual_time / declared_timeout).
+
+    A ratio near 1.0 indicates the skill is consistently approaching
+    its declared timeout and may need optimization or a higher limit.
+    """
+
+    count: int = 0
+    max_ratio: float = 0.0
+    mean_ratio: float = 0.0
+    p95_ratio: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "count": self.count,
+            "max_ratio": round(self.max_ratio, 4),
+            "mean_ratio": round(self.mean_ratio, 4),
+            "p95_ratio": round(self.p95_ratio, 4),
+        }
+
+
+@dataclass
 class ChatMessageCount:
     """Per-chat message count entry for top-chats reporting."""
 
@@ -183,6 +215,22 @@ DEFAULT_TOP_CHATS: int = 10
 
 
 @dataclass
+class ErrorWindowStats:
+    """Error count and rate within a sliding time window."""
+
+    window_seconds: int
+    error_count: int = 0
+    error_rate_per_minute: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "window_seconds": self.window_seconds,
+            "error_count": self.error_count,
+            "error_rate_per_minute": round(self.error_rate_per_minute, 4),
+        }
+
+
+@dataclass
 class PerformanceSnapshot:
     """
     Point-in-time snapshot of performance metrics.
@@ -200,11 +248,13 @@ class PerformanceSnapshot:
     # LLM API metrics
     llm_call_count: int = 0
     llm_latency: LatencyStats = field(default_factory=LatencyStats)
+    llm_latency_histogram: dict[str, Any] = field(default_factory=dict)
 
     # Skill execution metrics
     skill_call_count: int = 0
     skill_latencies: dict[str, LatencyStats] = field(default_factory=dict)
     skill_metrics: dict[str, SkillMetrics] = field(default_factory=dict)
+    skill_timeout_ratios: dict[str, SkillTimeoutRatio] = field(default_factory=dict)
 
     # Database operation metrics
     db_op_count: int = 0
@@ -235,6 +285,10 @@ class PerformanceSnapshot:
     cpu_percent: float = 0.0
     memory_percent: float = 0.0
 
+    # Sliding-window error rates
+    error_windows: list[ErrorWindowStats] = field(default_factory=list)
+    total_error_count: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -246,11 +300,15 @@ class PerformanceSnapshot:
             "llm": {
                 "call_count": self.llm_call_count,
                 "latency": self.llm_latency.to_dict(),
+                "histogram": self.llm_latency_histogram,
             },
             "skills": {
                 "call_count": self.skill_call_count,
                 "latencies": {k: v.to_dict() for k, v in self.skill_latencies.items()},
                 "per_skill": {k: v.to_dict() for k, v in self.skill_metrics.items()},
+                "timeout_ratios": {
+                    k: v.to_dict() for k, v in self.skill_timeout_ratios.items()
+                },
             },
             "database": {
                 "op_count": self.db_op_count,
@@ -288,6 +346,13 @@ class PerformanceSnapshot:
             "system": {
                 "cpu_percent": round(self.cpu_percent, 1),
                 "memory_percent": round(self.memory_percent, 1),
+            },
+            "error_rates": {
+                "total_errors": self.total_error_count,
+                "error_rate_5m": self.error_windows[0].error_rate_per_minute if len(self.error_windows) > 0 else 0.0,
+                "error_rate_15m": self.error_windows[1].error_rate_per_minute if len(self.error_windows) > 1 else 0.0,
+                "error_rate_60m": self.error_windows[2].error_rate_per_minute if len(self.error_windows) > 2 else 0.0,
+                "windows": [w.to_dict() for w in self.error_windows],
             },
         }
 
@@ -327,6 +392,83 @@ def _calculate_latency_stats(samples: deque[float]) -> LatencyStats:
         p95_ms=percentile(sorted_samples, 95),
         p99_ms=percentile(sorted_samples, 99),
     )
+
+
+def _calculate_timeout_ratio(samples: deque[float]) -> SkillTimeoutRatio:
+    """Compute timeout-ratio statistics from a deque of ratio samples."""
+    if not samples:
+        return SkillTimeoutRatio()
+    data = sorted(samples)
+    count = len(data)
+
+    def pct(p: float) -> float:
+        k = (count - 1) * p / 100
+        f = int(k)
+        c = f + 1 if f + 1 < count else f
+        return data[f] + (k - f) * (data[c] - data[f])
+
+    return SkillTimeoutRatio(
+        count=count,
+        max_ratio=data[-1],
+        mean_ratio=statistics.mean(data),
+        p95_ratio=pct(95),
+    )
+
+
+class LatencyHistogram:
+    """Fixed-bucket histogram for Prometheus exposition of latency distributions.
+
+    Each bucket tracks the count of observations that fall within its range.
+    ``cumulative_buckets()`` produces the cumulative ``le``-labelled output
+    that Prometheus expects, plus a ``+Inf`` sentinel bucket.
+    """
+
+    __slots__ = ("_bounds", "_counts", "_overflow", "_sum", "_total")
+
+    def __init__(self, bounds_ms: tuple[float, ...]) -> None:
+        self._bounds = bounds_ms
+        self._counts: list[int] = [0] * len(bounds_ms)
+        self._overflow: int = 0
+        self._sum: float = 0.0
+        self._total: int = 0
+
+    def observe(self, value_ms: float) -> None:
+        """Record a single observation into the appropriate bucket."""
+        self._total += 1
+        self._sum += value_ms
+        for i, bound in enumerate(self._bounds):
+            if value_ms <= bound:
+                self._counts[i] += 1
+                return
+        self._overflow += 1
+
+    @property
+    def count(self) -> int:
+        return self._total
+
+    @property
+    def sum_ms(self) -> float:
+        return self._sum
+
+    def cumulative_buckets(self) -> list[tuple[str, int]]:
+        """Return ``(le_label, cumulative_count)`` pairs including ``+Inf``."""
+        result: list[tuple[str, int]] = []
+        cumulative = 0
+        for bound, cnt in zip(self._bounds, self._counts):
+            cumulative += cnt
+            # Format: drop trailing ".0" for integer-valued bounds
+            le_label = str(int(bound)) if bound == int(bound) else str(bound)
+            result.append((le_label, cumulative))
+        cumulative += self._overflow
+        result.append(("+Inf", cumulative))
+        return result
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "buckets": {le: cnt for le, cnt in self.cumulative_buckets()},
+            "count": self._total,
+            "sum_ms": round(self._sum, 2),
+        }
 
 
 class PerformanceMetrics:
@@ -369,6 +511,9 @@ class PerformanceMetrics:
         self._llm_latencies: deque[float] = deque(maxlen=history_size)
         self._db_latencies: deque[float] = deque(maxlen=history_size)
 
+        # Fixed-bucket histogram for LLM latency Prometheus exposition
+        self._llm_latency_histogram = LatencyHistogram(LLM_LATENCY_HISTOGRAM_BUCKETS_MS)
+
         # ReAct loop iteration counts per conversation
         self._react_iteration_counts: deque[float] = deque(maxlen=history_size)
 
@@ -377,6 +522,9 @@ class PerformanceMetrics:
 
         # Per-skill execution metrics registry
         self._skill_metrics: dict[str, SkillMetrics] = {}
+
+        # Per-skill timeout ratio tracking (actual_time / timeout_seconds)
+        self._skill_timeout_ratios: dict[str, deque[float]] = {}
 
         # Counters
         self._message_count: int = 0
@@ -391,6 +539,10 @@ class PerformanceMetrics:
         # Outbound message dedup counters
         self._outbound_dedup_hits: int = 0
         self._outbound_dedup_misses: int = 0
+
+        # Sliding-window error tracking (deque of timestamps per window)
+        self._total_error_count: int = 0
+        self._error_timestamps: deque[float] = deque(maxlen=10_000)
 
         # Queue depth tracking
         self._queue_depth: int = 0
@@ -441,6 +593,7 @@ class PerformanceMetrics:
         """
         latency_ms = latency_seconds * 1000
         self._llm_latencies.append(latency_ms)
+        self._llm_latency_histogram.observe(latency_ms)
         self._llm_call_count += 1
 
     def track_react_iterations(self, count: int) -> None:
@@ -487,6 +640,22 @@ class PerformanceMetrics:
         m.calls += 1
         m.errors += 1
         m.error_types[error_type] = m.error_types.get(error_type, 0) + 1
+
+    def track_skill_timeout_ratio(
+        self, skill_name: str, actual_seconds: float, timeout_seconds: float
+    ) -> None:
+        """Record the ratio of actual execution time to declared skill timeout.
+
+        A ratio near 1.0 signals the skill is approaching its timeout limit.
+        """
+        if timeout_seconds <= 0:
+            return
+        ratio = actual_seconds / timeout_seconds
+        if skill_name not in self._skill_timeout_ratios:
+            self._skill_timeout_ratios[skill_name] = deque(
+                maxlen=self._history_size
+            )
+        self._skill_timeout_ratios[skill_name].append(ratio)
 
     def update_queue_depth(self, depth: int) -> None:
         """
@@ -548,6 +717,31 @@ class PerformanceMetrics:
     def track_outbound_dedup_miss(self) -> None:
         """Record an outbound message dedup cache miss (new message allowed)."""
         self._outbound_dedup_misses += 1
+
+    def track_error(self) -> None:
+        """Record an error with timestamp for sliding-window rate tracking."""
+        self._total_error_count += 1
+        self._error_timestamps.append(time.time())
+
+    def _get_error_window_counts(self) -> list[ErrorWindowStats]:
+        """Count errors and compute rates for each sliding window, pruning old timestamps."""
+        now = time.time()
+        timestamps = self._error_timestamps
+        results: list[ErrorWindowStats] = []
+        # Prune timestamps older than the largest window
+        cutoff = now - ERROR_WINDOW_SECONDS[-1]
+        while timestamps and timestamps[0] < cutoff:
+            timestamps.popleft()
+        for window_secs in ERROR_WINDOW_SECONDS:
+            window_cutoff = now - window_secs
+            count = sum(1 for ts in timestamps if ts >= window_cutoff)
+            rate = count / (window_secs / 60)  # errors per minute
+            results.append(ErrorWindowStats(
+                window_seconds=window_secs,
+                error_count=count,
+                error_rate_per_minute=rate,
+            ))
+        return results
 
     def track_conversation_depth(self, chat_id: str, depth: int) -> None:
         """Record the last ReAct iteration count for a specific chat (bounded LRU)."""
@@ -617,6 +811,7 @@ class PerformanceMetrics:
             message_latency=_calculate_latency_stats(self._message_latencies),
             llm_call_count=self._llm_call_count,
             llm_latency=_calculate_latency_stats(self._llm_latencies),
+            llm_latency_histogram=self._llm_latency_histogram.to_dict(),
             skill_call_count=self._skill_call_count,
             skill_latencies={
                 name: _calculate_latency_stats(samples)
@@ -631,6 +826,10 @@ class PerformanceMetrics:
                 )
                 for name, m in self._skill_metrics.items()
             },
+            skill_timeout_ratios={
+                name: _calculate_timeout_ratio(samples)
+                for name, samples in self._skill_timeout_ratios.items()
+            },
             db_op_count=self._db_op_count,
             db_latency=_calculate_latency_stats(self._db_latencies),
             react_iteration_count=len(self._react_iteration_counts),
@@ -644,6 +843,8 @@ class PerformanceMetrics:
             memory_cache_misses=self._memory_cache_misses,
             outbound_dedup_hits=self._outbound_dedup_hits,
             outbound_dedup_misses=self._outbound_dedup_misses,
+            error_windows=self._get_error_window_counts(),
+            total_error_count=self._total_error_count,
         )
 
         # Use cached system metrics (refreshed async via refresh_system_metrics).
@@ -817,11 +1018,21 @@ async def check_performance_health() -> dict[str, Any]:
 
         message = "; ".join(messages) if messages else "Performance within normal parameters"
 
+        # Build error rate summary for the health endpoint
+        error_rates = snapshot.to_dict()["error_rates"]
+        details: dict[str, Any] = {
+            "error_rate_5m": error_rates["error_rate_5m"],
+            "error_rate_15m": error_rates["error_rate_15m"],
+            "error_rate_60m": error_rates["error_rate_60m"],
+            "total_errors": error_rates["total_errors"],
+        }
+
         return {
             "component": ComponentHealth(
                 name="performance",
                 status=status,
                 message=message,
+                details=details,
             ),
             "metrics": snapshot.to_dict(),
         }
