@@ -5,7 +5,7 @@ Unit tests covering:
   - _same_day utility
   - _utc_offset_hours helper
   - TaskScheduler configure / start / stop lifecycle
-  - Task CRUD: add_task, add_task_async, remove_task_async, list_tasks
+  - Task CRUD: add_task, add_task, remove_task_async, list_tasks
   - Task ID generation (sequential, collision avoidance)
   - Persistence to JSON (sync + async paths)
   - load_all loading tasks across multiple chats
@@ -274,106 +274,87 @@ class TestLifecycle:
 
 
 class TestAddTask:
-    """Tests for TaskScheduler.add_task() — synchronous path."""
+    """Tests for TaskScheduler.add_task() — async path."""
 
-    def test_returns_task_id(self, scheduler: TaskScheduler):
-        task_id = scheduler.add_task("chat1", _make_task())
+    @pytest.mark.asyncio
+    async def test_returns_task_id(self, scheduler: TaskScheduler):
+        task_id = await scheduler.add_task("chat1", _make_task())
         assert task_id == "task_001"
 
-    def test_sequential_ids(self, scheduler: TaskScheduler):
-        id1 = scheduler.add_task("chat1", _make_task())
-        id2 = scheduler.add_task("chat1", _make_task())
-        id3 = scheduler.add_task("chat1", _make_task())
+    @pytest.mark.asyncio
+    async def test_sequential_ids(self, scheduler: TaskScheduler):
+        id1 = await scheduler.add_task("chat1", _make_task())
+        id2 = await scheduler.add_task("chat1", _make_task())
+        id3 = await scheduler.add_task("chat1", _make_task())
         assert id1 == "task_001"
         assert id2 == "task_002"
         assert id3 == "task_003"
 
-    def test_separate_chat_id_counters(self, scheduler: TaskScheduler):
-        id_a = scheduler.add_task("chatA", _make_task())
-        id_b = scheduler.add_task("chatB", _make_task())
+    @pytest.mark.asyncio
+    async def test_separate_chat_id_counters(self, scheduler: TaskScheduler):
+        id_a = await scheduler.add_task("chatA", _make_task())
+        id_b = await scheduler.add_task("chatB", _make_task())
         # Both start from 001 per chat
         assert id_a == "task_001"
         assert id_b == "task_001"
 
-    def test_sets_created_timestamp(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_sets_created_timestamp(self, scheduler: TaskScheduler):
         before = _now().isoformat()
-        scheduler.add_task("chat1", _make_task())
+        await scheduler.add_task("chat1", _make_task())
         after = _now().isoformat()
         tasks = scheduler.list_tasks("chat1")
         assert before <= tasks[0]["created"] <= after
 
-    def test_sets_last_run_none(self, scheduler: TaskScheduler):
-        scheduler.add_task("chat1", _make_task())
+    @pytest.mark.asyncio
+    async def test_sets_last_run_none(self, scheduler: TaskScheduler):
+        await scheduler.add_task("chat1", _make_task())
         tasks = scheduler.list_tasks("chat1")
         assert tasks[0]["last_run"] is None
 
-    def test_sets_enabled_true(self, scheduler: TaskScheduler):
-        scheduler.add_task("chat1", _make_task())
+    @pytest.mark.asyncio
+    async def test_sets_enabled_true(self, scheduler: TaskScheduler):
+        await scheduler.add_task("chat1", _make_task())
         tasks = scheduler.list_tasks("chat1")
         assert tasks[0]["enabled"] is True
 
-    def test_overrides_existing_task_id_in_dict(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_overrides_existing_task_id_in_dict(self, scheduler: TaskScheduler):
         task = _make_task()
         task["task_id"] = "task_999"
-        returned_id = scheduler.add_task("chat1", task)
+        returned_id = await scheduler.add_task("chat1", task)
         assert returned_id == "task_001"
         assert task["task_id"] == "task_001"
 
-    def test_avoids_duplicate_task_ids(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_avoids_duplicate_task_ids(self, scheduler: TaskScheduler):
         """If task_001 exists (e.g. from a prior add), the next should skip it."""
         scheduler._tasks["chat1"] = [{"task_id": "task_001", "schedule": {}}]
-        new_id = scheduler.add_task("chat1", _make_task())
+        new_id = await scheduler.add_task("chat1", _make_task())
         assert new_id == "task_002"
 
-    def test_persists_to_file(self, scheduler: TaskScheduler, workspace: Path):
-        scheduler.add_task("chat1", _make_task(prompt="hello"))
+    @pytest.mark.asyncio
+    async def test_persists_to_file(self, scheduler: TaskScheduler, workspace: Path):
+        await scheduler.add_task("chat1", _make_task(prompt="hello"))
         path = _tasks_file(workspace, "chat1")
         assert path.exists()
         data = json.loads(path.read_text())
         assert len(data) == 1
         assert data[0]["prompt"] == "hello"
 
-    def test_persist_no_workspace(self, on_trigger: AsyncMock):
+    @pytest.mark.asyncio
+    async def test_persist_no_workspace(self, on_trigger: AsyncMock):
         """add_task without configure should not crash — just skip persistence."""
         s = TaskScheduler()
-        task_id = s.add_task("chat1", _make_task())
-        assert task_id == "task_001"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TaskScheduler — add_task_async
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestAddTaskAsync:
-    """Tests for TaskScheduler.add_task_async() — async path."""
-
-    @pytest.mark.asyncio
-    async def test_returns_task_id(self, scheduler: TaskScheduler):
-        task_id = await scheduler.add_task_async("chat1", _make_task())
+        task_id = await s.add_task("chat1", _make_task())
         assert task_id == "task_001"
 
     @pytest.mark.asyncio
     async def test_adds_to_internal_store(self, scheduler: TaskScheduler):
-        await scheduler.add_task_async("chat1", _make_task(prompt="async test"))
+        await scheduler.add_task("chat1", _make_task(prompt="async test"))
         tasks = scheduler.list_tasks("chat1")
         assert len(tasks) == 1
         assert tasks[0]["prompt"] == "async test"
-
-    @pytest.mark.asyncio
-    async def test_persists_to_file(self, scheduler: TaskScheduler, workspace: Path):
-        await scheduler.add_task_async("chat1", _make_task())
-        path = _tasks_file(workspace, "chat1")
-        assert path.exists()
-        data = json.loads(path.read_text())
-        assert len(data) == 1
-
-    @pytest.mark.asyncio
-    async def test_sequential_ids_async(self, scheduler: TaskScheduler):
-        id1 = await scheduler.add_task_async("chat1", _make_task())
-        id2 = await scheduler.add_task_async("chat1", _make_task())
-        assert id1 == "task_001"
-        assert id2 == "task_002"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -386,7 +367,7 @@ class TestRemoveTaskAsync:
 
     @pytest.mark.asyncio
     async def test_remove_existing(self, scheduler: TaskScheduler):
-        tid = await scheduler.add_task_async("chat1", _make_task())
+        tid = await scheduler.add_task("chat1", _make_task())
         removed = await scheduler.remove_task_async("chat1", tid)
         assert removed is True
         assert scheduler.list_tasks("chat1") == []
@@ -398,14 +379,14 @@ class TestRemoveTaskAsync:
 
     @pytest.mark.asyncio
     async def test_remove_wrong_chat(self, scheduler: TaskScheduler):
-        await scheduler.add_task_async("chat1", _make_task())
+        await scheduler.add_task("chat1", _make_task())
         removed = await scheduler.remove_task_async("chat2", "task_001")
         assert removed is False
 
     @pytest.mark.asyncio
     async def test_removes_correct_task_from_multiple(self, scheduler: TaskScheduler):
-        t1 = await scheduler.add_task_async("chat1", _make_task(prompt="first"))
-        t2 = await scheduler.add_task_async("chat1", _make_task(prompt="second"))
+        t1 = await scheduler.add_task("chat1", _make_task(prompt="first"))
+        t2 = await scheduler.add_task("chat1", _make_task(prompt="second"))
         await scheduler.remove_task_async("chat1", t1)
         remaining = scheduler.list_tasks("chat1")
         assert len(remaining) == 1
@@ -414,7 +395,7 @@ class TestRemoveTaskAsync:
 
     @pytest.mark.asyncio
     async def test_persists_after_removal(self, scheduler: TaskScheduler, workspace: Path):
-        tid = await scheduler.add_task_async("chat1", _make_task())
+        tid = await scheduler.add_task("chat1", _make_task())
         await scheduler.remove_task_async("chat1", tid)
         data = json.loads(_tasks_file(workspace, "chat1").read_text())
         assert data == []
@@ -481,46 +462,44 @@ class TestPersistence:
     async def test_async_persist_file_content(self, workspace: Path):
         s = TaskScheduler()
         s.configure(workspace=workspace, on_trigger=AsyncMock())
-        await s.add_task_async("chat1", _make_task(prompt="async persist"))
+        await s.add_task("chat1", _make_task(prompt="async persist"))
         data = json.loads(_tasks_file(workspace, "chat1").read_text())
         assert data[0]["prompt"] == "async persist"
 
-    def test_sync_persist_no_workspace(self):
+    @pytest.mark.asyncio
+    async def test_persist_no_workspace(self):
         """Should not crash when workspace is None."""
         s = TaskScheduler()
-        s._persist_sync("chat1")  # no error
+        await s._persist("chat1")  # no error
 
     @pytest.mark.asyncio
-    async def test_async_persist_no_workspace(self):
-        """Should not crash when workspace is None."""
-        s = TaskScheduler()
-        await s._persist_async("chat1")  # no error
-
-    def test_load_restores_tasks(self, workspace: Path):
+    async def test_load_restores_tasks(self, workspace: Path):
         s = TaskScheduler()
         s.configure(workspace=workspace, on_trigger=AsyncMock())
-        s.add_task("chat1", _make_task(prompt="saved"))
+        await s.add_task("chat1", _make_task(prompt="saved"))
         # New scheduler instance to test loading
         s2 = TaskScheduler()
         s2.configure(workspace=workspace, on_trigger=AsyncMock())
-        s2._load("chat1")
+        await s2._load("chat1")
         tasks = s2.list_tasks("chat1")
         assert len(tasks) == 1
         assert tasks[0]["prompt"] == "saved"
 
-    def test_load_handles_corrupt_json(self, workspace: Path):
+    @pytest.mark.asyncio
+    async def test_load_handles_corrupt_json(self, workspace: Path):
         path = _tasks_file(workspace, "chat1")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("NOT VALID JSON {{{")
         s = TaskScheduler()
         s.configure(workspace=workspace, on_trigger=AsyncMock())
-        s._load("chat1")  # should not raise
+        await s._load("chat1")  # should not raise
         assert s.list_tasks("chat1") == []
 
-    def test_load_handles_missing_file(self, workspace: Path):
+    @pytest.mark.asyncio
+    async def test_load_handles_missing_file(self, workspace: Path):
         s = TaskScheduler()
         s.configure(workspace=workspace, on_trigger=AsyncMock())
-        s._load("nonexistent_chat")  # should not raise
+        await s._load("nonexistent_chat")  # should not raise
         assert s.list_tasks("nonexistent_chat") == []
 
 
@@ -1020,7 +999,7 @@ class TestIntegration:
         s.configure(workspace=workspace, on_trigger=on_trigger, on_send=on_send)
 
         # Add
-        tid = await s.add_task_async("chat1", _make_task(prompt="round trip"))
+        tid = await s.add_task("chat1", _make_task(prompt="round trip"))
         assert len(s.list_tasks("chat1")) == 1
 
         # List
@@ -1447,7 +1426,7 @@ class TestIsDueTimezoneEdgeCases:
 
 class TestValidateTask:
     """Tests for TaskScheduler._validate_task() and its integration with
-    add_task / add_task_async."""
+    add_task / add_task."""
 
     # ── direct validation tests ──
 
@@ -1547,22 +1526,22 @@ class TestValidateTask:
             scheduler.add_task("chat1", {"prompt": "test", "schedule": {"type": "bad"}})
         assert scheduler.list_tasks("chat1") == []
 
-    # ── integration: add_task_async rejects invalid tasks ──
+    # ── integration: add_task rejects invalid tasks ──
 
     @pytest.mark.asyncio
-    async def test_add_task_async_rejects_missing_prompt(self, scheduler: TaskScheduler):
+    async def test_add_task_rejects_missing_prompt(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="prompt"):
-            await scheduler.add_task_async("chat1", {"schedule": {"type": "interval", "seconds": 60}})
+            await scheduler.add_task("chat1", {"schedule": {"type": "interval", "seconds": 60}})
 
     @pytest.mark.asyncio
-    async def test_add_task_async_rejects_invalid_schedule(self, scheduler: TaskScheduler):
+    async def test_add_task_rejects_invalid_schedule(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="schedule"):
-            await scheduler.add_task_async("chat1", {"prompt": "test"})
+            await scheduler.add_task("chat1", {"prompt": "test"})
 
     @pytest.mark.asyncio
-    async def test_add_task_async_does_not_mutate_on_failure(self, scheduler: TaskScheduler):
+    async def test_add_task_does_not_mutate_on_failure(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError):
-            await scheduler.add_task_async("chat1", {"prompt": "test", "schedule": {"type": "bad"}})
+            await scheduler.add_task("chat1", {"prompt": "test", "schedule": {"type": "bad"}})
         assert scheduler.list_tasks("chat1") == []
 
     # ── integration: valid tasks accepted and persisted correctly ──
@@ -1615,9 +1594,9 @@ class TestValidateTask:
         assert data[0]["schedule"]["weekdays"] == [1, 3, 5]
 
     @pytest.mark.asyncio
-    async def test_add_task_async_valid_daily_persisted(self, scheduler: TaskScheduler, workspace: Path):
+    async def test_add_task_valid_daily_persisted(self, scheduler: TaskScheduler, workspace: Path):
         """Valid daily task accepted via async path and persisted correctly."""
-        task_id = await scheduler.add_task_async(
+        task_id = await scheduler.add_task(
             "chat1", _make_task(schedule_type="daily", hour=7, minute=45)
         )
         assert task_id == "task_001"

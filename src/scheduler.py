@@ -17,112 +17,28 @@ Persistence:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from src.constants import (
-    OUTBOUND_DEDUP_MAX_SIZE,
-    OUTBOUND_DEDUP_TTL_SECONDS,
     SCHEDULER_MAX_RETRIES,
     SCHEDULER_RETRY_INITIAL_DELAY,
 )
 from src.utils.retry import is_transient_error
+
+if TYPE_CHECKING:
+    from src.core.dedup import DeduplicationService
 
 log = logging.getLogger(__name__)
 
 SCHEDULER_DIR = ".scheduler"
 TASKS_FILE = "tasks.json"
 TICK_SECONDS = 30  # check every 30s
-
-
-class OutboundDedupCache:
-    """Short-lived LRU cache that prevents duplicate outbound messages.
-
-    When scheduled tasks are retried (via ``_trigger_with_retry``), the first
-    attempt may succeed and deliver a response before the retry also succeeds
-    and delivers the same content again.  This cache tracks recently-sent
-    message hashes per chat and suppresses duplicates within a configurable
-    TTL window.
-
-    Thread-safety: All methods are synchronous and intended for use within
-    the single asyncio event-loop thread.  No locking is needed because
-    asyncio guarantees sequential execution between await points.
-    """
-
-    __slots__ = ("_cache", "_ttl", "_hits", "_misses")
-
-    def __init__(
-        self,
-        max_size: int = OUTBOUND_DEDUP_MAX_SIZE,
-        ttl: float = OUTBOUND_DEDUP_TTL_SECONDS,
-    ) -> None:
-        from src.utils import LRUDict
-
-        self._cache: LRUDict = LRUDict(max_size=max_size)
-        self._ttl = ttl
-        self._hits: int = 0
-        self._misses: int = 0
-
-    @staticmethod
-    def _make_key(chat_id: str, text: str) -> str:
-        """Content-addressable key from (chat_id, text) via SHA-256."""
-        return hashlib.sha256(f"{chat_id}\x00{text}".encode("utf-8")).hexdigest()
-
-    def is_duplicate(self, chat_id: str, text: str) -> bool:
-        """Check whether *text* was recently sent to *chat_id*.
-
-        Returns ``True`` if the same content was delivered to the same chat
-        within the TTL window (duplicate → should be suppressed).
-        Records the current timestamp on cache miss so future calls detect it.
-        """
-        key = self._make_key(chat_id, text)
-        now = time.monotonic()
-        sent_at = self._cache.get(key)
-        if sent_at is not None and (now - sent_at) < self._ttl:
-            self._hits += 1
-            return True
-        # Record for future checks
-        self._cache[key] = now
-        self._misses += 1
-        return False
-
-    def record(self, chat_id: str, text: str) -> None:
-        """Explicitly record that *text* was sent to *chat_id*.
-
-        Useful when the caller wants to record the send independently of
-        the duplicate check (e.g. after successful channel delivery).
-        """
-        key = self._make_key(chat_id, text)
-        self._cache[key] = time.monotonic()
-
-    @property
-    def stats(self) -> dict[str, int]:
-        """Return {hits, misses} counters for metrics reporting."""
-        return {"hits": self._hits, "misses": self._misses}
-
-
-def _track_dedup_hit() -> None:
-    """Report an outbound dedup cache hit to the global metrics collector."""
-    try:
-        from src.monitoring.performance import get_metrics_collector
-        get_metrics_collector().track_outbound_dedup_hit()
-    except Exception:  # pragma: no cover
-        pass  # metrics should never break the scheduler
-
-
-def _track_dedup_miss() -> None:
-    """Report an outbound dedup cache miss to the global metrics collector."""
-    try:
-        from src.monitoring.performance import get_metrics_collector
-        get_metrics_collector().track_outbound_dedup_miss()
-    except Exception:  # pragma: no cover
-        pass  # metrics should never break the scheduler
 
 
 def _now() -> datetime:
@@ -163,8 +79,12 @@ class TaskScheduler:
         self._failure_count: int = 0
         self._success_count: int = 0
         self._recent_executions: deque[dict[str, Any]] = deque(maxlen=10)
-        # Outbound message dedup cache — prevents duplicate scheduled responses
-        self._dedup_cache = OutboundDedupCache()
+        # Unified dedup service — set via set_dedup_service()
+        self._dedup: DeduplicationService | None = None
+
+    def set_dedup_service(self, dedup: DeduplicationService) -> None:
+        """Set the unified dedup service for outbound message dedup."""
+        self._dedup = dedup
 
     def configure(
         self,
@@ -218,6 +138,38 @@ class TaskScheduler:
             "recent_executions": list(self._recent_executions),
         }
 
+    # ── task validation ────────────────────────────────────────────────────
+
+    _VALID_SCHEDULE_TYPES = frozenset({"daily", "interval", "cron"})
+
+    def _validate_task(self, task: dict[str, Any]) -> None:
+        """Validate a task dict before persistence. Raises ``ValueError``."""
+        prompt = task.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("Task 'prompt' must be a non-empty string")
+
+        schedule = task.get("schedule")
+        if not isinstance(schedule, dict):
+            raise ValueError("Task 'schedule' must be a dict")
+
+        stype = schedule.get("type")
+        if stype not in self._VALID_SCHEDULE_TYPES:
+            raise ValueError(
+                f"Task schedule 'type' must be one of {sorted(self._VALID_SCHEDULE_TYPES)}, "
+                f"got {stype!r}"
+            )
+
+        if stype == "daily":
+            if "hour" not in schedule or "minute" not in schedule:
+                raise ValueError("Daily schedule requires 'hour' and 'minute' fields")
+        elif stype == "interval":
+            seconds = schedule.get("seconds")
+            if not isinstance(seconds, (int, float)) or seconds <= 0:
+                raise ValueError("Interval schedule requires a positive 'seconds' field")
+        elif stype == "cron":
+            if "hour" not in schedule or "minute" not in schedule:
+                raise ValueError("Cron schedule requires 'hour' and 'minute' fields")
+
     # ── task CRUD ──────────────────────────────────────────────────────────
 
     def _prepare_task(self, chat_id: str, task: dict[str, Any]) -> str:
@@ -238,20 +190,16 @@ class TaskScheduler:
         tasks.append(task)
         return task_id
 
-    def add_task(self, chat_id: str, task: dict[str, Any]) -> str:
-        """Add a scheduled task. Returns the task_id.
+    async def add_task(self, chat_id: str, task: dict[str, Any]) -> str:
+        """Add a scheduled task with async persistence. Returns the task_id.
 
-        Note: Persists synchronously. For async callers that care about
-        event loop blocking, use add_task_async() instead.
+        Raises:
+            ValueError: If the task dict is missing required fields or has
+                invalid values.
         """
+        self._validate_task(task)
         task_id = self._prepare_task(chat_id, task)
-        self._persist_sync(chat_id)
-        return task_id
-
-    async def add_task_async(self, chat_id: str, task: dict[str, Any]) -> str:
-        """Add a scheduled task with async persistence. Returns the task_id."""
-        task_id = self._prepare_task(chat_id, task)
-        await self._persist_async(chat_id)
+        await self._persist(chat_id)
         return task_id
 
     async def remove_task_async(self, chat_id: str, task_id: str) -> bool:
@@ -260,7 +208,7 @@ class TaskScheduler:
         before = len(tasks)
         self._tasks[chat_id] = [t for t in tasks if t["task_id"] != task_id]
         if len(self._tasks[chat_id]) < before:
-            await self._persist_async(chat_id)
+            await self._persist(chat_id)
             return True
         return False
 
@@ -269,44 +217,48 @@ class TaskScheduler:
 
     # ── persistence ────────────────────────────────────────────────────────
 
-    def _persist_sync(self, chat_id: str) -> None:
-        """Synchronous persist — used from sync call sites (add_task, remove_task)."""
+    async def _persist(self, chat_id: str) -> None:
+        """Persist tasks to disk via thread pool to avoid blocking the event loop."""
         if not self._workspace:
             return
-        d = self._workspace / chat_id / SCHEDULER_DIR
-        d.mkdir(parents=True, exist_ok=True)
-        path = d / TASKS_FILE
-        path.write_text(json.dumps(self._tasks.get(chat_id, []), indent=2))
+        data = self._tasks.get(chat_id, [])
+        dest = self._workspace / chat_id / SCHEDULER_DIR / TASKS_FILE
+        await asyncio.to_thread(self._write_tasks_file, dest, data)
 
-    async def _persist_async(self, chat_id: str) -> None:
-        """Async persist — runs file I/O in thread pool to avoid blocking the event loop."""
-        if not self._workspace:
-            return
-        d = self._workspace / chat_id / SCHEDULER_DIR
-        d.mkdir(parents=True, exist_ok=True)
-        path = d / TASKS_FILE
-        content = json.dumps(self._tasks.get(chat_id, []), indent=2)
-        await asyncio.to_thread(path.write_text, content)
+    @staticmethod
+    def _write_tasks_file(path: Path, data: list[dict[str, Any]]) -> None:
+        """Synchronous helper: mkdir + serialize + write (runs in thread pool)."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2))
 
-    def _load(self, chat_id: str) -> None:
+    async def _load(self, chat_id: str) -> None:
+        """Load tasks for a chat from disk via thread pool to avoid blocking."""
         if not self._workspace:
             return
         path = self._workspace / chat_id / SCHEDULER_DIR / TASKS_FILE
-        if path.exists():
-            try:
-                self._tasks[chat_id] = json.loads(path.read_text())
-            except (json.JSONDecodeError, OSError) as exc:
-                log.error("Failed to load scheduler tasks for %s: %s", chat_id, exc)
+        try:
+            raw = await asyncio.to_thread(self._read_tasks_file, path)
+            if raw is not None:
+                self._tasks[chat_id] = json.loads(raw)
+        except (json.JSONDecodeError, OSError) as exc:
+            log.error("Failed to load scheduler tasks for %s: %s", chat_id, exc)
 
-    def load_all(self) -> None:
-        """Load tasks for all chats from workspace."""
+    @staticmethod
+    def _read_tasks_file(path: Path) -> str | None:
+        """Synchronous helper: check exists + read (runs in thread pool)."""
+        if path.exists():
+            return path.read_text()
+        return None
+
+    async def load_all(self) -> None:
+        """Load tasks for all chats from workspace asynchronously."""
         if not self._workspace or not self._workspace.exists():
             return
         for chat_dir in self._workspace.iterdir():
             if chat_dir.is_dir():
                 task_file = chat_dir / SCHEDULER_DIR / TASKS_FILE
                 if task_file.exists():
-                    self._load(chat_dir.name)
+                    await self._load(chat_dir.name)
 
     # ── scheduling logic ───────────────────────────────────────────────────
 
@@ -427,7 +379,7 @@ class TaskScheduler:
             result = await self._trigger_with_retry(chat_id, prompt, task.get("task_id", ""))
             task["last_result"] = (result or "")[:2000]
             task["last_run"] = _now().isoformat()
-            await self._persist_async(chat_id)
+            await self._persist(chat_id)
 
             # Deliver result — transport layer handles reconnection
             if not result:
@@ -444,20 +396,18 @@ class TaskScheduler:
                 formatted = f"⏰ **{task.get('label', 'Tâche planifiée')}**\n\n{result}"
                 # Outbound dedup: skip sending if the same content was
                 # already delivered to this chat within the TTL window.
-                # This prevents double-sends when _trigger_with_retry
-                # succeeds after an earlier attempt already delivered.
-                if self._dedup_cache.is_duplicate(chat_id, formatted):
+                # Uses the unified DeduplicationService.
+                if self._dedup and self._dedup.is_outbound_duplicate(chat_id, formatted):
                     log.info(
                         "Scheduled task %s response suppressed (duplicate outbound) for chat %s",
                         task["task_id"],
                         chat_id,
                     )
-                    _track_dedup_hit()
                 else:
                     await self._on_send(chat_id, formatted)
                     # Record successful delivery for future dedup checks
-                    self._dedup_cache.record(chat_id, formatted)
-                    _track_dedup_miss()
+                    if self._dedup:
+                        self._dedup.record_outbound(chat_id, formatted)
                     log.info(
                         "Delivered scheduled task %s to chat %s",
                         task["task_id"],
