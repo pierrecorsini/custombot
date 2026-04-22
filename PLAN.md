@@ -186,9 +186,9 @@ addressed in Phases 1–10.
 
 - [x] **Centralize `chat_id` validation at the `IncomingMessage` boundary** — While `db.py` has `_validate_chat_id()` and `sanitize_path_component()`, `chat_id` flows through `memory.py`, `workspace_integrity.py`, and `scheduler.py` with varying levels of sanitization. Add validation in `IncomingMessage.__post_init__()` or at the top of `handle_message()` to catch malicious chat IDs before they reach any filesystem operation, as a defense-in-depth layer. (`src/channels/base.py:38-88`, `src/bot.py:452-547`)
 
-- [ ] **Add request size limits to health server middleware** — The health server has IP-based rate limiting but no request body or URL length limits. An attacker could send oversized requests to consume server memory. Add middleware to reject requests with bodies > 1KB or URL paths > 2KB — health endpoints only serve short GET requests. (`src/health/server.py`)
+- [x] **Add request size limits to health server middleware** — The health server has IP-based rate limiting but no request body or URL length limits. An attacker could send oversized requests to consume server memory. Add middleware to reject requests with bodies > 1KB or URL paths > 2KB — health endpoints only serve short GET requests. (`src/health/server.py`)
 
-- [ ] **Audit and restrict environment variable reading in `RateLimiter.from_env()`** — `RateLimitConfig.from_env()` reads `RATE_LIMIT_CHAT_PER_MINUTES` and `RATE_LIMIT_EXPENSIVE_PER_MINUTES` from env vars without validating the range. A misconfigured env var (e.g., `RATE_LIMIT_CHAT_PER_MINUTES=999999`) effectively disables rate limiting. Add sensible bounds (min=1, max=100) and log the effective values at startup. (`src/rate_limiter.py:83-95`)
+- [x] **Audit and restrict environment variable reading in `RateLimiter.from_env()`** — `RateLimitConfig.from_env()` reads `RATE_LIMIT_CHAT_PER_MINUTES` and `RATE_LIMIT_EXPENSIVE_PER_MINUTES` from env vars without validating the range. A misconfigured env var (e.g., `RATE_LIMIT_CHAT_PER_MINUTES=999999`) effectively disables rate limiting. Add sensible bounds (min=1, max=100) and log the effective values at startup. (`src/rate_limiter.py:83-95`)
 
 ### Observability & Monitoring
 

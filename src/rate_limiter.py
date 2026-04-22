@@ -43,6 +43,8 @@ from src.constants import (
     DEFAULT_CHAT_RATE_LIMIT,
     DEFAULT_EXPENSIVE_SKILL_RATE_LIMIT,
     MAX_RATE_LIMIT_TRACKED_CHATS,
+    RATE_LIMIT_MAX_VALUE,
+    RATE_LIMIT_MIN_VALUE,
     RATE_LIMIT_WINDOW_SECONDS,
 )
 
@@ -81,15 +83,50 @@ class RateLimitConfig:
 
     @classmethod
     def from_env(cls) -> "RateLimitConfig":
-        """Load configuration from environment variables."""
-        chat_limit = os.environ.get("RATE_LIMIT_CHAT_PER_MINUTE", "")
-        expensive_limit = os.environ.get("RATE_LIMIT_EXPENSIVE_PER_MINUTES", "")
+        """Load configuration from environment variables.
+
+        Values are clamped to [RATE_LIMIT_MIN_VALUE, RATE_LIMIT_MAX_VALUE]
+        to prevent misconfiguration from disabling rate limiting.
+        """
+        raw_chat = os.environ.get("RATE_LIMIT_CHAT_PER_MINUTE", "")
+        raw_expensive = os.environ.get("RATE_LIMIT_EXPENSIVE_PER_MINUTES", "")
+
+        chat_limit = int(raw_chat) if raw_chat.isdigit() else DEFAULT_CHAT_RATE_LIMIT
+        expensive_limit = (
+            int(raw_expensive) if raw_expensive.isdigit() else DEFAULT_EXPENSIVE_SKILL_RATE_LIMIT
+        )
+
+        # Clamp to sensible bounds
+        if chat_limit < RATE_LIMIT_MIN_VALUE or chat_limit > RATE_LIMIT_MAX_VALUE:
+            log.warning(
+                "RATE_LIMIT_CHAT_PER_MINUTE=%d is out of bounds [%d, %d]; clamping to %d",
+                chat_limit,
+                RATE_LIMIT_MIN_VALUE,
+                RATE_LIMIT_MAX_VALUE,
+                max(RATE_LIMIT_MIN_VALUE, min(chat_limit, RATE_LIMIT_MAX_VALUE)),
+            )
+            chat_limit = max(RATE_LIMIT_MIN_VALUE, min(chat_limit, RATE_LIMIT_MAX_VALUE))
+
+        if expensive_limit < RATE_LIMIT_MIN_VALUE or expensive_limit > RATE_LIMIT_MAX_VALUE:
+            log.warning(
+                "RATE_LIMIT_EXPENSIVE_PER_MINUTES=%d is out of bounds [%d, %d]; clamping to %d",
+                expensive_limit,
+                RATE_LIMIT_MIN_VALUE,
+                RATE_LIMIT_MAX_VALUE,
+                max(RATE_LIMIT_MIN_VALUE, min(expensive_limit, RATE_LIMIT_MAX_VALUE)),
+            )
+            expensive_limit = max(RATE_LIMIT_MIN_VALUE, min(expensive_limit, RATE_LIMIT_MAX_VALUE))
+
+        log.info(
+            "Rate limiter config: chat_limit=%d/min, expensive_skill_limit=%d/min, window=%.0fs",
+            chat_limit,
+            expensive_limit,
+            WINDOW_SIZE_SECONDS,
+        )
 
         return cls(
-            chat_rate_limit=int(chat_limit) if chat_limit.isdigit() else DEFAULT_CHAT_RATE_LIMIT,
-            expensive_skill_rate_limit=int(expensive_limit)
-            if expensive_limit.isdigit()
-            else DEFAULT_EXPENSIVE_SKILL_RATE_LIMIT,
+            chat_rate_limit=chat_limit,
+            expensive_skill_rate_limit=expensive_limit,
             window_size_seconds=WINDOW_SIZE_SECONDS,
             expensive_skills=EXPENSIVE_SKILLS,
         )

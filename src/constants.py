@@ -193,6 +193,12 @@ RATE_LIMIT_WINDOW_SECONDS: float = 60.0
 # Prevents unbounded memory growth.
 MAX_RATE_LIMIT_TRACKED_CHATS: int = 1000
 
+# Minimum and maximum allowed values for rate-limit env vars.
+# Prevents misconfiguration (e.g. RATE_LIMIT_CHAT_PER_MINUTE=999999)
+# from effectively disabling rate limiting.
+RATE_LIMIT_MIN_VALUE: int = 1
+RATE_LIMIT_MAX_VALUE: int = 100
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Health Server Rate Limiting
 # ─────────────────────────────────────────────────────────────────────────────
@@ -412,6 +418,16 @@ OUTBOUND_DEDUP_MAX_SIZE: int = 500
 # Below this threshold the component status is DEGRADED, signalling that
 # writes to JSONL, vector memory, or the message queue may start failing.
 HEALTH_DISK_FREE_THRESHOLD_MB: float = 500.0
+
+# Maximum allowed request body size (bytes) for the health server.
+# Health endpoints only serve short GET requests with no body; any POST
+# or PUT payload exceeding this is rejected to prevent memory exhaustion.
+HEALTH_MAX_REQUEST_BODY_BYTES: int = 1024  # 1 KB
+
+# Maximum allowed URL path length (characters) for the health server.
+# Legitimate paths are short (/, /health, /metrics, /ready, /version).
+# Excessively long paths are rejected to prevent memory exhaustion.
+HEALTH_MAX_URL_LENGTH: int = 2048  # 2 KB
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config Hot-Reload Watcher

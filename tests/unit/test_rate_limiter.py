@@ -522,3 +522,113 @@ class TestRateLimitResultMessage:
         msg = result.message
         assert "skill" in msg.lower()
         assert "frequently" in msg
+
+
+class TestRateLimitConfigFromEnvBounds:
+    """Tests for RateLimitConfig.from_env() env-var bounds validation."""
+
+    def test_defaults_when_no_env_vars(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            config = RateLimitConfig.from_env()
+        from src.constants import DEFAULT_CHAT_RATE_LIMIT, DEFAULT_EXPENSIVE_SKILL_RATE_LIMIT
+
+        assert config.chat_rate_limit == DEFAULT_CHAT_RATE_LIMIT
+        assert config.expensive_skill_rate_limit == DEFAULT_EXPENSIVE_SKILL_RATE_LIMIT
+
+    def test_valid_env_vars_accepted(self) -> None:
+        with patch.dict("os.environ", {"RATE_LIMIT_CHAT_PER_MINUTE": "50"}, clear=False):
+            config = RateLimitConfig.from_env()
+        assert config.chat_rate_limit == 50
+
+    def test_too_high_chat_limit_clamped_to_max(self) -> None:
+        with patch.dict("os.environ", {"RATE_LIMIT_CHAT_PER_MINUTE": "999999"}, clear=False):
+            config = RateLimitConfig.from_env()
+        from src.constants import RATE_LIMIT_MAX_VALUE
+
+        assert config.chat_rate_limit == RATE_LIMIT_MAX_VALUE
+
+    def test_too_high_expensive_limit_clamped_to_max(self) -> None:
+        with patch.dict(
+            "os.environ", {"RATE_LIMIT_EXPENSIVE_PER_MINUTES": "999999"}, clear=False
+        ):
+            config = RateLimitConfig.from_env()
+        from src.constants import RATE_LIMIT_MAX_VALUE
+
+        assert config.expensive_skill_rate_limit == RATE_LIMIT_MAX_VALUE
+
+    def test_zero_chat_limit_clamped_to_min(self) -> None:
+        with patch.dict("os.environ", {"RATE_LIMIT_CHAT_PER_MINUTE": "0"}, clear=False):
+            config = RateLimitConfig.from_env()
+        from src.constants import RATE_LIMIT_MIN_VALUE
+
+        assert config.chat_rate_limit == RATE_LIMIT_MIN_VALUE
+
+    def test_zero_expensive_limit_clamped_to_min(self) -> None:
+        with patch.dict("os.environ", {"RATE_LIMIT_EXPENSIVE_PER_MINUTES": "0"}, clear=False):
+            config = RateLimitConfig.from_env()
+        from src.constants import RATE_LIMIT_MIN_VALUE
+
+        assert config.expensive_skill_rate_limit == RATE_LIMIT_MIN_VALUE
+
+    def test_negative_treated_as_non_digit_uses_default(self) -> None:
+        """Negative values have a '-' prefix, so .isdigit() returns False."""
+        with patch.dict("os.environ", {"RATE_LIMIT_CHAT_PER_MINUTE": "-5"}, clear=False):
+            config = RateLimitConfig.from_env()
+        from src.constants import DEFAULT_CHAT_RATE_LIMIT
+
+        assert config.chat_rate_limit == DEFAULT_CHAT_RATE_LIMIT
+
+    def test_non_numeric_treated_as_default(self) -> None:
+        with patch.dict("os.environ", {"RATE_LIMIT_CHAT_PER_MINUTE": "abc"}, clear=False):
+            config = RateLimitConfig.from_env()
+        from src.constants import DEFAULT_CHAT_RATE_LIMIT
+
+        assert config.chat_rate_limit == DEFAULT_CHAT_RATE_LIMIT
+
+    def test_boundary_max_accepted(self) -> None:
+        from src.constants import RATE_LIMIT_MAX_VALUE
+
+        with patch.dict(
+            "os.environ",
+            {"RATE_LIMIT_CHAT_PER_MINUTE": str(RATE_LIMIT_MAX_VALUE)},
+            clear=False,
+        ):
+            config = RateLimitConfig.from_env()
+        assert config.chat_rate_limit == RATE_LIMIT_MAX_VALUE
+
+    def test_boundary_min_accepted(self) -> None:
+        from src.constants import RATE_LIMIT_MIN_VALUE
+
+        with patch.dict(
+            "os.environ",
+            {"RATE_LIMIT_CHAT_PER_MINUTE": str(RATE_LIMIT_MIN_VALUE)},
+            clear=False,
+        ):
+            config = RateLimitConfig.from_env()
+        assert config.chat_rate_limit == RATE_LIMIT_MIN_VALUE
+
+    def test_logs_effective_values(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="src.rate_limiter"):
+            with patch.dict(
+                "os.environ",
+                {"RATE_LIMIT_CHAT_PER_MINUTE": "25", "RATE_LIMIT_EXPENSIVE_PER_MINUTES": "5"},
+                clear=False,
+            ):
+                RateLimitConfig.from_env()
+
+        assert "chat_limit=25/min" in caplog.text
+        assert "expensive_skill_limit=5/min" in caplog.text
+
+    def test_logs_warning_on_clamping(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="src.rate_limiter"):
+            with patch.dict(
+                "os.environ", {"RATE_LIMIT_CHAT_PER_MINUTE": "999999"}, clear=False
+            ):
+                RateLimitConfig.from_env()
+
+        assert "out of bounds" in caplog.text
+        assert "clamping" in caplog.text
