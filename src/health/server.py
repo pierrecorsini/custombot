@@ -731,8 +731,18 @@ def _build_prometheus_output(
             f'custombot_skill_calls_total{{skill="{skill_name}"}} {skill_lat.count}\n'
         )
 
-    # ── Per-Skill Error Metrics ──────────────────────────────────────────────
+    # ── Per-Skill Execution & Error Metrics ──────────────────────────────────
     for skill_name, sm in snapshot.skill_metrics.items():
+        # Total executions (success + error)
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_skill_executions_total",
+                f"Total executions for {skill_name} (success + error)",
+                "counter",
+                sm.calls,
+                labels={"skill": skill_name},
+            )
+        )
         lines.append(
             _format_prometheus_metric(
                 "custombot_skill_successes_total",
@@ -760,6 +770,17 @@ def _build_prometheus_output(
                     "counter",
                     count,
                     labels={"skill": skill_name, "error_type": safe_err},
+                )
+            )
+        # Error rate gauge (errors / total executions)
+        if sm.calls > 0:
+            lines.append(
+                _format_prometheus_metric(
+                    "custombot_skill_error_rate",
+                    f"Error rate for {skill_name} (errors / executions)",
+                    "gauge",
+                    round(sm.errors / sm.calls, 4),
+                    labels={"skill": skill_name},
                 )
             )
 
