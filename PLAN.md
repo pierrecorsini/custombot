@@ -192,7 +192,7 @@ addressed in Phases 1–10.
 
 ### Observability & Monitoring
 
-- [ ] **Propagate correlation IDs through database operations** — Database operations in `db.py` log `chat_id` but don't include the correlation ID that the message pipeline sets via contextvars. Propagate the current correlation ID through to DB log statements for end-to-end request tracing in production logs. (`src/db/db.py`, `src/logging/logging_config.py`)
+- [x] **Propagate correlation IDs through database operations** — Database operations in `db.py` log `chat_id` but don't include the correlation ID that the message pipeline sets via contextvars. Propagate the current correlation ID through to DB log statements for end-to-end request tracing in production logs. (`src/db/db.py`, `src/logging/logging_config.py`)
 
 - [ ] **Add fixed-bucket histogram for LLM latency percentiles** — The `/metrics` endpoint exposes average LLM latency, but operators need percentiles (p50, p95, p99) for alerting. Implement a fixed-bucket histogram approach (e.g., buckets at 0.5s, 1s, 2s, 5s, 10s, 30s, 60s, 120s) in `PerformanceMetrics` and expose `custombot_llm_latency_bucket` in the Prometheus output. (`src/monitoring/performance.py`, `src/health/server.py`)
 

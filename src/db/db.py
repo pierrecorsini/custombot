@@ -38,11 +38,14 @@ from typing import Any, AsyncIterator, Dict, IO, List, Optional
 from src.constants import (
     COMPRESSION_KEEP_RECENT,
     COMPRESSION_LINE_THRESHOLD,
+    DB_WRITE_CIRCUIT_COOLDOWN_SECONDS,
+    DB_WRITE_CIRCUIT_FAILURE_THRESHOLD,
     DEFAULT_DB_TIMEOUT,
     MAX_CHAT_GENERATIONS,
     MAX_FILE_HANDLES,
     MAX_LRU_CACHE_SIZE,
 )
+from src.utils.circuit_breaker import CircuitBreaker
 from src.db.db_index import (
     RecoveryResult,
     load_index,
@@ -61,6 +64,7 @@ from src.db.db_integrity import (
     validate_checksum,
 )
 from src.exceptions import DatabaseError, DiskSpaceError
+from src.logging import get_correlation_id
 from src.utils import (
     DEFAULT_MIN_DISK_SPACE,
     JsonParseMode,
@@ -82,6 +86,21 @@ def _track_db_latency(elapsed_seconds: float) -> None:
         get_metrics_collector().track_db_latency(elapsed_seconds)
     except Exception:
         pass  # Metrics tracking must never crash DB operations
+
+
+def _db_log_extra(chat_id: str | None = None, **kwargs: Any) -> dict[str, Any]:
+    """Build structured extra dict for DB log statements with correlation ID.
+
+    Ensures every DB log statement carries the current correlation ID from
+    the request context, enabling end-to-end request tracing across the
+    message pipeline → database layer.
+    """
+    extra: dict[str, Any] = {"correlation_id": get_correlation_id()}
+    if chat_id is not None:
+        extra["chat_id"] = chat_id
+    extra.update(kwargs)
+    return extra
+
 
 # Maximum messages that can be retrieved in a single query (memory safety)
 MAX_MESSAGE_HISTORY = 500
@@ -315,6 +334,15 @@ class Database:
         # retrieval of archived conversation history via the memory_recall skill.
         self._vector_memory: Any = None
 
+        # Write circuit breaker: fast-fails write operations when the
+        # filesystem is degraded, preventing thundering-herd timeouts from
+        # starving the event loop.  Separate from the LLM circuit breaker
+        # (different failure domain, different cooldown).
+        self._write_breaker = CircuitBreaker(
+            failure_threshold=DB_WRITE_CIRCUIT_FAILURE_THRESHOLD,
+            cooldown_seconds=DB_WRITE_CIRCUIT_COOLDOWN_SECONDS,
+        )
+
     def _get_chats_lock(self) -> asyncio.Lock:
         """Return the chats lock, creating it on first use.
 
@@ -362,12 +390,48 @@ class Database:
                 "Database operation '%s' timed out after %ss",
                 operation,
                 timeout,
+                extra=_db_log_extra(),
             )
             raise DatabaseError(
                 f"Operation timed out after {timeout}s",
                 operation=operation,
                 timeout=timeout,
             )
+
+    async def _guarded_write(
+        self,
+        coro: Any,
+        timeout: float,
+        operation: str,
+    ) -> Any:
+        """Execute a write operation with circuit-breaker protection.
+
+        When the write circuit breaker is OPEN the call is rejected
+        immediately (no timeout wait), preventing thundering-herd stalls.
+        On success the breaker records a success (closing from HALF_OPEN);
+        on any exception the breaker records a failure.
+        """
+        if await self._write_breaker.is_open():
+            log.warning(
+                "DB write circuit breaker OPEN — %s rejected", operation,
+                extra=_db_log_extra(),
+            )
+            raise DatabaseError(
+                f"Database write circuit breaker open — {operation} rejected",
+                operation=operation,
+            )
+        try:
+            result = await self._run_with_timeout(coro, timeout, operation)
+            await self._write_breaker.record_success()
+            return result
+        except Exception:
+            await self._write_breaker.record_failure()
+            raise
+
+    @property
+    def write_breaker(self) -> CircuitBreaker:
+        """Public accessor for the write circuit breaker (health / metrics)."""
+        return self._write_breaker
 
     def set_vector_memory(self, vector_memory: Any) -> None:
         """Set the optional vector memory store for embedding compression summaries.
@@ -943,6 +1007,7 @@ class Database:
                     mid,
                     result.confidence,
                     result.matched_patterns,
+                    extra=_db_log_extra(message_id=mid),
                 )
 
         return {
@@ -977,7 +1042,8 @@ class Database:
             The message ID
 
         Raises:
-            DatabaseError: If the operation times out.
+            DatabaseError: If the operation times out or the write
+                circuit breaker is open.
         """
         msg, mid = self._build_message_record(role, content, name, message_id)
 
@@ -994,7 +1060,7 @@ class Database:
                     json_dumps(msg, ensure_ascii=False) + "\n",
                 )
 
-        await self._run_with_timeout(
+        await self._guarded_write(
             _write_message(),
             timeout=DEFAULT_DB_TIMEOUT,
             operation="save_message",
@@ -1012,6 +1078,7 @@ class Database:
         except Exception:
             log.debug(
                 "History compression check failed for %s (non-critical)", chat_id,
+                extra=_db_log_extra(chat_id),
             )
 
         return mid
@@ -1056,7 +1123,7 @@ class Database:
             async with lock:
                 await asyncio.to_thread(self._append_to_file, msg_file, lines)
 
-        await self._run_with_timeout(
+        await self._guarded_write(
             _write_batch(),
             timeout=DEFAULT_DB_TIMEOUT,
             operation="save_messages_batch",
@@ -1074,6 +1141,7 @@ class Database:
         except Exception:
             log.debug(
                 "History compression check failed for %s (non-critical)", chat_id,
+                extra=_db_log_extra(chat_id),
             )
 
         return ids
@@ -1113,6 +1181,7 @@ class Database:
                 "Trimmed %d entries from _chat_generations (cap=%d)",
                 discard_count,
                 MAX_CHAT_GENERATIONS,
+                extra=_db_log_extra(),
             )
 
     # ── history compression ─────────────────────────────────────────────────
@@ -1186,6 +1255,7 @@ class Database:
                     log.debug(
                         "Failed to embed compression summary for %s (non-critical)",
                         chat_id,
+                        extra=_db_log_extra(chat_id),
                     )
 
         return bool(result.get("compressed"))
@@ -1337,6 +1407,7 @@ class Database:
         except OSError as exc:
             log.warning(
                 "Failed to write compression summary for %s: %s", chat_id, exc,
+                extra=_db_log_extra(chat_id),
             )
             return {"compressed": False}
 
@@ -1356,6 +1427,7 @@ class Database:
         except OSError as exc:
             log.warning(
                 "Failed to write compressed JSONL for %s: %s", chat_id, exc,
+                extra=_db_log_extra(chat_id),
             )
             return {"compressed": False}
 
@@ -1366,6 +1438,7 @@ class Database:
             compress_count,
             len(recent_lines),
             msg_file.name,
+            extra=_db_log_extra(chat_id),
         )
 
         return {
@@ -1388,6 +1461,7 @@ class Database:
                     "Trimmed %d entries from message ID index (cap=%d)",
                     discard_count,
                     MAX_MESSAGE_ID_INDEX,
+                    extra=_db_log_extra(),
                 )
 
             self._index_dirty = True
@@ -1461,7 +1535,8 @@ class Database:
                 operation="get_recent_messages",
             )
         except DatabaseError:
-            log.warning("Timeout reading messages for chat %s", chat_id)
+            log.warning("Timeout reading messages for chat %s", chat_id,
+                        extra=_db_log_extra(chat_id))
             return []
 
         # Lines are already limited to the last N by _read_file_lines
@@ -1478,6 +1553,7 @@ class Database:
                         "JSON corruption detected in chat %s line %d",
                         chat_id,
                         actual_line_num,
+                        extra=_db_log_extra(chat_id),
                     )
                     corruption_detected = True
                 continue
@@ -1492,6 +1568,7 @@ class Database:
                     chat_id,
                     actual_line_num,
                     error,
+                    extra=_db_log_extra(chat_id),
                 )
                 corruption_detected = True
                 # Skip corrupted message - recovery mechanism
@@ -1512,6 +1589,7 @@ class Database:
                 "Corruption detected while reading messages for chat %s. "
                 "Some messages may have been skipped. Consider running repair_message_file().",
                 chat_id,
+                extra=_db_log_extra(chat_id),
             )
 
         _track_db_latency(time.monotonic() - _db_start)
@@ -1561,6 +1639,7 @@ class Database:
                         "falling back to deque read (file may be corrupted).",
                         self._MAX_SEEK_ITERATIONS,
                         file_path,
+                        extra=_db_log_extra(),
                     )
                     f.close()
                     with file_path.open("r", encoding="utf-8") as fb:
@@ -1634,7 +1713,7 @@ class Database:
                     self._last_chats_save = now
                     self._chats_dirty = False
 
-        await self._run_with_timeout(
+        await self._guarded_write(
             _upsert(),
             timeout=DEFAULT_DB_TIMEOUT,
             operation="upsert_chat",
