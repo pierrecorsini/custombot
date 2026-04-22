@@ -172,7 +172,7 @@ addressed in Phases 1–10.
 
 ### Error Handling & Resilience
 
-- [ ] **Handle individual `asyncio.gather` failures in `ContextAssembler.assemble()`** — The 5 concurrent reads in `assemble()` (memory, agents_md, project_ctx, topic_cache, compressed_summary) use `asyncio.gather()` without `return_exceptions=True`. A single disk I/O failure (e.g., corrupted AGENTS.md) crashes the entire context assembly. Wrap with `return_exceptions=True` and handle each result individually: log the failure, substitute a sensible default, and proceed with the remaining context. (`src/core/context_assembler.py:101-113`)
+- [x] **Handle individual `asyncio.gather` failures in `ContextAssembler.assemble()`** — The 5 concurrent reads in `assemble()` (memory, agents_md, project_ctx, topic_cache, compressed_summary) use `asyncio.gather()` without `return_exceptions=True`. A single disk I/O failure (e.g., corrupted AGENTS.md) crashes the entire context assembly. Wrap with `return_exceptions=True` and handle each result individually: log the failure, substitute a sensible default, and proceed with the remaining context. (`src/core/context_assembler.py:101-113`)
 
 - [ ] **Add circuit-breaker pattern for database write operations** — When the filesystem is degraded (disk full, NFS dropout), every DB write individually times out after `DEFAULT_DB_TIMEOUT` (10s). Under sustained failure, this creates a backlog of blocked coroutines starving the event loop. Add a lightweight write-circuit-breaker on `Database` that fast-fails writes when the last N consecutive writes all failed, preventing thundering-herd timeouts. (`src/db/db.py`, `src/utils/circuit_breaker.py`)
 

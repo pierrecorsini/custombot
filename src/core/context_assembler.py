@@ -71,9 +71,31 @@ class ContextAssembler:
         self._project_ctx = project_ctx
         self._topic_cache = TopicCache(workspace_root)
 
+    @staticmethod
+    def _handle_gather_result(
+        result: object,
+        source: str,
+        chat_id: str,
+        default: str | None,
+    ) -> str | None:
+        """Return *result* if it is a value, or *default* if it is an exception."""
+        if isinstance(result, BaseException):
+            log.warning(
+                "Context read '%s' failed for chat %s: %s",
+                source,
+                chat_id,
+                result,
+            )
+            return default
+        return result  # type: ignore[return-value]
+
     async def _async_topic_read(self, chat_id: str) -> str | None:
         """Read topic summary — wrapped as coroutine for ``asyncio.gather``."""
         return self._topic_cache.read(chat_id)
+
+    async def _async_compressed_summary(self, chat_id: str) -> str | None:
+        """Read compressed history summary — wrapped as coroutine for gather."""
+        return await self._db.get_compressed_summary(chat_id)
 
     async def assemble(
         self,
@@ -93,14 +115,36 @@ class ContextAssembler:
         Returns:
             ``ContextResult`` with assembled messages and resolution metadata.
         """
-        # Run all 4 independent reads concurrently to reduce latency
-        memory_content, agents_content, project_context, topic_summary = (
-            await asyncio.gather(
-                self._memory.read_memory(chat_id),
-                self._memory.read_agents_md(chat_id),
-                self._project_ctx.get(chat_id),
-                self._async_topic_read(chat_id),
-            )
+        # Run all 5 independent reads concurrently; tolerate individual failures
+        (
+            memory_content,
+            agents_content,
+            project_context,
+            topic_summary,
+            compressed_summary,
+        ) = await asyncio.gather(
+            self._memory.read_memory(chat_id),
+            self._memory.read_agents_md(chat_id),
+            self._project_ctx.get(chat_id),
+            self._async_topic_read(chat_id),
+            self._async_compressed_summary(chat_id),
+            return_exceptions=True,
+        )
+
+        memory_content = self._handle_gather_result(
+            memory_content, "read_memory", chat_id, default=None,
+        )
+        agents_content = self._handle_gather_result(
+            agents_content, "read_agents_md", chat_id, default="",
+        )
+        project_context = self._handle_gather_result(
+            project_context, "get_project_context", chat_id, default=None,
+        )
+        topic_summary = self._handle_gather_result(
+            topic_summary, "topic_cache_read", chat_id, default=None,
+        )
+        compressed_summary = self._handle_gather_result(
+            compressed_summary, "compressed_summary", chat_id, default=None,
         )
 
         messages = await build_context(
@@ -113,6 +157,7 @@ class ContextAssembler:
             channel_prompt=channel_prompt,
             project_context=project_context,
             topic_summary=topic_summary,
+            compressed_summary=compressed_summary,
         )
 
         return ContextResult(
