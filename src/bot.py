@@ -544,38 +544,44 @@ class Bot:
             clear_correlation_id()
             return None
 
-        # Acquire per-chat lock via context manager (tracks ref count for safe eviction)
-        async with self._chat_locks.acquire(msg.chat_id):
-            # Track message processing time
-            start_time = time.perf_counter()
+        return await self._handle_message_inner(msg, channel=channel, stream_callback=stream_callback, correlation_id=correlation_id)
 
-            # Snapshot generation for write-conflict detection
+    async def _handle_message_inner(
+        self,
+        msg: IncomingMessage,
+        channel: "BaseChannel | None" = None,
+        stream_callback: StreamCallback | None = None,
+        correlation_id: str | None = None,
+    ) -> str | None:
+        """
+        Core message processing: acquire lock, enqueue, run ReAct loop, track metrics.
+
+        Called by ``handle_message()`` after validation, dedup, and rate limiting pass.
+        Separated so the processing pipeline can be tested in isolation.
+        """
+        async with self._chat_locks.acquire(msg.chat_id):
+            start_time = time.perf_counter()
             generation = self._db.get_generation(msg.chat_id)
 
-            # Enqueue message for crash recovery (before processing)
             if self._message_queue:
                 await self._message_queue.enqueue(msg)
 
-            # Reset per-request routing flag
             _routing_show_errors_var.set(True)
 
             try:
                 result = await self._process(msg, channel=channel, stream_callback=stream_callback, generation=generation)
-                # Mark message as completed after successful processing
+
                 if self._message_queue:
                     await self._message_queue.complete(msg.message_id)
 
-                # Track message processing latency
                 processing_time = time.perf_counter() - start_time
                 self._metrics.track_message_latency(processing_time)
                 self._metrics.track_chat_message(msg.chat_id)
 
-                # Update queue depth if available
                 if self._message_queue:
                     queue_depth = await self._message_queue.get_pending_count()
                     self._metrics.update_queue_depth(queue_depth)
 
-                # Update active chat count from LRU cache
                 self._metrics.update_active_chat_count(len(self._chat_locks))
 
                 log.info(
@@ -586,7 +592,6 @@ class Bot:
                 )
                 return result
             except Exception as exc:
-                # Log error but leave message pending for crash recovery
                 log.error(
                     "Message processing failed for %s: %s",
                     msg.message_id,
@@ -599,7 +604,6 @@ class Bot:
                     },
                 )
 
-                # Suppress error to channel if routing rule disables it
                 if not _routing_show_errors_var.get():
                     log.info(
                         "Error suppressed (showErrors=false) for message %s",
@@ -607,11 +611,8 @@ class Bot:
                     )
                     return None
 
-                # Re-raise to let caller handle the error
-                # Message stays in pending state for recovery
                 raise
             finally:
-                # Always clear correlation ID when done
                 clear_correlation_id()
 
     # ── scheduled task processing ──────────────────────────────────────────
