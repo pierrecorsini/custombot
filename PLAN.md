@@ -132,7 +132,7 @@ gaps, and operational resilience not addressed in Phases 1–9.
 
 - [x] **Add test for `chat_stream()` early-exception handling** — Simulate a stream that raises immediately on `create()` (before any chunks). Verify that: (a) no `UnboundLocalError` is raised from the `finally` block, (b) the error is classified and raised as an `LLMError`, (c) the circuit breaker records a failure. (`tests/unit/test_llm.py`)
 
-- [ ] **Add test for `wire_llm_clients()` resilience — one failing skill doesn't break others** — Register 3 skills where the middle one's `wire_llm()` raises an exception. Verify that: (a) the other 2 skills still receive the LLM client, (b) the error is logged, (c) no exception propagates from `wire_llm_clients()`. (`tests/unit/test_builder.py`)
+- [x] **Add test for `wire_llm_clients()` resilience — one failing skill doesn't break others** — Register 3 skills where the middle one's `wire_llm()` raises an exception. Verify that: (a) the other 2 skills still receive the LLM client, (b) the error is logged, (c) no exception propagates from `wire_llm_clients()`. (`tests/unit/test_builder.py`)
 
 - [ ] **Add test for `DeduplicationService` graceful degradation on DB failure** — Mock the database to raise `DatabaseError` on `message_exists()`. Verify that: (a) `is_inbound_duplicate()` returns `False` (allowing the message through), (b) a warning is logged, (c) no exception propagates. (`tests/unit/test_dedup.py`)
 

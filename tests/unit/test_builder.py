@@ -20,6 +20,8 @@ import pytest
 
 from src.builder import BotComponents, _build_bot
 from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
+from src.skills import SkillRegistry
+from src.skills.base import BaseSkill
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -318,3 +320,55 @@ class TestBotComponentsDataclass:
         assert bc.db is db
         assert bc.vector_memory is vm
         assert bc.project_store is ps
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: wire_llm_clients() resilience
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestWireLLMClientsResilience:
+    """Verify wire_llm_clients() is resilient to per-skill wiring failures."""
+
+    def test_one_failing_skill_does_not_break_others(self, caplog):
+        """When a skill's wire_llm() raises, other skills still get wired."""
+        registry = SkillRegistry()
+        mock_llm = MagicMock()
+
+        # Skill A — needs LLM, wires successfully
+        skill_a = MagicMock(spec=BaseSkill)
+        skill_a.name = "skill_a"
+        skill_a.needs_llm.return_value = True
+        skill_a.wire_llm = MagicMock()
+
+        # Skill B — needs LLM, but wire_llm raises
+        skill_b = MagicMock(spec=BaseSkill)
+        skill_b.name = "skill_b"
+        skill_b.needs_llm.return_value = True
+        skill_b.wire_llm = MagicMock(side_effect=RuntimeError("wiring exploded"))
+
+        # Skill C — needs LLM, wires successfully
+        skill_c = MagicMock(spec=BaseSkill)
+        skill_c.name = "skill_c"
+        skill_c.needs_llm.return_value = True
+        skill_c.wire_llm = MagicMock()
+
+        registry.register(skill_a)
+        registry.register(skill_b)
+        registry.register(skill_c)
+
+        with caplog.at_level("ERROR", logger="src.skills"):
+            # (c) No exception propagates from wire_llm_clients()
+            registry.wire_llm_clients(mock_llm)
+
+        # (a) Skills A and C still receive the LLM client
+        skill_a.wire_llm.assert_called_once_with(mock_llm)
+        skill_c.wire_llm.assert_called_once_with(mock_llm)
+
+        # Skill B was attempted despite raising
+        skill_b.wire_llm.assert_called_once_with(mock_llm)
+
+        # (b) The error is logged with the failing skill name
+        error_msgs = [r.message for r in caplog.records]
+        assert any("skill_b" in msg for msg in error_msgs)
+        assert any("Failed to wire" in msg for msg in error_msgs)
