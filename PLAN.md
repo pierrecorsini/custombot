@@ -202,7 +202,7 @@ addressed in Phases 1–10.
 
 ### Test Coverage
 
-- [ ] **Add integration test for config hot-reload applying changes to a running bot** — `ConfigWatcher` polls for changes and `ConfigChangeApplier` applies them, but there's no integration test verifying that a config change (e.g., changing `max_tool_iterations` from 10 to 5) takes effect on the next message without restart. (`tests/integration/test_application_lifecycle.py`)
+- [x] **Add integration test for config hot-reload applying changes to a running bot** — `ConfigWatcher` polls for changes and `ConfigChangeApplier` applies them, but there's no integration test verifying that a config change (e.g., changing `max_tool_iterations` from 10 to 5) takes effect on the next message without restart. (`tests/integration/test_application_lifecycle.py`)
 
 - [ ] **Add chaos test for concurrent `save_messages_batch` and `compress_chat_history`** — Both operations acquire per-chat locks, but `compress_chat_history` is triggered asynchronously after writes (in `save_message` and `save_messages_batch`). There's a window where a write triggers compression, which then rewrites the file while another write is pending. Add a test that exercises this race: write a batch, then immediately write another batch, and verify no data loss. (`tests/unit/test_db.py`)
 

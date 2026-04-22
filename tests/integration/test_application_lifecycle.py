@@ -25,10 +25,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.app import Application
-from src.bot import PreflightResult
+from src.bot import BotConfig, PreflightResult
 from src.builder import BotComponents
 from src.channels.base import BaseChannel, IncomingMessage
-from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
+from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig, save_config
+from src.config.config_watcher import ConfigChangeApplier, ConfigWatcher
 from src.shutdown import GracefulShutdown
 
 
@@ -915,3 +916,295 @@ class TestApplicationRunShutdownDuringQRWait:
         mock_components.bot.preflight_check.assert_not_called()
         mock_components.bot.handle_message.assert_not_called()
         mock_channel.send_message.assert_not_called()
+
+
+class TestConfigHotReload:
+    """Integration test for ConfigWatcher hot-reload applying changes to live components.
+
+    Exercises the full hot-reload pipeline: ConfigWatcher detects a config
+    file change via mtime polling → loads and validates the new config →
+    ConfigChangeApplier diffs old vs new → safe fields are applied to
+    live components (Bot, Channel, LLM) without restart.
+    """
+
+    @pytest.mark.asyncio
+    async def test_max_tool_iterations_change_applied_without_restart(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Changing ``max_tool_iterations`` in config.json is detected by the
+        watcher and applied to the bot's ``BotConfig`` without restart.
+
+        Verifies:
+            a) ConfigWatcher detects the file change via mtime polling
+            b) ConfigChangeApplier rebuilds BotConfig with the new value
+            c) The bot instance reflects the new config immediately
+        """
+        # ── Arrange ──
+        config_path = tmp_path / "config.json"
+
+        initial_config = Config(
+            llm=LLMConfig(
+                model="gpt-4o",
+                base_url="https://api.openai.com/v1",
+                api_key="sk-test-hot-reload",
+                max_tool_iterations=10,
+            ),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+            ),
+            skills_auto_load=False,
+        )
+        save_config(initial_config, config_path)
+
+        # Mock bot with a real BotConfig that the applier will replace
+        mock_bot = MagicMock()
+        mock_bot._cfg = BotConfig(
+            max_tool_iterations=10,
+            memory_max_history=100,
+            system_prompt_prefix="",
+            stream_response=False,
+        )
+
+        mock_channel = MagicMock()
+        mock_channel.apply_channel_config = MagicMock()
+
+        mock_llm = MagicMock()
+        mock_llm._cfg = initial_config.llm
+
+        shutdown_mgr = GracefulShutdown(timeout=30.0)
+        reconfigure_logging = MagicMock()
+
+        # Reloaded config is stored here for the watcher's internal state
+        reloaded_config = initial_config
+
+        applier = ConfigChangeApplier(
+            app_config=reloaded_config,
+            bot=mock_bot,
+            channel=mock_channel,
+            llm=mock_llm,
+            shutdown_mgr=shutdown_mgr,
+            reconfigure_logging=reconfigure_logging,
+        )
+
+        watcher = ConfigWatcher(
+            config_path=config_path,
+            current_config=initial_config,
+            applier=applier,
+            poll_interval=0.05,
+            debounce=0.0,
+        )
+
+        watcher.start()
+        try:
+            # Let the watcher settle (one poll cycle)
+            await asyncio.sleep(0.1)
+
+            # Sanity: bot still has the original value
+            assert mock_bot._cfg.max_tool_iterations == 10
+
+            # ── Act: write updated config to disk ──
+            updated_config = Config(
+                llm=LLMConfig(
+                    model="gpt-4o",
+                    base_url="https://api.openai.com/v1",
+                    api_key="sk-test-hot-reload",
+                    max_tool_iterations=5,
+                ),
+                whatsapp=WhatsAppConfig(
+                    provider="neonize",
+                    neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+                ),
+                skills_auto_load=False,
+            )
+            save_config(updated_config, config_path)
+
+            # Wait for the watcher to detect, load, validate, and apply
+            await asyncio.sleep(0.5)
+
+            # ── Assert ──
+            assert mock_bot._cfg.max_tool_iterations == 5, (
+                f"Expected max_tool_iterations=5 after hot-reload, "
+                f"got {mock_bot._cfg.max_tool_iterations}"
+            )
+        finally:
+            await watcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_temperature_change_applied_to_llm_without_restart(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Changing ``llm.temperature`` in config.json is applied to the
+        LLM client's config reference without restart.
+        """
+        # ── Arrange ──
+        config_path = tmp_path / "config.json"
+
+        initial_config = Config(
+            llm=LLMConfig(
+                model="gpt-4o",
+                base_url="https://api.openai.com/v1",
+                api_key="sk-test-hot-reload",
+                temperature=0.7,
+            ),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+            ),
+            skills_auto_load=False,
+        )
+        save_config(initial_config, config_path)
+
+        mock_bot = MagicMock()
+        mock_bot._cfg = BotConfig(
+            max_tool_iterations=10,
+            memory_max_history=100,
+            system_prompt_prefix="",
+            stream_response=False,
+        )
+
+        mock_channel = MagicMock()
+        mock_channel.apply_channel_config = MagicMock()
+
+        mock_llm = MagicMock()
+        mock_llm._cfg = initial_config.llm
+
+        shutdown_mgr = GracefulShutdown(timeout=30.0)
+        reconfigure_logging = MagicMock()
+
+        applier = ConfigChangeApplier(
+            app_config=initial_config,
+            bot=mock_bot,
+            channel=mock_channel,
+            llm=mock_llm,
+            shutdown_mgr=shutdown_mgr,
+            reconfigure_logging=reconfigure_logging,
+        )
+
+        watcher = ConfigWatcher(
+            config_path=config_path,
+            current_config=initial_config,
+            applier=applier,
+            poll_interval=0.05,
+            debounce=0.0,
+        )
+
+        watcher.start()
+        try:
+            await asyncio.sleep(0.1)
+
+            # ── Act: change temperature ──
+            updated_config = Config(
+                llm=LLMConfig(
+                    model="gpt-4o",
+                    base_url="https://api.openai.com/v1",
+                    api_key="sk-test-hot-reload",
+                    temperature=0.3,
+                ),
+                whatsapp=WhatsAppConfig(
+                    provider="neonize",
+                    neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+                ),
+                skills_auto_load=False,
+            )
+            save_config(updated_config, config_path)
+
+            await asyncio.sleep(0.5)
+
+            # ── Assert: LLM config was updated ──
+            assert mock_llm._cfg.temperature == 0.3, (
+                f"Expected temperature=0.3 after hot-reload, "
+                f"got {mock_llm._cfg.temperature}"
+            )
+        finally:
+            await watcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_destructive_field_change_not_applied(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Changing a destructive field (e.g., ``llm.model``) is NOT applied
+        to live components — only a warning is logged.
+        """
+        # ── Arrange ──
+        config_path = tmp_path / "config.json"
+
+        initial_config = Config(
+            llm=LLMConfig(
+                model="gpt-4o",
+                base_url="https://api.openai.com/v1",
+                api_key="sk-test-hot-reload",
+            ),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+            ),
+            skills_auto_load=False,
+        )
+        save_config(initial_config, config_path)
+
+        mock_bot = MagicMock()
+        mock_bot._cfg = BotConfig(
+            max_tool_iterations=10,
+            memory_max_history=100,
+            system_prompt_prefix="",
+            stream_response=False,
+        )
+
+        mock_channel = MagicMock()
+        mock_channel.apply_channel_config = MagicMock()
+
+        mock_llm = MagicMock()
+        mock_llm._cfg = initial_config.llm
+
+        shutdown_mgr = GracefulShutdown(timeout=30.0)
+        reconfigure_logging = MagicMock()
+
+        applier = ConfigChangeApplier(
+            app_config=initial_config,
+            bot=mock_bot,
+            channel=mock_channel,
+            llm=mock_llm,
+            shutdown_mgr=shutdown_mgr,
+            reconfigure_logging=reconfigure_logging,
+        )
+
+        watcher = ConfigWatcher(
+            config_path=config_path,
+            current_config=initial_config,
+            applier=applier,
+            poll_interval=0.05,
+            debounce=0.0,
+        )
+
+        watcher.start()
+        try:
+            await asyncio.sleep(0.1)
+
+            original_model = mock_llm._cfg.model
+
+            # ── Act: change destructive field (llm.model) ──
+            updated_config = Config(
+                llm=LLMConfig(
+                    model="gpt-3.5-turbo",
+                    base_url="https://api.openai.com/v1",
+                    api_key="sk-test-hot-reload",
+                ),
+                whatsapp=WhatsAppConfig(
+                    provider="neonize",
+                    neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+                ),
+                skills_auto_load=False,
+            )
+            save_config(updated_config, config_path)
+
+            await asyncio.sleep(0.5)
+
+            # ── Assert: model was NOT changed on the LLM client ──
+            # The applier only warns about destructive changes
+            assert mock_llm._cfg.model == original_model
+        finally:
+            await watcher.stop()
