@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 from src.core.context_builder import ChatMessage, build_context
 from src.core.topic_cache import TopicCache, parse_meta
+from src.memory import DEFAULT_AGENTS_MD
 
 log = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ class ContextAssembler:
             memory_content, "read_memory", chat_id, default=None,
         )
         agents_content = self._handle_gather_result(
-            agents_content, "read_agents_md", chat_id, default="",
+            agents_content, "read_agents_md", chat_id, default=DEFAULT_AGENTS_MD,
         )
         project_context = self._handle_gather_result(
             project_context, "get_project_context", chat_id, default=None,

@@ -74,6 +74,10 @@ You can discover and install new skills using:
 - `skills_remove <name>` — Remove a skill
 """
 
+# Public alias so callers (e.g. ContextAssembler) can substitute the
+# canonical default when AGENTS.md hasn't been seeded yet.
+DEFAULT_AGENTS_MD: str = _DEFAULT_AGENTS_MD
+
 
 class Memory:
     """File-based per-chat memory manager."""
@@ -83,6 +87,24 @@ class Memory:
         # LRU-bounded caches to prevent unbounded memory growth with many chats
         self._memory_cache: LRUDict = LRUDict(max_size=MAX_LRU_CACHE_SIZE)
         self._agents_cache: LRUDict = LRUDict(max_size=MAX_LRU_CACHE_SIZE)
+        # Cache effectiveness counters (exposed via PerformanceMetrics)
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
+
+    # ── cache tracking helpers ─────────────────────────────────────────────
+
+    @staticmethod
+    def _track_cache_event(hit: bool) -> None:
+        """Report a cache hit or miss to the performance metrics collector."""
+        try:
+            from src.monitoring.performance import get_metrics_collector
+
+            if hit:
+                get_metrics_collector().track_memory_cache_hit()
+            else:
+                get_metrics_collector().track_memory_cache_miss()
+        except Exception:
+            pass
 
     # ── internal ───────────────────────────────────────────────────────────
 
@@ -172,7 +194,13 @@ class Memory:
         if mtime is None:
             return None
         if content is None:
+            # Cache hit — mtime unchanged, reuse cached content
+            self._cache_hits += 1
+            self._track_cache_event(hit=True)
             return cached[1] or None
+        # Cache miss — file changed or not yet cached
+        self._cache_misses += 1
+        self._track_cache_event(hit=False)
         content = content.strip()
         self._memory_cache[chat_id] = (mtime, content)
         return content or None
@@ -382,13 +410,29 @@ class Memory:
                 f"Run ensure_workspace() first or check workspace integrity."
             )
         if content is None:
+            # Cache hit — mtime unchanged
+            self._cache_hits += 1
+            self._track_cache_event(hit=True)
             return cached[1]
+        # Cache miss — file changed or not yet cached
+        self._cache_misses += 1
+        self._track_cache_event(hit=False)
         self._agents_cache[chat_id] = (mtime, content)
         return content
 
     def workspace_path(self, chat_id: str) -> Path:
         """Return the isolated sandbox Path for this chat."""
         return self._chat_dir(chat_id)
+
+    @property
+    def cache_hits(self) -> int:
+        """Total number of cache hits across memory and agents caches."""
+        return self._cache_hits
+
+    @property
+    def cache_misses(self) -> int:
+        """Total number of cache misses across memory and agents caches."""
+        return self._cache_misses
 
     def log_recovery_event(
         self,
