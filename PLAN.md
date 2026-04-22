@@ -134,7 +134,7 @@ gaps, and operational resilience not addressed in Phases 1–9.
 
 - [x] **Add test for `wire_llm_clients()` resilience — one failing skill doesn't break others** — Register 3 skills where the middle one's `wire_llm()` raises an exception. Verify that: (a) the other 2 skills still receive the LLM client, (b) the error is logged, (c) no exception propagates from `wire_llm_clients()`. (`tests/unit/test_builder.py`)
 
-- [ ] **Add test for `DeduplicationService` graceful degradation on DB failure** — Mock the database to raise `DatabaseError` on `message_exists()`. Verify that: (a) `is_inbound_duplicate()` returns `False` (allowing the message through), (b) a warning is logged, (c) no exception propagates. (`tests/unit/test_dedup.py`)
+- [x] **Add test for `DeduplicationService` graceful degradation on DB failure** — Mock the database to raise `DatabaseError` on `message_exists()`. Verify that: (a) `is_inbound_duplicate()` returns `False` (allowing the message through), (b) a warning is logged, (c) no exception propagates. (`tests/unit/test_dedup.py`)
 
 - [ ] **Add test for `_chat_generations` bounded growth** — Add test that verifies: (a) `get_generation()` returns 0 for unknown chat IDs, (b) `_bump_generation()` increments correctly, (c) after exceeding a maximum size, oldest entries are evicted. This prevents silent memory leak in long-running bots. (`tests/unit/test_db.py`)
 
