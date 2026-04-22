@@ -118,7 +118,7 @@ gaps, and operational resilience not addressed in Phases 1–9.
 
 - [x] **Add `name` field sanitization in `Database._build_message_record()`** — The `name` parameter (sender name or tool name) is persisted directly to JSONL without sanitization. While not as dangerous as user content, a malicious or malformed sender name could contain control characters or excessively long strings. Truncate `name` to a reasonable length (e.g., 200 chars) and strip control characters before persisting. (`src/db/db.py:871-916`)
 
-- [ ] **Add `HEALTH_HMAC_SECRET` masking in health check logs** — When HMAC authentication fails, the `Authorization` header value is logged at DEBUG level by aiohttp. If the secret is accidentally sent in the wrong field, it could appear in logs. Add a log filter or explicit header stripping in the middleware to ensure the HMAC token is never logged in full. (`src/health/server.py:218-240`)
+- [x] **Add `HEALTH_HMAC_SECRET` masking in health check logs** — When HMAC authentication fails, the `Authorization` header value is logged at DEBUG level by aiohttp. If the secret is accidentally sent in the wrong field, it could appear in logs. Add a log filter or explicit header stripping in the middleware to ensure the HMAC token is never logged in full. (`src/health/server.py:218-240`)
 
 ### Observability & Monitoring
 

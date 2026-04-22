@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
 from threading import Lock
@@ -147,6 +148,59 @@ def _load_hmac_secret() -> str | None:
     return secret if secret else None
 
 
+def _mask_hmac_header(value: str) -> str:
+    """Redact the HMAC token portion of an Authorization header.
+
+    Keeps the scheme prefix (``HMAC-SHA256``) so log analysts can see the
+    authentication *method* without the secret material.
+    """
+    if value.startswith("HMAC-SHA256 "):
+        return "HMAC-SHA256 [REDACTED]"
+    # Non-HMAC auth header — still redact the credential portion
+    if len(value) > 12:
+        return value[:12] + "...[REDACTED]"
+    return "[REDACTED]"
+
+
+class _SecretRedactingFilter(logging.Filter):
+    """Log filter that redacts HMAC credential tokens and the raw secret from log output.
+
+    Defense-in-depth: even if a log statement accidentally includes the
+    ``Authorization`` header value or the raw ``HEALTH_HMAC_SECRET``,
+    the credential portion is replaced with ``[REDACTED]`` before the
+    record reaches any handler.
+    """
+
+    _HMAC_PATTERN = re.compile(r"HMAC-SHA256\s+\S+")
+
+    def __init__(self, secret: str | None = None) -> None:
+        super().__init__()
+        # Build a regex that matches the raw secret value so that even if it
+        # appears in an unexpected log field (query string, custom header,
+        # aiohttp DEBUG access log) it is scrubbed.
+        self._secret_pattern: re.Pattern[str] | None = None
+        if secret and len(secret) >= 4:
+            escaped = re.escape(secret)
+            self._secret_pattern = re.compile(escaped)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = self._redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._redact(a) for a in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: self._redact(v) for k, v in record.args.items()}
+        return True
+
+    def _redact(self, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        value = self._HMAC_PATTERN.sub("HMAC-SHA256 [REDACTED]", value)
+        if self._secret_pattern is not None:
+            value = self._secret_pattern.sub("[REDACTED]", value)
+        return value
+
+
 def _verify_hmac(request: Any, secret: str) -> bool:
     """Verify HMAC-SHA256 signature on an incoming request.
 
@@ -216,7 +270,17 @@ def _create_hmac_middleware(secret: str) -> Any:
 
     @web.middleware
     async def hmac_middleware(request: web.Request, handler: Any) -> Any:
-        if _verify_hmac(request, secret):
+        # Capture and verify the original header before masking it.
+        auth_value = request.headers.get("Authorization")
+        authenticated = auth_value is not None and _verify_hmac(request, secret)
+
+        # Mask the Authorization header in-place so downstream logging,
+        # access-log middleware, and error handlers never see the raw
+        # HMAC token in full.
+        if auth_value is not None:
+            request.headers["Authorization"] = _mask_hmac_header(auth_value)
+
+        if authenticated:
             return await handler(request)
 
         # Unauthenticated: return minimal response based on path
@@ -1257,6 +1321,16 @@ class HealthServer:
             limit,
             int(window),
         )
+
+        # Defense-in-depth: install a log filter that redacts any HMAC
+        # credential tokens from log output.  Applied to the module
+        # logger *and* aiohttp's internal loggers so that DEBUG-level
+        # access logging never leaks the raw Authorization header.
+        if hmac_secret:
+            _redacting = _SecretRedactingFilter(secret=hmac_secret)
+            log.addFilter(_redacting)
+            for _logger_name in ("aiohttp.access", "aiohttp.server"):
+                logging.getLogger(_logger_name).addFilter(_redacting)
 
     async def stop(self) -> None:
         """Stop the health check HTTP server."""
