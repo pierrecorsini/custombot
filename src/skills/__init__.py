@@ -85,7 +85,11 @@ class SkillRegistry:
         wired = 0
         for skill in self._skills.values():
             if skill.needs_llm():
-                skill.wire_llm(llm)
+                try:
+                    skill.wire_llm(llm)
+                except Exception:
+                    log.exception("Failed to wire LLM client into skill %r", skill.name)
+                    continue
                 wired += 1
         if wired:
             log.debug("Wired LLM client into %d skill(s)", wired)
