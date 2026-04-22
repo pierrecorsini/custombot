@@ -560,7 +560,7 @@ class Bot:
             _routing_show_errors_var.set(True)
 
             try:
-                result = await self._process(msg, channel=channel, stream_callback=stream_callback)
+                result = await self._process(msg, channel=channel, stream_callback=stream_callback, generation=generation)
                 # Mark message as completed after successful processing
                 if self._message_queue:
                     await self._message_queue.complete(msg.message_id)
@@ -845,6 +845,7 @@ class Bot:
         msg: IncomingMessage,
         channel: "BaseChannel | None" = None,
         stream_callback: StreamCallback | None = None,
+        generation: int = 0,
     ) -> str:
         log.debug(
             "Starting _process for chat %s",

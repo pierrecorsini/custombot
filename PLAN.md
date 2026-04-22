@@ -90,7 +90,7 @@ gaps, and operational resilience not addressed in Phases 1–9.
 
 - [x] **Fix duplicate `RateLimiter()` instantiation in `Bot.__init__`** — `self._rate_limiter` is assigned twice on consecutive lines (189 and 190), creating an orphaned `RateLimiter` instance that is immediately garbage-collected. Remove the duplicate line. (`src/bot.py:189-190`)
 
-- [ ] **Fix `generation` variable undefined in `Bot._process()`** — `generation` is captured at line 554 via `self._db.get_generation(msg.chat_id)` inside the incorrectly-indented block. When the indentation bug is fixed, `generation` must be moved to `_process()` or `_build_turn_context()` so it is available at line 927 where `check_generation()` is called. Without this, `NameError` will be raised at runtime, or the write-conflict detection is silently skipped. (`src/bot.py:554, 927`)
+- [x] **Fix `generation` variable undefined in `Bot._process()`** — `generation` is captured at line 554 via `self._db.get_generation(msg.chat_id)` inside the incorrectly-indented block. When the indentation bug is fixed, `generation` must be moved to `_process()` or `_build_turn_context()` so it is available at line 927 where `check_generation()` is called. Without this, `NameError` will be raised at runtime, or the write-conflict detection is silently skipped. (`src/bot.py:554, 927`)
 
 ### Error Handling & Resilience
 
