@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from src.health.checks import (
     check_database,
     check_disk_usage,
+    check_disk_space_health,
     check_llm_credentials,
     check_llm_logs,
     check_neonize,
@@ -156,6 +157,10 @@ def _verify_hmac(request: Any, secret: str) -> bool:
     Where ``signature = HMAC-SHA256(secret, f"{timestamp}{method}{path}")``.
     Uses ``hmac.compare_digest`` for timing-safe comparison.
     Rejects timestamps older than ``_HMAC_MAX_SKEW_SECONDS``.
+
+    Both the expected and provided signatures are normalized to a fixed
+    length before comparison to ensure constant-time behaviour regardless
+    of input length differences.
     """
     from aiohttp import web
 
@@ -184,7 +189,14 @@ def _verify_hmac(request: Any, secret: str) -> bool:
         secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256
     ).hexdigest()
 
-    if not hmac.compare_digest(signature, expected):
+    # Normalize to equal-length strings before comparison so that
+    # hmac.compare_digest operates in constant time regardless of length
+    # differences between the expected and provided signatures.
+    _fixed_len = 128  # SHA-256 hex digest is 64 chars; pad generously
+    expected_padded = expected.ljust(_fixed_len)
+    signature_padded = signature.ljust(_fixed_len)
+
+    if not hmac.compare_digest(expected_padded, signature_padded):
         log.warning("HMAC verification failed: invalid signature")
         return False
 
@@ -292,6 +304,9 @@ def _build_prometheus_output(
     llm_log_dir_bytes: int | None = None,
     db_size_bytes: int | None = None,
     workspace_size_bytes: int | None = None,
+    disk_free_bytes: int | None = None,
+    disk_total_bytes: int | None = None,
+    per_chat_tokens: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the full Prometheus text exposition from metrics data."""
     lines: list[str] = []
@@ -329,6 +344,29 @@ def _build_prometheus_output(
             token_usage.get("request_count", 0),
         )
     )
+
+    # ── Per-Chat Token Usage ────────────────────────────────────────────────
+    if per_chat_tokens:
+        for entry in per_chat_tokens:
+            chat_id = entry.get("chat_id", "unknown")
+            lines.append(
+                _format_prometheus_metric(
+                    "custombot_chat_prompt_tokens",
+                    "Per-chat prompt tokens consumed (top chats)",
+                    "counter",
+                    entry.get("prompt", 0),
+                    labels={"chat_id": chat_id},
+                )
+            )
+            lines.append(
+                _format_prometheus_metric(
+                    "custombot_chat_completion_tokens",
+                    "Per-chat completion tokens consumed (top chats)",
+                    "counter",
+                    entry.get("completion", 0),
+                    labels={"chat_id": chat_id},
+                )
+            )
 
     # ── Message Metrics ─────────────────────────────────────────────────────
     msg_lat = snapshot.message_latency
@@ -583,6 +621,36 @@ def _build_prometheus_output(
             )
         )
 
+    # ── Error Rate Trends ────────────────────────────────────────────────────
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_errors_total",
+            "Total errors recorded since startup",
+            "counter",
+            snapshot.total_error_count,
+        )
+    )
+    for ew in snapshot.error_windows:
+        window_label = f"{ew.window_seconds // 60}m"
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_error_rate",
+                f"Errors in the last {window_label}",
+                "gauge",
+                ew.error_count,
+                labels={"window": window_label},
+            )
+        )
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_error_rate_per_minute",
+                f"Average errors per minute over the last {window_label}",
+                "gauge",
+                round(ew.error_rate_per_minute, 4),
+                labels={"window": window_label},
+            )
+        )
+
     # ── LLM Log Directory Size ──────────────────────────────────────────────
     if llm_log_dir_bytes is not None:
         lines.append(
@@ -611,6 +679,26 @@ def _build_prometheus_output(
                 "Total size of workspace directory in bytes",
                 "gauge",
                 workspace_size_bytes,
+            )
+        )
+
+    # ── Filesystem Disk Space ──────────────────────────────────────────────
+    if disk_free_bytes is not None:
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_disk_free_bytes",
+                "Available disk space on the workspace partition in bytes",
+                "gauge",
+                disk_free_bytes,
+            )
+        )
+    if disk_total_bytes is not None:
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_disk_total_bytes",
+                "Total disk capacity on the workspace partition in bytes",
+                "gauge",
+                disk_total_bytes,
             )
         )
 
@@ -707,6 +795,49 @@ def _build_circuit_breaker_prometheus_output(circuit_breaker: Any) -> str:
             "Total consecutive LLM failures recorded by the circuit breaker",
             "counter",
             circuit_breaker.failure_count,
+        )
+    )
+    return "".join(lines)
+
+
+def _build_dedup_prometheus_output(dedup_stats: Any) -> str:
+    """Build Prometheus metrics for the unified dedup service."""
+    if dedup_stats is None:
+        return ""
+
+    stats = dedup_stats.to_dict()
+    lines: list[str] = []
+
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_dedup_inbound_hits_total",
+            "Number of duplicate inbound messages detected by message-id dedup",
+            "counter",
+            stats.get("inbound_hits", 0),
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_dedup_inbound_misses_total",
+            "Number of unique inbound messages passed by message-id dedup",
+            "counter",
+            stats.get("inbound_misses", 0),
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_dedup_outbound_hits_total",
+            "Number of duplicate outbound messages suppressed by content-hash dedup",
+            "counter",
+            stats.get("outbound_hits", 0),
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_dedup_outbound_misses_total",
+            "Number of unique outbound messages delivered (content-hash dedup)",
+            "counter",
+            stats.get("outbound_misses", 0),
         )
     )
     return "".join(lines)
@@ -878,6 +1009,19 @@ class HealthServer:
                     )
                 )
 
+            # Filesystem-level free disk space check
+            try:
+                components.append(check_disk_space_health(self._workspace_dir))
+            except Exception as e:
+                log.debug("Disk space health check error: %s", e)
+                components.append(
+                    ComponentHealth(
+                        name="disk_space",
+                        status=HealthStatus.DEGRADED,
+                        message=f"Disk space check failed: {type(e).__name__}",
+                    )
+                )
+
             # Workspace monitor cleanup stats
             try:
                 from src.monitoring.workspace_monitor import check_workspace_health
@@ -954,6 +1098,20 @@ class HealthServer:
         if reasons:
             body["reasons"] = reasons
 
+        # Include WhatsApp connection status for headless deployment monitoring
+        if self._neonize_backend is not None:
+            body["whatsapp"] = {
+                "connected": self._neonize_backend.is_connected,
+                "ready": self._neonize_backend.is_ready,
+            }
+            if self._neonize_backend.is_connected:
+                body["whatsapp"]["status"] = "connected"
+            else:
+                body["whatsapp"]["status"] = (
+                    "waiting-for-qr" if not self._neonize_backend.is_ready
+                    else "disconnected"
+                )
+
         return web.json_response(body, status=200 if ready else 503)
 
     async def _handle_version(self, request: Any) -> Any:
@@ -994,6 +1152,8 @@ class HealthServer:
             # Collect disk usage for database and workspace
             db_size_bytes: int | None = None
             workspace_size_bytes: int | None = None
+            disk_free_bytes: int | None = None
+            disk_total_bytes: int | None = None
             if self._workspace_dir:
                 from pathlib import Path
 
@@ -1004,13 +1164,48 @@ class HealthServer:
                 db_size_bytes = _recursive_dir_size(data_dir) if data_dir.exists() else 0
                 workspace_size_bytes = _recursive_dir_size(ws)
 
+                # Filesystem-level free/total via existing disk utility
+                try:
+                    from src.utils.disk import check_disk_space
+
+                    ds_result = check_disk_space(ws)
+                    disk_free_bytes = ds_result.free_bytes
+                    disk_total_bytes = ds_result.total_bytes
+                except OSError:
+                    pass
+
             output = _build_prometheus_output(
-                token_usage, snapshot, llm_log_bytes, db_size_bytes, workspace_size_bytes
+                token_usage, snapshot, llm_log_bytes, db_size_bytes,
+                workspace_size_bytes, disk_free_bytes, disk_total_bytes,
             )
+            # Per-chat token metrics (if token_usage object has get_top_chats)
+            per_chat = None
+            if self._token_usage and hasattr(self._token_usage, "get_top_chats"):
+                per_chat = self._token_usage.get_top_chats()
+            if per_chat:
+                for entry in per_chat:
+                    chat_id = entry.get("chat_id", "unknown")
+                    output += _format_prometheus_metric(
+                        "custombot_chat_prompt_tokens",
+                        "Per-chat prompt tokens consumed (top chats)",
+                        "counter",
+                        entry.get("prompt", 0),
+                        labels={"chat_id": chat_id},
+                    )
+                    output += _format_prometheus_metric(
+                        "custombot_chat_completion_tokens",
+                        "Per-chat completion tokens consumed (top chats)",
+                        "counter",
+                        entry.get("completion", 0),
+                        labels={"chat_id": chat_id},
+                    )
             output += _build_scheduler_prometheus_output(self._scheduler)
             # Circuit breaker metrics (via public Bot accessor)
             cb = self._bot.get_llm_status() if self._bot is not None else None
             output += _build_circuit_breaker_prometheus_output(cb)
+            # Dedup service metrics (via public Bot accessor)
+            dedup_stats = self._bot.get_dedup_stats() if self._bot is not None else None
+            output += _build_dedup_prometheus_output(dedup_stats)
             return web.Response(
                 text=output,
                 content_type="text/plain",

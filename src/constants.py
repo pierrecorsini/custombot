@@ -350,6 +350,28 @@ OUTBOUND_DEDUP_TTL_SECONDS: float = 60.0
 OUTBOUND_DEDUP_MAX_SIZE: int = 500
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Health Check — Disk Space
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Minimum free disk space (MB) for the health endpoint to report HEALTHY.
+# Below this threshold the component status is DEGRADED, signalling that
+# writes to JSONL, vector memory, or the message queue may start failing.
+HEALTH_DISK_FREE_THRESHOLD_MB: float = 500.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Config Hot-Reload Watcher
+# ─────────────────────────────────────────────────────────────────────────────
+
+# How often (seconds) the config watcher polls config.json for mtime changes.
+# Longer intervals reduce filesystem syscalls; shorter intervals apply changes
+# faster after the file is saved.
+CONFIG_WATCH_INTERVAL_SECONDS: float = 5.0
+
+# Minimum interval (seconds) between mtime checks. Prevents redundant stat()
+# calls when the watch loop fires faster than expected.
+CONFIG_WATCH_DEBOUNCE_SECONDS: float = 2.0
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Thread Pool Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -360,3 +382,28 @@ OUTBOUND_DEDUP_MAX_SIZE: int = 500
 # (min(32, os.cpu_count()+4)) can saturate, causing to_thread calls to queue.
 # 16 workers balances concurrency against thread overhead.
 DEFAULT_THREAD_POOL_WORKERS: int = 16
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conversation History Compression
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Number of message lines (excluding header) in a chat's JSONL file that
+# triggers automatic compression.  When exceeded, the oldest messages are
+# archived and replaced with a summary stored alongside the JSONL file.
+# This keeps disk I/O and reverse-seek latency bounded for long-lived chats.
+COMPRESSION_LINE_THRESHOLD: int = 5000
+
+# Number of recent message lines to retain after compression.  The summary
+# record plus these messages form the new file content.  Must be well below
+# COMPRESSION_LINE_THRESHOLD to prevent immediate re-compression.
+COMPRESSION_KEEP_RECENT: int = 500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool Result Persistence Limits
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum character length for tool results persisted to the JSONL conversation
+# history via buffered_persist.  Skill results exceeding this are truncated with
+# a suffix indicating the full length.  The complete result is still available in
+# the in-memory messages list for the current ReAct iteration.
+MAX_TOOL_RESULT_PERSIST_LENGTH: int = 10_000

@@ -35,7 +35,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, IO, List, Optional
 
-from src.constants import DEFAULT_DB_TIMEOUT, MAX_FILE_HANDLES, MAX_LRU_CACHE_SIZE
+from src.constants import (
+    COMPRESSION_KEEP_RECENT,
+    COMPRESSION_LINE_THRESHOLD,
+    DEFAULT_DB_TIMEOUT,
+    MAX_FILE_HANDLES,
+    MAX_LRU_CACHE_SIZE,
+)
 from src.db.db_index import (
     RecoveryResult,
     load_index,
@@ -60,6 +66,7 @@ from src.utils import (
     LRULockCache,
     check_disk_space,
     json_dumps,
+    json_loads,
     safe_json_parse,
 )
 
@@ -80,6 +87,12 @@ MAX_MESSAGE_HISTORY = 500
 
 # Maximum entries in the message ID index (prevents unbounded memory growth)
 MAX_MESSAGE_ID_INDEX = 100_000
+
+# JSONL schema version for forward-compatible message format changes.
+# Each message file starts with a header line: {"_version": N, "type": "header"}
+# Migrations in _JSONL_MIGRATIONS backfill missing fields when upgrading.
+_JSONL_SCHEMA_VERSION = 1
+_JSONL_MIGRATIONS: list[tuple[int, list[Any]]] = []  # (target_version, [migration_fns])
 
 # Pattern for valid chat_id (safe for file paths)
 _CHAT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\.\@]+$")
@@ -104,6 +117,11 @@ def _validate_chat_id(chat_id: str) -> None:
             f"Invalid chat_id format: {chat_id!r}. "
             "Only alphanumeric characters, dash, underscore, dot, and @ are allowed."
         )
+
+
+def _build_jsonl_header() -> str:
+    """Return the JSONL schema version header line (with trailing newline)."""
+    return json_dumps({"_version": _JSONL_SCHEMA_VERSION, "type": "header"}) + "\n"
 
 
 # Re-export so ``from src.db import CorruptionResult`` keeps working
@@ -258,6 +276,13 @@ class Database:
 
         # Recovery tracking
         self._last_recovery: Optional[RecoveryResult] = None
+
+        # Per-chat generation counter for write-conflict detection.
+        # Incremented on every write (save_message, save_messages_batch).
+        # Callers can read the generation before building context and verify
+        # it hasn't changed before persisting — preventing interleaved writes
+        # from concurrent scheduled and user messages.
+        self._chat_generations: Dict[str, int] = {}
 
     def _get_chats_lock(self) -> asyncio.Lock:
         """Return the chats lock, creating it on first use.
@@ -510,6 +535,18 @@ class Database:
         # Load message ID index
         await self._ensure_message_index()
 
+        # Migrate existing JSONL files to current schema version
+        if self._messages_dir.exists():
+            for msg_file in self._messages_dir.glob("*.jsonl"):
+                try:
+                    await asyncio.to_thread(self._ensure_jsonl_schema, msg_file)
+                except Exception as exc:
+                    log.warning(
+                        "Failed to migrate JSONL schema for %s: %s",
+                        msg_file.name,
+                        exc,
+                    )
+
         self._initialized = True
 
     async def close(self) -> None:
@@ -590,6 +627,98 @@ class Database:
             # If we can't check disk space, log warning but proceed
             # (e.g., network drives, permission issues)
             log.warning("Could not verify disk space for %s: %s", path, e)
+
+    # ── JSONL schema migration ──────────────────────────────────────────────
+
+    def _ensure_jsonl_schema(self, file_path: Path) -> None:
+        """Ensure a JSONL file has the current schema header.
+
+        Detects headerless (legacy) files and prepends the version header.
+        Applies incremental migrations for future schema changes.
+        """
+        if not file_path.exists() or file_path.stat().st_size == 0:
+            return  # Will get header on first write via _append_to_file
+
+        with file_path.open("r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+
+        if not first_line:
+            return
+
+        try:
+            parsed = json_loads(first_line)
+        except Exception:
+            return  # Corrupted first line — don't migrate
+
+        if isinstance(parsed, dict) and parsed.get("type") == "header":
+            version = parsed.get("_version", 0)
+            if version < _JSONL_SCHEMA_VERSION:
+                self._apply_jsonl_migrations(file_path, version)
+            return
+
+        # No header — legacy file, prepend header
+        content = file_path.read_text(encoding="utf-8")
+        self._file_pool.invalidate(file_path)
+        header = _build_jsonl_header()
+        file_path.write_text(header + content, encoding="utf-8")
+        log.info(
+            "Added JSONL schema v%d header to %s",
+            _JSONL_SCHEMA_VERSION,
+            file_path.name,
+        )
+
+    def _apply_jsonl_migrations(self, file_path: Path, current_version: int) -> None:
+        """Apply incremental JSONL schema migrations.
+
+        Each migration in _JSONL_MIGRATIONS is a (target_version, [callables])
+        tuple. Callables receive a parsed message dict and return the
+        (possibly modified) dict. After all migrations, the file is rewritten
+        with the updated header.
+        """
+        if not _JSONL_MIGRATIONS:
+            return  # No migrations defined yet
+
+        content = file_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        migrated: list[str] = []
+        header_written = False
+
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                msg = json_loads(line)
+            except Exception:
+                migrated.append(line)
+                continue
+
+            if msg.get("type") == "header" and not header_written:
+                new_header = json_dumps(
+                    {"_version": _JSONL_SCHEMA_VERSION, "type": "header"}
+                )
+                migrated.append(new_header)
+                header_written = True
+                continue
+
+            for target_ver, fns in _JSONL_MIGRATIONS:
+                if current_version < target_ver:
+                    for fn in fns:
+                        msg = fn(msg)
+
+            migrated.append(json_dumps(msg, ensure_ascii=False))
+
+        if not header_written:
+            header = json_dumps({"_version": _JSONL_SCHEMA_VERSION, "type": "header"})
+            migrated.insert(0, header)
+
+        self._file_pool.invalidate(file_path)
+        file_path.write_text("\n".join(migrated) + "\n", encoding="utf-8")
+        log.info(
+            "Migrated JSONL schema v%d→v%d for %s",
+            current_version,
+            _JSONL_SCHEMA_VERSION,
+            file_path.name,
+        )
 
     async def _save_chats(self) -> None:
         """
@@ -835,6 +964,16 @@ class Database:
 
         _track_db_latency(time.monotonic() - _db_start)
 
+        self._bump_generation(chat_id)
+
+        # Trigger compression check (best-effort, non-critical)
+        try:
+            await self.compress_chat_history(chat_id)
+        except Exception:
+            log.debug(
+                "History compression check failed for %s (non-critical)", chat_id,
+            )
+
         return mid
 
     async def save_messages_batch(
@@ -887,7 +1026,279 @@ class Database:
 
         _track_db_latency(time.monotonic() - _db_start)
 
+        self._bump_generation(chat_id)
+
+        # Trigger compression check (best-effort, non-critical)
+        try:
+            await self.compress_chat_history(chat_id)
+        except Exception:
+            log.debug(
+                "History compression check failed for %s (non-critical)", chat_id,
+            )
+
         return ids
+
+    # ── generation counter for write-conflict detection ────────────────────
+
+    def get_generation(self, chat_id: str) -> int:
+        """Return the current generation counter for a chat.
+
+        Callers snapshot this before building LLM context and verify with
+        ``check_generation()`` before persisting results.  If the generation
+        has changed, another writer (scheduled task or concurrent message)
+        appended to the history in the meantime.
+        """
+        return self._chat_generations.get(chat_id, 0)
+
+    def check_generation(self, chat_id: str, expected: int) -> bool:
+        """Return True if the chat's generation still matches *expected*."""
+        return self._chat_generations.get(chat_id, 0) == expected
+
+    def _bump_generation(self, chat_id: str) -> None:
+        """Increment the generation counter after a successful write."""
+        self._chat_generations[chat_id] = self._chat_generations.get(chat_id, 0) + 1
+
+    # ── history compression ─────────────────────────────────────────────────
+
+    def _compressed_summary_file(self, chat_id: str) -> Path:
+        """Get the compressed summary file path for a chat."""
+        return self._message_file(chat_id).with_suffix(".compressed_summary.json")
+
+    async def get_compressed_summary(self, chat_id: str) -> str | None:
+        """Return the compressed history summary text for a chat, if any.
+
+        The summary describes archived messages that were removed during
+        compression.  Returns ``None`` when no compression has occurred.
+        """
+        summary_file = self._compressed_summary_file(chat_id)
+        return await asyncio.to_thread(
+            self._read_compressed_summary_sync, summary_file,
+        )
+
+    @staticmethod
+    def _read_compressed_summary_sync(summary_file: Path) -> str | None:
+        """Read compressed summary from file (sync, for thread pool)."""
+        if not summary_file.exists():
+            return None
+        try:
+            content = summary_file.read_text(encoding="utf-8")
+            parsed = json_loads(content)
+            if isinstance(parsed, dict):
+                return parsed.get("content")
+        except Exception:
+            pass
+        return None
+
+    async def compress_chat_history(self, chat_id: str) -> bool:
+        """Compress a chat's history when the JSONL file exceeds the line threshold.
+
+        Archives the oldest messages by replacing them with a summary stored in
+        a separate ``.compressed_summary.json`` file.  The most recent messages
+        are kept intact in the JSONL.  This reduces disk I/O and reverse-seek
+        latency for long-lived conversations.
+
+        Returns:
+            ``True`` if compression was performed, ``False`` if skipped.
+        """
+        msg_file = self._message_file(chat_id)
+        if not msg_file.exists():
+            return False
+
+        lock = await self._get_message_lock(chat_id)
+        async with lock:
+            result = await asyncio.to_thread(
+                self._compress_chat_history_sync, chat_id, msg_file,
+            )
+
+        if result.get("compressed"):
+            removed_ids = result.get("removed_ids", [])
+            if removed_ids:
+                async with self._get_index_lock():
+                    for mid in removed_ids:
+                        self._message_id_index.pop(mid, None)
+                    self._index_dirty = True
+
+        return bool(result.get("compressed"))
+
+    def _compress_chat_history_sync(
+        self, chat_id: str, msg_file: Path,
+    ) -> dict:
+        """Synchronous compression logic (runs in thread pool).
+
+        Returns a dict with ``compressed`` (bool) and ``removed_ids`` (list).
+        """
+        # Quick size gate: skip if file is too small to have threshold lines.
+        # Minimum ~200 bytes per JSONL line is a conservative estimate.
+        try:
+            file_size = msg_file.stat().st_size
+        except OSError:
+            return {"compressed": False}
+
+        if file_size < COMPRESSION_LINE_THRESHOLD * 200:
+            return {"compressed": False}
+
+        # Read the file
+        try:
+            content = msg_file.read_text(encoding="utf-8")
+        except OSError:
+            return {"compressed": False}
+
+        lines = content.splitlines()
+
+        # Separate header from message lines
+        header_line: str | None = None
+        msg_lines: list[str] = []
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            if i == 0 and header_line is None:
+                try:
+                    parsed = json_loads(line)
+                    if isinstance(parsed, dict) and parsed.get("type") == "header":
+                        header_line = line
+                        continue
+                except Exception:
+                    pass
+            msg_lines.append(line)
+
+        if len(msg_lines) <= COMPRESSION_LINE_THRESHOLD:
+            return {"compressed": False}
+
+        # Split into old (to archive) and recent (to keep)
+        compress_count = len(msg_lines) - COMPRESSION_KEEP_RECENT
+        old_lines = msg_lines[:compress_count]
+        recent_lines = msg_lines[compress_count:]
+
+        # Extract metadata from old messages
+        import datetime
+
+        first_ts: float | None = None
+        last_ts: float | None = None
+        user_count = 0
+        assistant_count = 0
+        removed_ids: list[str] = []
+
+        for line in old_lines:
+            try:
+                msg = json_loads(line)
+            except Exception:
+                continue
+
+            msg_id = msg.get("id")
+            if msg_id:
+                removed_ids.append(msg_id)
+
+            ts = msg.get("timestamp")
+            if ts is not None:
+                if first_ts is None or ts < first_ts:
+                    first_ts = ts
+                if last_ts is None or ts > last_ts:
+                    last_ts = ts
+
+            role = msg.get("role")
+            if role == "user":
+                user_count += 1
+            elif role == "assistant":
+                assistant_count += 1
+
+        # Accumulate with any prior compression summary
+        summary_file = msg_file.with_suffix(".compressed_summary.json")
+        total_removed = len(old_lines)
+        total_user = user_count
+        total_assistant = assistant_count
+
+        if summary_file.exists():
+            try:
+                existing = json_loads(summary_file.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    meta = existing.get("_metadata", {})
+                    total_removed += meta.get("messages_removed", 0)
+                    total_user += meta.get("user_messages", 0)
+                    total_assistant += meta.get("assistant_messages", 0)
+                    existing_first = meta.get("first_timestamp")
+                    existing_last = meta.get("last_timestamp")
+                    if existing_first is not None and (
+                        first_ts is None or existing_first < first_ts
+                    ):
+                        first_ts = existing_first
+                    if existing_last is not None and (
+                        last_ts is None or existing_last > last_ts
+                    ):
+                        last_ts = existing_last
+            except Exception:
+                pass
+
+        # Format date range (UTC for consistency)
+        date_range = ""
+        if first_ts is not None and last_ts is not None:
+            start = datetime.datetime.fromtimestamp(
+                first_ts, tz=datetime.timezone.utc,
+            ).strftime("%Y-%m-%d")
+            end = datetime.datetime.fromtimestamp(
+                last_ts, tz=datetime.timezone.utc,
+            ).strftime("%Y-%m-%d")
+            date_range = f" from {start} to {end}"
+
+        summary_text = (
+            f"📋 [Conversation History Compressed] "
+            f"{total_removed} messages "
+            f"({total_user} user, {total_assistant} assistant)"
+            f"{date_range} have been archived. "
+            f"The current conversation continues from the most recent messages. "
+            f"Use memory_recall if you need to reference specific past interactions."
+        )
+
+        # Write summary file (small, fast — do this before truncating JSONL)
+        summary_data = {
+            "content": summary_text,
+            "_metadata": {
+                "messages_removed": total_removed,
+                "user_messages": total_user,
+                "assistant_messages": total_assistant,
+                "first_timestamp": first_ts,
+                "last_timestamp": last_ts,
+                "last_compressed": time.time(),
+            },
+        }
+        try:
+            summary_file.write_text(
+                json_dumps(summary_data, ensure_ascii=False), encoding="utf-8",
+            )
+        except OSError as exc:
+            log.warning(
+                "Failed to write compression summary for %s: %s", chat_id, exc,
+            )
+            return {"compressed": False}
+
+        # Build new JSONL: header + recent messages
+        new_lines: list[str] = []
+        if header_line:
+            new_lines.append(header_line)
+        new_lines.extend(recent_lines)
+
+        # Invalidate pooled handle before rewrite
+        self._file_pool.invalidate(msg_file)
+
+        # Write the truncated file atomically
+        new_content = "\n".join(new_lines) + "\n"
+        try:
+            self._atomic_write(msg_file, new_content)
+        except OSError as exc:
+            log.warning(
+                "Failed to write compressed JSONL for %s: %s", chat_id, exc,
+            )
+            return {"compressed": False}
+
+        log.info(
+            "Compressed chat history for %s: %d old messages archived, "
+            "%d recent messages kept (file: %s)",
+            chat_id,
+            compress_count,
+            len(recent_lines),
+            msg_file.name,
+        )
+
+        return {"compressed": True, "removed_ids": removed_ids}
 
     async def _update_index(self, message_ids: list[str]) -> None:
         """Add message IDs to the in-memory index with debounce flush."""
@@ -920,10 +1331,15 @@ class Database:
         prevent OS file-descriptor exhaustion under extreme concurrency.
         Line-buffered handles flush on every newline automatically.
 
+        Automatically prepends a JSONL schema version header on new/empty files.
+
         Raises:
             DiskSpaceError: If insufficient disk space available
         """
         self._check_disk_space_before_write(file_path)
+        # Prepend version header on new/empty files
+        if not file_path.exists() or file_path.stat().st_size == 0:
+            content = _build_jsonl_header() + content
         handle = self._file_pool.get_or_open(file_path)
         handle.write(content)
 
@@ -1051,7 +1467,7 @@ class Database:
         # For small files, simple read is faster (avoids seek overhead)
         if file_size < 65_536:
             with file_path.open("r", encoding="utf-8") as f:
-                return list(deque(f, maxlen=limit))
+                return [line.rstrip("\r") for line in deque(f, maxlen=limit)]
 
         # Reverse seek: find line boundaries from the end without reading
         # every line. We count newlines in binary chunks to locate the
@@ -1074,7 +1490,7 @@ class Database:
                     )
                     f.close()
                     with file_path.open("r", encoding="utf-8") as fb:
-                        return list(deque(fb, maxlen=limit))
+                        return [line.rstrip("\r") for line in deque(fb, maxlen=limit)]
 
                 read_size = min(chunk_size, pos)
                 pos -= read_size
@@ -1097,7 +1513,8 @@ class Database:
 
         # Split and take last N lines, preserving order (oldest first)
         all_lines = remaining_text.splitlines()
-        return all_lines[-limit:] if len(all_lines) > limit else all_lines
+        selected = all_lines[-limit:] if len(all_lines) > limit else all_lines
+        return [line.rstrip("\r") for line in selected]
 
     # ── chats ──────────────────────────────────────────────────────────────
 

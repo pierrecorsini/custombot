@@ -20,8 +20,10 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 from openai.types.chat.chat_completion_message_function_tool_call import ChatCompletionMessageFunctionToolCall
 
 from src.constants import DEFAULT_SKILL_TIMEOUT, SLOW_SKILL_THRESHOLD_SECONDS
+from src.core.event_bus import Event, get_event_bus
 from src.exceptions import SkillError, get_user_friendly_message
 from src.logging import get_correlation_id
+from src.security.audit import SkillAuditLogger
 from src.utils.timing import skill_timer
 
 MAX_ARGS_DEPTH = 10
@@ -47,11 +49,31 @@ class ToolExecutor:
         rate_limiter: "RateLimiter | None" = None,
         metrics: "PerformanceMetrics | None" = None,
         on_skill_executed: Optional[Callable[[], None]] = None,
+        audit_logger: Optional[SkillAuditLogger] = None,
     ) -> None:
         self._skills = skills_registry
         self._rate_limiter = rate_limiter
         self._metrics = metrics
         self._on_skill_executed = on_skill_executed
+        self._audit_logger = audit_logger
+
+    def _audit(
+        self,
+        chat_id: str,
+        skill_name: str,
+        raw_args: str,
+        allowed: bool,
+        result_summary: str,
+    ) -> None:
+        """Record a skill-execution audit entry if the logger is configured."""
+        if self._audit_logger is not None:
+            self._audit_logger.log(
+                chat_id=chat_id,
+                skill_name=skill_name,
+                args_hash=SkillAuditLogger.hash_args(raw_args),
+                allowed=allowed,
+                result_summary=result_summary,
+            )
 
     async def execute(
         self,
@@ -81,6 +103,7 @@ class ToolExecutor:
                 "Malformed tool call: missing 'function' or 'name' attribute",
                 extra={"chat_id": chat_id},
             )
+            self._audit(chat_id, "unknown", "{}", False, "malformed_tool_call")
             return format_skill_error(
                 skill_name="unknown",
                 error_type="MalformedToolCall",
@@ -97,6 +120,7 @@ class ToolExecutor:
                 len(raw_args),
                 extra={"chat_id": chat_id, "skill": name},
             )
+            self._audit(chat_id, name, raw_args, False, "args_oversized")
             return format_skill_error(
                 skill_name=name,
                 error_type="ArgumentError",
@@ -114,6 +138,7 @@ class ToolExecutor:
                 exc_info=True,
                 extra={"chat_id": chat_id, "skill": name},
             )
+            self._audit(chat_id, name, raw_args, False, "args_parse_error")
             return format_skill_error(
                 skill_name=name,
                 error_type="ArgumentError",
@@ -127,6 +152,7 @@ class ToolExecutor:
                 MAX_ARGS_DEPTH,
                 extra={"chat_id": chat_id, "skill": name},
             )
+            self._audit(chat_id, name, raw_args, False, "args_too_deep")
             return format_skill_error(
                 skill_name=name,
                 error_type="ArgumentError",
@@ -141,6 +167,7 @@ class ToolExecutor:
                 name,
                 extra={"chat_id": chat_id, "skill": name},
             )
+            self._audit(chat_id, name, raw_args, False, "unknown_skill")
             return format_skill_error(
                 skill_name=name,
                 error_type="UnknownSkill",
@@ -161,6 +188,7 @@ class ToolExecutor:
                         "rate_limit": rate_result.limit_value,
                     },
                 )
+                self._audit(chat_id, name, raw_args, False, "rate_limited")
                 return rate_result.message
 
         log.info(
@@ -181,9 +209,12 @@ class ToolExecutor:
                 exec_kwargs = dict(args)
                 if send_media is not None:
                     exec_kwargs["send_media"] = send_media
+                timeout = getattr(skill, "timeout_seconds", DEFAULT_SKILL_TIMEOUT)
+                if not isinstance(timeout, (int, float)):
+                    timeout = DEFAULT_SKILL_TIMEOUT
                 result = await asyncio.wait_for(
                     skill.execute(workspace_dir=workspace_dir, **exec_kwargs),
-                    timeout=DEFAULT_SKILL_TIMEOUT,
+                    timeout=timeout,
                 )
                 if self._metrics:
                     self._metrics.track_skill_time(name, timing_result.duration_seconds)
@@ -198,6 +229,22 @@ class ToolExecutor:
                         "result_status": "success",
                     },
                 )
+                self._audit(chat_id, name, raw_args, True, "success")
+
+                # Emit skill_executed event for plugins/subscribers
+                try:
+                    await get_event_bus().emit(Event(
+                        name="skill_executed",
+                        data={
+                            "skill_name": name,
+                            "chat_id": chat_id,
+                            "duration_ms": round(timing_result.duration_ms, 2),
+                        },
+                        source="ToolExecutor",
+                    ))
+                except Exception:
+                    pass  # Event emission must never break skill execution
+
                 return str(result) if result is not None else ""
 
         except asyncio.CancelledError:
@@ -216,10 +263,14 @@ class ToolExecutor:
                     "error_type": "TimeoutError",
                 },
             )
+            self._audit(chat_id, name, raw_args, True, "error:TimeoutError")
+            skill_timeout = getattr(skill, "timeout_seconds", DEFAULT_SKILL_TIMEOUT)
+            if not isinstance(skill_timeout, (int, float)):
+                skill_timeout = DEFAULT_SKILL_TIMEOUT
             return format_skill_error(
                 skill_name=name,
                 error_type="TimeoutError",
-                user_message=f"The operation took too long (timeout: {DEFAULT_SKILL_TIMEOUT}s).",
+                user_message=f"The operation took too long (timeout: {skill_timeout}s).",
             )
         except SkillError as exc:
             error_type = exc.details.get("reason", "SkillError")

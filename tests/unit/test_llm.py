@@ -1263,3 +1263,101 @@ class TestClassifyLLMError:
             result = _classify_llm_error(err)
             assert isinstance(result, LLMError), f"Expected LLMError for {type(err).__name__}"
             assert result.suggestion, f"Missing suggestion for {type(err).__name__}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# chat_stream() partial delivery on stream failure (PLAN Phase 9)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestChatStreamPartialDelivery:
+    """Verify that chat_stream flushes buffered text on partial failure."""
+
+    async def test_partial_chunks_delivered_before_error(self, valid_cfg):
+        """Chunks delivered before the error should reach on_chunk callback."""
+        client = LLMClient(valid_cfg)
+        received_chunks: list[str] = []
+
+        async def on_chunk(text: str):
+            received_chunks.append(text)
+
+        # Build mock events
+        ev1 = MagicMock()
+        ev1.choices = [MagicMock()]
+        ev1.choices[0].delta.content = "Hello "
+        ev1.choices[0].delta.tool_calls = None
+        ev1.choices[0].delta.role = None
+        ev1.choices[0].finish_reason = None
+        ev1.usage = None
+
+        ev2 = MagicMock()
+        ev2.choices = [MagicMock()]
+        ev2.choices[0].delta.content = "World"
+        ev2.choices[0].delta.tool_calls = None
+        ev2.choices[0].delta.role = None
+        ev2.choices[0].finish_reason = None
+        ev2.usage = None
+
+        # Create an async generator that yields events then raises
+        async def _failing_stream():
+            yield ev1
+            yield ev2
+            raise ConnectionError("Network failure")
+
+        # Mock the create() to return our async generator
+        mock_result = _failing_stream()
+        with (
+            patch.object(
+                client._client.chat.completions,
+                "create",
+                AsyncMock(return_value=mock_result),
+            ),
+            pytest.raises(LLMError),
+        ):
+            await client.chat_stream(
+                messages=[{"role": "user", "content": "hi"}],
+                on_chunk=on_chunk,
+            )
+
+        # Chunks should have been delivered (finally block flushes)
+        combined = "".join(received_chunks)
+        assert "Hello" in combined or "World" in combined
+
+    async def test_buffered_text_flushed_on_failure(self, valid_cfg):
+        """Remaining buffered_chunk should be flushed in the finally block."""
+        client = LLMClient(valid_cfg)
+        received_chunks: list[str] = []
+
+        async def on_chunk(text: str):
+            received_chunks.append(text)
+
+        # Small content below STREAM_MIN_CHUNK_CHARS threshold
+        ev = MagicMock()
+        ev.choices = [MagicMock()]
+        ev.choices[0].delta.content = "partial response"
+        ev.choices[0].delta.tool_calls = None
+        ev.choices[0].delta.role = None
+        ev.choices[0].finish_reason = None
+        ev.usage = None
+
+        async def _failing_stream():
+            yield ev
+            raise ConnectionError("Stream broke")
+
+        mock_result = _failing_stream()
+        with (
+            patch.object(
+                client._client.chat.completions,
+                "create",
+                AsyncMock(return_value=mock_result),
+            ),
+            pytest.raises(LLMError),
+        ):
+            await client.chat_stream(
+                messages=[{"role": "user", "content": "hi"}],
+                on_chunk=on_chunk,
+            )
+
+        # The buffered text should have been flushed in the finally block
+        combined = "".join(received_chunks)
+        assert "partial response" in combined

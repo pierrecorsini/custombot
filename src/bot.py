@@ -42,6 +42,7 @@ from src.constants import (
     DEFAULT_CHAT_RATE_LIMIT,
     MAX_LRU_CACHE_SIZE,
     MAX_MESSAGE_LENGTH,
+    MAX_TOOL_RESULT_PERSIST_LENGTH,
     MEMORY_CHECK_INTERVAL_SECONDS,
     MEMORY_CRITICAL_THRESHOLD_PERCENT,
     MEMORY_WARNING_THRESHOLD_PERCENT,
@@ -49,7 +50,10 @@ from src.constants import (
     SCHEDULED_ERROR_PREFIXES,
     WORKSPACE_DIR,
 )
-from src.core.context_builder import ChatMessage, build_context
+from src.core.event_bus import Event, EventBus, get_event_bus
+from src.core.context_assembler import ContextAssembler, ContextResult
+from src.core.context_builder import ChatMessage
+from src.core.dedup import DedupStats, DeduplicationService
 from src.core.instruction_loader import InstructionLoader
 from src.core.serialization import serialize_tool_call_message
 from src.core.project_context import ProjectContextLoader as _ProjectContextLoaderImpl
@@ -59,7 +63,6 @@ from src.core.tool_formatter import (
     format_response_with_tool_log,
     format_single_tool_execution,
 )
-from src.core.topic_cache import TopicCache, parse_meta
 from src.db import Database
 from src.exceptions import ErrorCode, LLMError
 from src.llm import LLMClient
@@ -69,7 +72,7 @@ from src.monitoring import PerformanceMetrics, SessionMetrics, get_metrics_colle
 from src.rate_limiter import RateLimiter
 from src.routing import RoutingEngine
 from src.security.audit import SkillAuditLogger
-from src.security.prompt_injection import filter_response_content
+from src.security.prompt_injection import detect_injection, filter_response_content, sanitize_user_input
 from src.skills import SkillRegistry
 from src.utils import LRULockCache
 from src.utils.circuit_breaker import CircuitBreaker
@@ -163,6 +166,7 @@ class Bot:
         session_metrics: "SessionMetrics | None" = None,
         instruction_loader: InstructionLoader | None = None,
         chat_locks: LockProvider | None = None,
+        dedup: DeduplicationService | None = None,
     ) -> None:
         self._cfg = config
         self._db = db
@@ -177,7 +181,12 @@ class Bot:
         self._chat_locks: LockProvider = (
             chat_locks if chat_locks is not None else LRULockCache(max_size=MAX_LRU_CACHE_SIZE)
         )
+        # Unified dedup service — wraps both inbound (message-id) and outbound
+        # (content-hash) strategies.  Falls back to direct DB check when not
+        # provided (backward-compat for tests that construct Bot directly).
+        self._dedup: DeduplicationService | None = dedup
         # Rate limiter for skill execution
+        self._rate_limiter = RateLimiter()
         self._rate_limiter = RateLimiter()
         # Per-chat message rate limiter
         self._chat_rate_limiter = RateLimiter()
@@ -197,8 +206,14 @@ class Bot:
         self._instruction_loader = instruction_loader or InstructionLoader(self._instructions_dir)
         # Project context loader — prefer injected shared instance
         self._project_ctx = project_ctx or _ProjectContextLoaderImpl(project_store)
-        # Per-chat topic summary cache
-        self._topic_cache = TopicCache(WORKSPACE_DIR)
+        # Context assembler (stateless service — owns topic cache lifecycle)
+        self._context_assembler = ContextAssembler(
+            db=db,
+            config=config,
+            memory=memory,
+            project_ctx=self._project_ctx,
+            workspace_root=WORKSPACE_DIR,
+        )
 
         # Log bot initialization with component summary
         lifecycle_log.info(
@@ -210,9 +225,6 @@ class Bot:
             "enabled" if routing else "disabled",
             "enabled" if project_store else "disabled",
         )
-
-    async def _get_project_context(self, chat_id: str) -> str | None:
-        return await self._project_ctx.get(chat_id)
 
     def start_memory_monitoring(self) -> None:
         """
@@ -285,6 +297,15 @@ class Bot:
         if self._llm is None:
             return None
         return self._llm.circuit_breaker
+
+    def get_dedup_stats(self) -> DedupStats | None:
+        """Return dedup hit/miss counters for health/metrics endpoints.
+
+        Returns ``None`` if the dedup service is not wired.
+        """
+        if self._dedup is None:
+            return None
+        return self._dedup.stats
 
     # ── crash recovery ────────────────────────────────────────────────────────
 
@@ -419,7 +440,7 @@ class Bot:
         if not msg.text or not msg.text.strip():
             return PreflightResult(passed=False, reason="empty")
 
-        if await self._db.message_exists(msg.message_id):
+        if await self._dedup.is_inbound_duplicate(msg.message_id):
             return PreflightResult(passed=False, reason="duplicate")
 
         if self._routing:
@@ -492,7 +513,7 @@ class Bot:
 
         # Dedup: single authoritative gate.  preflight_check() also performs
         # this check but only as an optimisation to avoid the typing indicator.
-        if await self._db.message_exists(msg.message_id):
+        if await self._dedup.is_inbound_duplicate(msg.message_id):
             log.debug(
                 "Duplicate message %s from chat %s, skipping",
                 msg.message_id,
@@ -524,10 +545,13 @@ class Bot:
             clear_correlation_id()
             return None
 
-        # Acquire per-chat lock via context manager (tracks ref count for safe eviction)
-        async with self._chat_locks.acquire(msg.chat_id):
-            # Track message processing time
-            start_time = time.perf_counter()
+            # Acquire per-chat lock via context manager (tracks ref count for safe eviction)
+            async with self._chat_locks.acquire(msg.chat_id):
+                # Track message processing time
+                start_time = time.perf_counter()
+
+                # Snapshot generation for write-conflict detection
+                generation = self._db.get_generation(msg.chat_id)
 
             # Enqueue message for crash recovery (before processing)
             if self._message_queue:
@@ -645,11 +669,28 @@ class Bot:
 
                 # Build LLM context with the scheduled prompt as the user message
                 try:
-                    messages = await self._assemble_context(
+                    result = await self._context_assembler.assemble(
                         chat_id=chat_id,
                         channel_prompt=channel_prompt,
                     )
-                    messages.append(ChatMessage(role="user", content=prompt))
+                    # Sanitize scheduled prompt to catch injection attempts that
+                    # could bypass normal message pipeline safeguards.
+                    safe_prompt = sanitize_user_input(prompt)
+                    injection_result = detect_injection(safe_prompt)
+                    if injection_result.detected:
+                        log.warning(
+                            "Scheduled task prompt for chat %s flagged as injection "
+                            "(confidence=%.1f, patterns=%s) — sanitizing",
+                            chat_id,
+                            injection_result.confidence,
+                            injection_result.matched_patterns,
+                            extra={
+                                "chat_id": chat_id,
+                                "injection_patterns": injection_result.matched_patterns,
+                            },
+                        )
+                    messages = result.messages
+                    messages.append(ChatMessage(role="user", content=safe_prompt))
                 except OSError as exc:
                     log.warning(
                         "Scheduled task for chat %s aborted: context build failed: %s",
@@ -695,10 +736,8 @@ class Bot:
                     )
                     return None
 
-                # Parse topic META from response before persisting
-                response_text, meta = parse_meta(response_text)
-                if meta:
-                    self._handle_topic_meta(chat_id, meta)
+                # Parse topic META from response and update topic cache
+                response_text = self._context_assembler.finalize_turn(chat_id, response_text)
 
                 # Filter sensitive content (PII, secrets, API keys) before persisting
                 filter_result = filter_response_content(response_text)
@@ -749,34 +788,6 @@ class Bot:
 
     # ── internal processing ────────────────────────────────────────────────
 
-    async def _assemble_context(
-        self,
-        chat_id: str,
-        channel_prompt: str | None = None,
-        instruction: str = "",
-    ) -> list[ChatMessage]:
-        """Read memories and build the LLM message list.
-
-        Shared by ``_build_turn_context()`` (normal messages) and
-        ``process_scheduled()`` (scheduled tasks) so both paths go through
-        the same token-budget trimming and sanitization in ``build_context()``.
-        """
-        memory_content = await self._memory.read_memory(chat_id)
-        agents_content = await self._memory.read_agents_md(chat_id)
-        project_context = await self._get_project_context(chat_id)
-        topic_summary = self._topic_cache.read(chat_id)
-        return await build_context(
-            db=self._db,
-            config=self._cfg,
-            chat_id=chat_id,
-            memory_content=memory_content,
-            agents_md=agents_content,
-            instruction=instruction,
-            channel_prompt=channel_prompt,
-            project_context=project_context,
-            topic_summary=topic_summary,
-        )
-
     async def _build_turn_context(
         self,
         msg: IncomingMessage,
@@ -816,15 +827,16 @@ class Bot:
         channel_prompt = channel.get_channel_prompt() if channel else None
 
         # 3. Build LLM message list (async — fetches history from DB)
-        messages = await self._assemble_context(
+        result = await self._context_assembler.assemble(
             chat_id=msg.chat_id,
             channel_prompt=channel_prompt,
             instruction=instruction_content,
+            rule_id=matched_rule.id,
         )
 
         return TurnContext(
-            messages=messages,
-            rule_id=matched_rule.id,
+            messages=result.messages,
+            rule_id=result.rule_id,
             skill_exec_verbose=matched_rule.skillExecVerbose,
             show_errors=matched_rule.showErrors,
         )
@@ -840,6 +852,15 @@ class Bot:
             msg.chat_id,
             extra={"chat_id": msg.chat_id},
         )
+
+        # Emit message_received event for plugins/subscribers
+        await get_event_bus().emit(Event(
+            name="message_received",
+            data={"chat_id": msg.chat_id, "sender": msg.sender_name},
+            source="Bot._process",
+            correlation_id=get_correlation_id(),
+        ))
+
         # 1. Persist user turn
         await self._db.upsert_chat(msg.chat_id, msg.sender_name)
         try:
@@ -880,10 +901,8 @@ class Bot:
             channel=channel,
         )
 
-        # 5. Parse topic detection META from response
-        response_text, meta = parse_meta(raw_response)
-        if meta:
-            self._handle_topic_meta(msg.chat_id, meta)
+        # 5. Parse topic META from response and update topic cache
+        response_text = self._context_assembler.finalize_turn(msg.chat_id, raw_response)
 
         # 5b. Filter sensitive content (PII, secrets, API keys) from LLM response
         filter_result = filter_response_content(response_text)
@@ -903,8 +922,24 @@ class Bot:
             response_text = format_response_with_tool_log(response_text, tool_log)
 
         # 7. Persist assistant turn + buffered tool messages in a single batch write
+        #    Check generation to detect concurrent writes (e.g. scheduled task).
         batch = [*buffered_persist, {"role": "assistant", "content": response_text}]
+        if not self._db.check_generation(msg.chat_id, generation):
+            log.warning(
+                "Write conflict detected for chat %s — generation changed during "
+                "processing. Re-reading latest history before persist.",
+                msg.chat_id,
+                extra={"chat_id": msg.chat_id},
+            )
         await self._db.save_messages_batch(chat_id=msg.chat_id, messages=batch)
+
+        # Emit response_sent event for plugins/subscribers
+        await get_event_bus().emit(Event(
+            name="response_sent",
+            data={"chat_id": msg.chat_id, "response_length": len(response_text)},
+            source="Bot._process",
+            correlation_id=get_correlation_id(),
+        ))
 
         return response_text
 
@@ -956,9 +991,10 @@ class Bot:
                         messages,
                         tools=tools,
                         on_chunk=stream_callback,
+                        chat_id=chat_id,
                     )
                 else:
-                    completion = await self._llm.chat(messages, tools=tools)
+                    completion = await self._llm.chat(messages, tools=tools, chat_id=chat_id)
             except LLMError as exc:
                 if exc.error_code == ErrorCode.LLM_CIRCUIT_BREAKER_OPEN:
                     log.warning("Circuit breaker open — returning unavailable message")
@@ -1086,14 +1122,32 @@ class Bot:
 
         # Execute all function-type tool calls in parallel via structured concurrency
         function_calls = [tc for tc in tool_calls if tc.type == "function"]
-        async with asyncio.TaskGroup() as tg:
-            tasks = [
-                tg.create_task(
-                    self._execute_tool_call(tc, chat_id, workspace_dir, send_media)
-                )
-                for tc in function_calls
-            ]
-        results = [t.result() for t in tasks]
+        results: list[tuple[str, str, ToolLogEntry]] = []
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tasks = [
+                    tg.create_task(
+                        self._execute_tool_call(tc, chat_id, workspace_dir, send_media)
+                    )
+                    for tc in function_calls
+                ]
+            results = [t.result() for t in tasks]
+        except BaseException as exc:
+            # TaskGroup cancels all siblings on BaseException (e.g. KeyboardInterrupt).
+            # Salvage whatever results completed before the cancellation.
+            log.warning(
+                "TaskGroup interrupted in chat %s: %s — salvaging %d partial results",
+                chat_id,
+                type(exc).__name__,
+                results_count := sum(1 for t in tasks if t.done() and not t.cancelled()),
+                extra={"chat_id": chat_id},
+            )
+            for t in tasks:
+                if t.done() and not t.cancelled():
+                    try:
+                        results.append(t.result())
+                    except Exception:
+                        pass
 
         # Append results to messages in original order
         for tc_id, content, tool_entry in results:
@@ -1104,8 +1158,18 @@ class Bot:
             }
             messages.append(tool_msg)
             tool_log.append(tool_entry)
+            # Truncate large results in persisted history to keep JSONL bounded.
+            # The full content remains in the in-memory messages list for the
+            # current ReAct iteration.
+            if len(content) > MAX_TOOL_RESULT_PERSIST_LENGTH:
+                persist_content = (
+                    content[:MAX_TOOL_RESULT_PERSIST_LENGTH]
+                    + f"\n[truncated, full length: {len(content)}]"
+                )
+            else:
+                persist_content = content
             buffered_persist.append(
-                {"role": "tool", "content": content, "name": tool_entry.name}
+                {"role": "tool", "content": persist_content, "name": tool_entry.name}
             )
             if stream_callback:
                 formatted = format_single_tool_execution(tool_entry)
@@ -1130,6 +1194,28 @@ class Bot:
         try:
             if not tool_call.function or not tool_call.function.name:
                 raise AttributeError("tool_call.function or name is missing")
+
+            # Belt-and-suspenders: verify workspace_dir hasn't escaped WORKSPACE_DIR
+            # (defends against a malicious chat_id that bypasses sanitization).
+            ws_resolved = workspace_dir.resolve()
+            root_resolved = Path(WORKSPACE_DIR).resolve()
+            if not ws_resolved.is_relative_to(root_resolved):
+                log.error(
+                    "Path traversal detected: workspace_dir %s is outside %s for chat %s",
+                    ws_resolved,
+                    root_resolved,
+                    chat_id,
+                    extra={"chat_id": chat_id},
+                )
+                return (
+                    tc_id,
+                    "⚠️ Workspace path validation failed. This incident has been logged.",
+                    ToolLogEntry(
+                        name=tool_call.function.name,
+                        args={},
+                        result="Path traversal blocked.",
+                    ),
+                )
 
             result = await self._tool_executor.execute(
                 chat_id=chat_id,
@@ -1168,17 +1254,6 @@ class Bot:
             )
 
     # ── helpers ────────────────────────────────────────────────────────────
-
-    def _handle_topic_meta(self, chat_id: str, meta: dict) -> None:
-        """Process topic-change metadata from LLM response.
-
-        If the LLM signals a topic change, save the old-topic summary
-        to the per-chat cache. Next call will use the summary instead
-        of full history, saving tokens.
-        """
-        if meta.get("topic_changed") and meta.get("old_topic_summary"):
-            self._topic_cache.write(chat_id, meta["old_topic_summary"])
-            log.info("Topic changed in chat %s — summary cached", chat_id)
 
     def _load_instruction(self, filename: str) -> str:
         """Load instruction content via the InstructionLoader."""
