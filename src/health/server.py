@@ -1174,31 +1174,16 @@ class HealthServer:
                 except OSError:
                     pass
 
-            output = _build_prometheus_output(
-                token_usage, snapshot, llm_log_bytes, db_size_bytes,
-                workspace_size_bytes, disk_free_bytes, disk_total_bytes,
-            )
             # Per-chat token metrics (if token_usage object has get_top_chats)
             per_chat = None
             if self._token_usage and hasattr(self._token_usage, "get_top_chats"):
                 per_chat = self._token_usage.get_top_chats()
-            if per_chat:
-                for entry in per_chat:
-                    chat_id = entry.get("chat_id", "unknown")
-                    output += _format_prometheus_metric(
-                        "custombot_chat_prompt_tokens",
-                        "Per-chat prompt tokens consumed (top chats)",
-                        "counter",
-                        entry.get("prompt", 0),
-                        labels={"chat_id": chat_id},
-                    )
-                    output += _format_prometheus_metric(
-                        "custombot_chat_completion_tokens",
-                        "Per-chat completion tokens consumed (top chats)",
-                        "counter",
-                        entry.get("completion", 0),
-                        labels={"chat_id": chat_id},
-                    )
+
+            output = _build_prometheus_output(
+                token_usage, snapshot, llm_log_bytes, db_size_bytes,
+                workspace_size_bytes, disk_free_bytes, disk_total_bytes,
+                per_chat_tokens=per_chat,
+            )
             output += _build_scheduler_prometheus_output(self._scheduler)
             # Circuit breaker metrics (via public Bot accessor)
             cb = self._bot.get_llm_status() if self._bot is not None else None
