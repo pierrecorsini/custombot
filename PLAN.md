@@ -122,7 +122,7 @@ gaps, and operational resilience not addressed in Phases 1–9.
 
 ### Observability & Monitoring
 
-- [ ] **Add structured event emission from `Application._on_message()` with correlation ID propagation** — The message pipeline (`_on_message` → `pipeline.execute()`) does not emit an `error_occurred` event when the pipeline raises. Add a try/except wrapper that emits `Event(name="error_occurred")` with the exception details and correlation ID, so error-monitoring subscribers are notified of pipeline failures. (`src/app.py:401-409`)
+- [x] **Add structured event emission from `Application._on_message()` with correlation ID propagation** — The message pipeline (`_on_message` → `pipeline.execute()`) does not emit an `error_occurred` event when the pipeline raises. Add a try/except wrapper that emits `Event(name="error_occurred")` with the exception details and correlation ID, so error-monitoring subscribers are notified of pipeline failures. (`src/app.py:401-409`)
 
 - [ ] **Add per-skill timeout histogram to Prometheus metrics** — Each skill declares a `timeout_seconds` attribute, but there is no metric tracking how close skill executions get to their timeout. Add a gauge metric (`custombot_skill_timeout_ratio`) that tracks the ratio of actual execution time to declared timeout, so operators can identify skills that are consistently near their timeout limit and need either optimization or a higher timeout. (`src/monitoring/performance.py`, `src/health/server.py`)
 

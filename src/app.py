@@ -17,8 +17,10 @@ from typing import TYPE_CHECKING, Optional
 
 from src.builder import BotComponents, _build_bot
 from src.channels.base import BaseChannel, IncomingMessage
-from src.config import Config
-from src.constants import DEFAULT_CHANNEL_STARTUP_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT, DEFAULT_THREAD_POOL_WORKERS, WORKSPACE_CLEANUP_INTERVAL_SECONDS, WORKSPACE_DIR
+from src.config import Config, CONFIG_PATH
+from src.config.config_watcher import ConfigChangeApplier, ConfigWatcher
+from src.constants import CONFIG_WATCH_INTERVAL_SECONDS, DEFAULT_CHANNEL_STARTUP_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT, DEFAULT_THREAD_POOL_WORKERS, WORKSPACE_CLEANUP_INTERVAL_SECONDS, WORKSPACE_DIR
+from src.core.event_bus import EVENT_ERROR_OCCURRED, Event, get_event_bus
 from src.core.message_pipeline import (
     MessageContext,
     MessagePipeline,
@@ -32,6 +34,11 @@ from src.lifecycle import (
     _log_startup_complete,
     perform_shutdown,
 )
+from src.logging.logging_config import (
+    clear_correlation_id,
+    get_correlation_id,
+    set_correlation_id,
+)
 from src.monitoring import SessionMetrics
 from src.monitoring.workspace_monitor import WorkspaceMonitor
 from src.scheduler import TaskScheduler
@@ -43,6 +50,17 @@ if TYPE_CHECKING:
     from src.health import HealthServer
 
 log = logging.getLogger(__name__)
+
+
+class _NoOpConfigApplier:
+    """Fallback applier used when the channel is not a WhatsAppChannel (e.g. tests).
+
+    Still detects and logs config changes but does not propagate them to
+    components that require a concrete channel type.
+    """
+
+    def apply(self, old_config: Config, new_config: Config) -> None:
+        log.debug("Config change detected but channel is mocked — skipping apply")
 
 
 class Application:
@@ -77,6 +95,7 @@ class Application:
         self._pipeline: MessagePipeline | None = None
         self._executor: ThreadPoolExecutor | None = None
         self._workspace_monitor: WorkspaceMonitor | None = None
+        self._config_watcher: ConfigWatcher | None = None
 
     @property
     def channel(self) -> BaseChannel:
@@ -162,6 +181,8 @@ class Application:
         except Exception as e:
             log.error("Unexpected error in main loop: %s", e, exc_info=self._verbose)
             self._session_metrics.increment_errors()
+            from src.monitoring.performance import get_metrics_collector
+            get_metrics_collector().track_error()
         finally:
             await self._shutdown_cleanup()
 
@@ -206,7 +227,7 @@ class Application:
         self._initialized_components.append("Database")
 
         # Scheduler
-        self._scheduler = self._init_scheduler()
+        self._scheduler = await self._init_scheduler()
 
         # Channel
         _log_component_init("WhatsApp Channel", "started")
@@ -238,13 +259,25 @@ class Application:
         )
         self._initialized_components.append("Workspace Monitor")
 
+        # Start config hot-reload watcher (polling-based)
+        _log_component_init("Config Watcher", "started")
+        self._config_watcher = self._init_config_watcher()
+        self._config_watcher.start()
+        _log_component_ready(
+            "Config Watcher",
+            f"path={CONFIG_PATH}, interval={CONFIG_WATCH_INTERVAL_SECONDS:.0f}s",
+        )
+        self._initialized_components.append("Config Watcher")
+
         return startup_time
 
-    def _init_scheduler(self) -> TaskScheduler:
+    async def _init_scheduler(self) -> TaskScheduler:
         """Create, configure, and start the task scheduler."""
         _log_component_init("Task Scheduler", "started")
         workspace = Path(WORKSPACE_DIR)
         scheduler = TaskScheduler()
+        # Wire unified dedup service for outbound message dedup
+        scheduler.set_dedup_service(self.components.dedup)
         scheduler.configure(
             workspace=workspace,
             on_trigger=lambda chat_id, prompt: self.components.bot.process_scheduled(
@@ -252,11 +285,50 @@ class Application:
             ),
         )
         set_scheduler_instance(scheduler)
-        scheduler.load_all()
+        await scheduler.load_all()
         scheduler.start()
         _log_component_ready("Task Scheduler", f"workspace={workspace}")
         self._initialized_components.append("Task Scheduler")
         return scheduler
+
+    def _init_config_watcher(self) -> ConfigWatcher:
+        """Create the config hot-reload watcher with component references."""
+        from src.channels.whatsapp import WhatsAppChannel
+
+        # Only set up hot-reload with a real WhatsAppChannel (not test mocks)
+        if not isinstance(self._channel, WhatsAppChannel):
+            log.debug(
+                "Config watcher: channel is not WhatsAppChannel — using no-op applier"
+            )
+            applier = _NoOpConfigApplier()
+        else:
+            applier = ConfigChangeApplier(
+                app_config=self._config,
+                bot=self.components.bot,
+                channel=self._channel,
+                llm=self.components.llm,
+                shutdown_mgr=self.shutdown_mgr,
+                reconfigure_logging=self._reconfigure_logging,
+            )
+        return ConfigWatcher(
+            config_path=CONFIG_PATH,
+            current_config=self._config,
+            applier=applier,
+        )
+
+    @staticmethod
+    def _reconfigure_logging(config: Config) -> None:
+        """Reconfigure logging after a config change (e.g. verbosity)."""
+        from main import _setup_logging
+
+        _setup_logging(
+            verbose=False,
+            log_format=config.log_format,
+            log_file=config.log_file,
+            log_max_bytes=config.log_max_bytes,
+            log_backup_count=config.log_backup_count,
+            log_verbosity=config.log_verbosity,
+        )
 
     # ── Pipeline Construction ────────────────────────────────────────────────
 
@@ -339,13 +411,47 @@ class Application:
             return
 
         assert self._pipeline is not None  # set during _startup()
+
+        # Propagate correlation ID from the incoming message (or generate a
+        # fresh one) so that all downstream logging and event emission can be
+        # traced back to this message.
+        set_correlation_id(msg.correlation_id)
+
         ctx = MessageContext(msg=msg)
-        await self._pipeline.execute(ctx)
+        try:
+            await self._pipeline.execute(ctx)
+        except Exception as exc:
+            # Emit an error_occurred event so that monitoring subscribers are
+            # notified of pipeline failures.  Event emission itself must never
+            # break the error-handling path.
+            try:
+                await get_event_bus().emit(Event(
+                    name=EVENT_ERROR_OCCURRED,
+                    data={
+                        "chat_id": msg.chat_id,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    },
+                    source="Application._on_message",
+                    correlation_id=get_correlation_id(),
+                ))
+            except Exception:
+                pass  # Event emission must not mask the original exception
+            raise
+        finally:
+            clear_correlation_id()
 
     # ── Shutdown Phase ──────────────────────────────────────────────────────
 
     async def _shutdown_cleanup(self) -> None:
         """Delegate to the shared ordered-shutdown sequence."""
+        # Stop config watcher before general shutdown
+        if self._config_watcher is not None:
+            try:
+                await self._config_watcher.stop()
+            except Exception as e:
+                log.warning("Error stopping config watcher: %s", e)
+
         # Stop workspace monitor before general shutdown
         if self._workspace_monitor is not None:
             try:
