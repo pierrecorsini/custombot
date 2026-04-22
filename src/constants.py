@@ -399,6 +399,15 @@ COMPRESSION_LINE_THRESHOLD: int = 5000
 COMPRESSION_KEEP_RECENT: int = 500
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Generation Counter (Write-Conflict Detection)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum entries in the per-chat generation counter dict.
+# Prevents unbounded memory growth for long-running bots with thousands of chats.
+# Uses FIFO eviction (oldest entries removed first) when the cap is exceeded.
+MAX_CHAT_GENERATIONS: int = 10_000
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Tool Result Persistence Limits
 # ─────────────────────────────────────────────────────────────────────────────
 

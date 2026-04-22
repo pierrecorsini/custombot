@@ -110,7 +110,7 @@ gaps, and operational resilience not addressed in Phases 1–9.
 
 ### Performance Optimization
 
-- [ ] **Add TTL-based cleanup for `_chat_generations` dict in `Database`** — `self._chat_generations` grows without bound as new chat IDs are encountered. For long-running bots with thousands of chats, this dict consumes increasing memory. Add a periodic sweep (e.g., evict entries older than 24 hours since last write) or cap the dict size with LRU eviction similar to `_message_id_index`. (`src/db/db.py:285`)
+- [x] **Add TTL-based cleanup for `_chat_generations` dict in `Database`** — `self._chat_generations` grows without bound as new chat IDs are encountered. For long-running bots with thousands of chats, this dict consumes increasing memory. Add a periodic sweep (e.g., evict entries older than 24 hours since last write) or cap the dict size with LRU eviction similar to `_message_id_index`. (`src/db/db.py:285`)
 
 - [ ] **Replace `scheduler.py` synchronous `_persist_sync()` with async alternative** — `_persist_sync()` performs blocking file I/O (`path.write_text()`) which can stall the event loop when called from `add_task()`. The sync variant exists for backward compatibility but skills execute in an async context. Replace all call sites with `_persist_async()` or wrap `_persist_sync()` in `asyncio.to_thread()`. (`src/scheduler.py:235-242`)
 

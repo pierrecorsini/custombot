@@ -39,6 +39,7 @@ from src.constants import (
     COMPRESSION_KEEP_RECENT,
     COMPRESSION_LINE_THRESHOLD,
     DEFAULT_DB_TIMEOUT,
+    MAX_CHAT_GENERATIONS,
     MAX_FILE_HANDLES,
     MAX_LRU_CACHE_SIZE,
 )
@@ -282,7 +283,9 @@ class Database:
         # Callers can read the generation before building context and verify
         # it hasn't changed before persisting — preventing interleaved writes
         # from concurrent scheduled and user messages.
-        self._chat_generations: Dict[str, int] = {}
+        # Bounded via FIFO eviction (oldest entries evicted first) to prevent
+        # unbounded memory growth for long-running bots with many chats.
+        self._chat_generations: OrderedDict[str, int] = OrderedDict()
 
     def _get_chats_lock(self) -> asyncio.Lock:
         """Return the chats lock, creating it on first use.
@@ -1055,8 +1058,25 @@ class Database:
         return self._chat_generations.get(chat_id, 0) == expected
 
     def _bump_generation(self, chat_id: str) -> None:
-        """Increment the generation counter after a successful write."""
+        """Increment the generation counter after a successful write.
+
+        Uses OrderedDict for deterministic FIFO eviction: when the dict
+        exceeds ``MAX_CHAT_GENERATIONS``, the oldest quarter of entries is
+        removed to prevent unbounded memory growth in long-running bots.
+        """
         self._chat_generations[chat_id] = self._chat_generations.get(chat_id, 0) + 1
+        # Move to end so recently-written chats are evicted last (LRU order)
+        self._chat_generations.move_to_end(chat_id)
+
+        if len(self._chat_generations) > MAX_CHAT_GENERATIONS:
+            discard_count = MAX_CHAT_GENERATIONS // 4
+            for _ in range(discard_count):
+                self._chat_generations.popitem(last=False)
+            log.debug(
+                "Trimmed %d entries from _chat_generations (cap=%d)",
+                discard_count,
+                MAX_CHAT_GENERATIONS,
+            )
 
     # ── history compression ─────────────────────────────────────────────────
 
