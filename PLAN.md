@@ -94,7 +94,7 @@ gaps, and operational resilience not addressed in Phases 1–9.
 
 ### Error Handling & Resilience
 
-- [ ] **Fix potential `UnboundLocalError` in `LLMClient.chat_stream()` finally block** — If an exception occurs very early in the `try` block (e.g., `self._client.chat.completions.create` raises before `buffered_chunk` is assigned), the `finally` block at line 598 references `buffered_chunk` which may be undefined. Initialize `buffered_chunk = ""` before the `try` block (it is currently only initialized inside the `try` at line 465). (`src/llm.py:462-603`)
+- [x] **Fix potential `UnboundLocalError` in `LLMClient.chat_stream()` finally block** — If an exception occurs very early in the `try` block (e.g., `self._client.chat.completions.create` raises before `buffered_chunk` is assigned), the `finally` block at line 598 references `buffered_chunk` which may be undefined. Initialize `buffered_chunk = ""` before the `try` block (it is currently only initialized inside the `try` at line 465). (`src/llm.py:462-603`)
 
 - [ ] **Guard `SkillRegistry.wire_llm_clients()` against per-skill wiring failures** — If a single skill's `wire_llm()` raises an exception, the entire loop terminates and all subsequent skills remain unwired. Wrap each `skill.wire_llm(llm)` call in a try/except that logs the error and continues, so one broken skill doesn't prevent others from receiving the LLM client. (`src/skills/__init__.py:83-91`)
 

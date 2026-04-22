@@ -459,16 +459,16 @@ class LLMClient:
             len(messages),
         )
 
-        try:
-            # Collect the streamed response into a ChatCompletion-like object
-            accumulated_content = ""
-            buffered_chunk = ""
-            finish_reason = None
-            tool_calls_data: list[dict] = []
-            usage_data = None
-            role = "assistant"
+        # Initialise accumulator variables before the try block so the finally
+        # block can safely reference them even if the stream fails immediately.
+        accumulated_content = ""
+        buffered_chunk = ""
+        finish_reason = None
+        tool_calls_data: list[dict] = []
+        usage_data = None
+        role = "assistant"
 
-            import asyncio
+        try:
 
             stream = await self._client.chat.completions.create(**kwargs)
             async for event in stream:
