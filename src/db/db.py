@@ -68,6 +68,7 @@ from src.logging import get_correlation_id
 from src.utils import (
     DEFAULT_MIN_DISK_SPACE,
     JsonParseMode,
+    LRUDict,
     LRULockCache,
     check_disk_space,
     json_dumps,
@@ -314,6 +315,10 @@ class Database:
         # Bounded pool of open file handles for message JSONL appends.
         # Prevents OS file-descriptor exhaustion under extreme concurrency.
         self._file_pool = _FileHandlePool(max_size=MAX_FILE_HANDLES)
+
+        # Cached path resolution: avoids repeated sanitize + validate + Path
+        # construction on every DB operation for the same chat_id.
+        self._message_file_cache: LRUDict = LRUDict(max_size=MAX_LRU_CACHE_SIZE)
 
         self._initialized = False
 
@@ -855,12 +860,17 @@ class Database:
         sync_atomic_write(file_path, content)
 
     def _message_file(self, chat_id: str) -> Path:
-        """Get the message file path for a chat."""
+        """Get the message file path for a chat (cached per chat_id)."""
+        cached = self._message_file_cache.get(chat_id)
+        if cached is not None:
+            return cached
         # Sanitize first so special chars (e.g. WhatsApp ':' '@') are replaced
         # before validation rejects them.
         safe_id = _sanitize_chat_id_for_path(chat_id)
         _validate_chat_id(safe_id)
-        return self._messages_dir / f"{safe_id}.jsonl"
+        path = self._messages_dir / f"{safe_id}.jsonl"
+        self._message_file_cache[chat_id] = path
+        return path
 
     # ── message index ───────────────────────────────────────────────────────
 
@@ -1271,7 +1281,11 @@ class Database:
         # Minimum ~200 bytes per JSONL line is a conservative estimate.
         try:
             file_size = msg_file.stat().st_size
+        except FileNotFoundError:
+            log.debug("compress: file disappeared before stat — %s [%s]", msg_file.name, chat_id)
+            return {"compressed": False}
         except OSError:
+            log.warning("compress: I/O error during stat — %s [%s]", msg_file.name, chat_id)
             return {"compressed": False}
 
         if file_size < COMPRESSION_LINE_THRESHOLD * 200:
@@ -1280,7 +1294,11 @@ class Database:
         # Read the file
         try:
             content = msg_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            log.debug("compress: file disappeared before read — %s [%s]", msg_file.name, chat_id)
+            return {"compressed": False}
         except OSError:
+            log.warning("compress: I/O error during read — %s [%s]", msg_file.name, chat_id)
             return {"compressed": False}
 
         lines = content.splitlines()

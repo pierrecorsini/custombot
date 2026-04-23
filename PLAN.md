@@ -258,7 +258,7 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 ### Error Handling & Resilience
 
-- [ ] **Handle `read_text` failure in `_compress_chat_history_sync` gracefully** — If the JSONL file is deleted between the `stat()` check and the `read_text()` call (race with `repair_message_file` or manual deletion), the `OSError` is caught and returns `{"compressed": False}`, but the `FileNotFoundError` subclass isn't explicitly handled. Add explicit `FileNotFoundError` handling to distinguish "file disappeared" (log + skip) from "I/O error" (log warning), improving debuggability. (`src/db/db.py:1280-1284`)
+- [x] **Handle `read_text` failure in `_compress_chat_history_sync` gracefully** — If the JSONL file is deleted between the `stat()` check and the `read_text()` call (race with `repair_message_file` or manual deletion), the `OSError` is caught and returns `{"compressed": False}`, but the `FileNotFoundError` subclass isn't explicitly handled. Add explicit `FileNotFoundError` handling to distinguish "file disappeared" (log + skip) from "I/O error" (log warning), improving debuggability. (`src/db/db.py:1280-1284`)
 
 - [ ] **Guard `_build_message_record()` against `None` content** — `_build_message_record()` is called with `content` from various sources. If a skill returns `None` (instead of an empty string) and it propagates through `str(result)` → `None`, the `calculate_checksum(content, ...)` call would fail with `TypeError`. Add an early `content = content or ""` guard to ensure content is always a string before checksum calculation. (`src/db/db.py:976-1021`)
 
