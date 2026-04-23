@@ -14,9 +14,17 @@ venv/
 .ruff_cache/
 .mypy_cache/
 .hypothesis/
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+.tox/
 
 # AI assistant context
 .opencode/
+.agents/
+.claude/
 
 # Temporary / session files
 .tmp/
@@ -59,3 +67,13 @@ h24loop.sh
 opencode.json
 pytest.ini
 requirements-dev.txt
+
+# Test suite
+tests/
+conftest.py
+
+# Dev tooling config
+pyproject.toml
+
+# Environment files
+.env

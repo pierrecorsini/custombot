@@ -218,7 +218,7 @@ addressed in Phases 1–10.
 
 - [x] **Pin Dockerfile base image to a specific patch release** — `python:3.11-slim` floats to the latest 3.11.x. A Docker Hub patch release could introduce subtle runtime changes. Pin to a specific version (e.g., `python:3.11.12-slim-bookworm`) and update deliberately during scheduled maintenance. (`Dockerfile:20, 44`)
 
-- [ ] **Expand `.dockerignore` to exclude all development artifacts** — The `.dockerignore` may not exclude `.pytest_cache/`, `.ruff_cache/`, `.mypy_cache/`, `.hypothesis/`, `.tmp/`, `.opencode/`, `.agents/`, `.claude/`, and `*.pyc` files. These inflate the build context sent to the Docker daemon, slowing builds. Audit and add all dev-only paths. (`.dockerignore`)
+- [x] **Expand `.dockerignore` to exclude all development artifacts** — The `.dockerignore` may not exclude `.pytest_cache/`, `.ruff_cache/`, `.mypy_cache/`, `.hypothesis/`, `.tmp/`, `.opencode/`, `.agents/`, `.claude/`, and `*.pyc` files. These inflate the build context sent to the Docker daemon, slowing builds. Audit and add all dev-only paths. (`.dockerignore`)
 
 - [ ] **Add `--cov-fail-under` threshold increase roadmap to CI** — Current CI requires 60% coverage (`--cov-fail-under=60`). Add a plan to incrementally raise this threshold (60 → 65 → 70 → 75) over subsequent phases, ensuring each phase contributes test coverage improvements. Document the target timeline. (`.github/workflows/ci.yml:79`, `PLAN.md`)
 
