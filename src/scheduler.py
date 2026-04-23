@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from src.constants import (
+    DEFAULT_SCHEDULER_TASK_TIMEOUT,
     SCHEDULER_MAX_RETRIES,
     SCHEDULER_RETRY_INITIAL_DELAY,
 )
@@ -383,7 +384,19 @@ class TaskScheduler:
                 log.warning("No on_trigger callback — skipping task %s", task.get("task_id"))
                 return
 
-            result = await self._trigger_with_retry(chat_id, prompt, task.get("task_id", ""))
+            try:
+                result = await asyncio.wait_for(
+                    self._trigger_with_retry(chat_id, prompt, task.get("task_id", "")),
+                    timeout=DEFAULT_SCHEDULER_TASK_TIMEOUT,
+                )
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    f"Scheduled task {task.get('task_id', '?')} timed out after "
+                    f"{DEFAULT_SCHEDULER_TASK_TIMEOUT}s"
+                ) from None
+
             task["last_result"] = (result or "")[:2000]
             task["last_run"] = _now().isoformat()
 

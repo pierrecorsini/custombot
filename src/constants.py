@@ -308,6 +308,11 @@ SCHEDULER_MAX_RETRIES: int = 2
 # Uses exponential backoff with jitter: ~30s, then ~60s on the second retry.
 SCHEDULER_RETRY_INITIAL_DELAY: float = 30.0
 
+# Maximum wall-clock time (seconds) for a single scheduled task execution.
+# Covers the trigger callback (LLM call) plus all retry attempts with backoff.
+# Prevents a stuck task from blocking the scheduler tick indefinitely.
+DEFAULT_SCHEDULER_TASK_TIMEOUT: float = 300.0  # 5 minutes
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Scheduled Task Error Detection
 # ─────────────────────────────────────────────────────────────────────────────
