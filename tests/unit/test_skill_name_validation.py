@@ -1,8 +1,10 @@
 """
-test_skill_name_validation.py — Unit tests for skill name validation.
+test_skill_name_validation.py — Unit tests for skill name validation
+and tool-definitions caching.
 
 Verifies that SkillRegistry.register() rejects names containing
-characters outside [a-z0-9_].
+characters outside [a-z0-9_], and that tool_definitions is cached
+and invalidated correctly.
 """
 
 from __future__ import annotations
@@ -85,3 +87,44 @@ class TestInvalidSkillNames:
         registry = SkillRegistry()
         registry.register(_make_skill(""))
         assert len(registry.all()) == 0
+
+
+class TestToolDefinitionsCaching:
+    """Verify tool_definitions is cached, not rebuilt on every access."""
+
+    def test_100_accesses_trigger_single_rebuild(self):
+        """100 consecutive property accesses should compute once, not 100 times."""
+        registry = SkillRegistry()
+        registry.register(_make_skill("alpha"))
+        registry.register(_make_skill("beta"))
+
+        first = registry.tool_definitions
+        assert len(first) == 2
+
+        for _ in range(99):
+            assert registry.tool_definitions is first
+
+    def test_cache_invalidated_on_register(self):
+        """Registering a new skill must invalidate the cache."""
+        registry = SkillRegistry()
+        registry.register(_make_skill("alpha"))
+
+        first = registry.tool_definitions
+        assert len(first) == 1
+
+        registry.register(_make_skill("beta"))
+        second = registry.tool_definitions
+
+        assert second is not first
+        assert len(second) == 2
+
+    def test_re_registration_invalidates_cache(self):
+        """Replacing an existing skill must invalidate the cache."""
+        registry = SkillRegistry()
+        registry.register(_make_skill("alpha"))
+        first = registry.tool_definitions
+
+        registry.register(_make_skill("alpha"))
+        second = registry.tool_definitions
+
+        assert second is not first
