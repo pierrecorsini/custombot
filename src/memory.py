@@ -108,16 +108,19 @@ class Memory:
 
     # ── internal ───────────────────────────────────────────────────────────
 
-    def _chat_dir(self, chat_id: str) -> Path:
-        """Return the chat directory path without creating it."""
+    def _resolve_chat_path(self, chat_id: str) -> Path:
+        """Build and validate the chat directory path."""
         d = self._root / "whatsapp_data" / sanitize_path_component(chat_id)
         self._validate_path(d, chat_id)
         return d
 
+    def _chat_dir(self, chat_id: str) -> Path:
+        """Return the chat directory path without creating it."""
+        return self._resolve_chat_path(chat_id)
+
     def _ensure_chat_dir(self, chat_id: str) -> Path:
         """Return the chat directory path, creating it if needed."""
-        d = self._root / "whatsapp_data" / sanitize_path_component(chat_id)
-        self._validate_path(d, chat_id)
+        d = self._resolve_chat_path(chat_id)
         d.mkdir(parents=True, exist_ok=True)
         return d
 
