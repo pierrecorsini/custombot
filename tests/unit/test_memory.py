@@ -917,3 +917,115 @@ class TestPathTraversalValidation:
         # but resolve() follows the symlink and detects the escape
         with pytest.raises(PathSecurityError, match="Workspace escape blocked"):
             m.ensure_workspace("evil_link")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mtime Cache Consistency After External File Modification
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestMtimeCacheConsistency:
+    """Verify that mtime-based caching correctly invalidates when an external
+    process (e.g. a skill) modifies the file on disk between reads."""
+
+    @pytest.mark.asyncio
+    async def test_external_memory_modification_invalidates_cache(
+        self, mem: Memory, workspace: Path
+    ):
+        """An external write to MEMORY.md changes mtime, so the next
+        read_memory() must return the new content, not the stale cache."""
+        _write_memory_raw(workspace, "chat1", "original content")
+        first = await mem.read_memory("chat1")
+        assert first == "original content"
+
+        # External process modifies the file (mtime changes)
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "externally modified")
+
+        second = await mem.read_memory("chat1")
+        assert second == "externally modified"
+
+    @pytest.mark.asyncio
+    async def test_multiple_external_modifications_detected(
+        self, mem: Memory, workspace: Path
+    ):
+        """Each successive external modification is picked up independently."""
+        _write_memory_raw(workspace, "chat1", "v1")
+        assert await mem.read_memory("chat1") == "v1"
+
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "v2")
+        assert await mem.read_memory("chat1") == "v2"
+
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "v3")
+        assert await mem.read_memory("chat1") == "v3"
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_then_external_mod_returns_fresh(
+        self, mem: Memory, workspace: Path
+    ):
+        """After a cache hit (same mtime), an external modification still
+        causes the next read to return fresh content."""
+        _write_memory_raw(workspace, "chat1", "initial")
+        await mem.read_memory("chat1")
+        # Second read is a cache hit (mtime unchanged)
+        assert await mem.read_memory("chat1") == "initial"
+
+        # External modification
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "updated by skill")
+
+        result = await mem.read_memory("chat1")
+        assert result == "updated by skill"
+
+    @pytest.mark.asyncio
+    async def test_external_agents_md_modification_invalidates_cache(
+        self, mem: Memory, workspace: Path
+    ):
+        """Same mtime-based cache invalidation applies to AGENTS.md reads."""
+        mem.ensure_workspace("chat1")
+        first = await mem.read_agents_md("chat1")
+        assert "Agent Instructions" in first
+
+        # External process overwrites AGENTS.md
+        time.sleep(0.05)
+        agents = _agents_path(workspace, "chat1")
+        agents.write_text("# Custom Agent\nNew instructions.", encoding="utf-8")
+
+        result = await mem.read_agents_md("chat1")
+        assert result == "# Custom Agent\nNew instructions."
+
+    @pytest.mark.asyncio
+    async def test_external_mod_to_empty_invalidates_cache(
+        self, mem: Memory, workspace: Path
+    ):
+        """External modification that empties the file returns None (stripped
+        whitespace-only content is treated as missing)."""
+        _write_memory_raw(workspace, "chat1", "has content")
+        assert await mem.read_memory("chat1") == "has content"
+
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "")
+
+        result = await mem.read_memory("chat1")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_cache_entry_reflects_last_external_content(
+        self, mem: Memory, workspace: Path
+    ):
+        """After external modification and re-read, the internal cache entry
+        stores the new content and mtime — not the old values."""
+        _write_memory_raw(workspace, "chat1", "first")
+        await mem.read_memory("chat1")
+        old_cached = mem._memory_cache.get("chat1")
+        assert old_cached[1] == "first"
+
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "second")
+        await mem.read_memory("chat1")
+
+        new_cached = mem._memory_cache.get("chat1")
+        assert new_cached[1] == "second"
+        assert new_cached[0] != old_cached[0]  # mtime changed

@@ -206,7 +206,7 @@ addressed in Phases 1–10.
 
 - [x] **Add chaos test for concurrent `save_messages_batch` and `compress_chat_history`** — Both operations acquire per-chat locks, but `compress_chat_history` is triggered asynchronously after writes (in `save_message` and `save_messages_batch`). There's a window where a write triggers compression, which then rewrites the file while another write is pending. Add a test that exercises this race: write a batch, then immediately write another batch, and verify no data loss. (`tests/unit/test_db.py`)
 
-- [ ] **Add test for `Memory` mtime cache consistency after external file modification** — `Memory.read_memory()` uses mtime-based caching. If an external process (e.g., a skill modifying MEMORY.md) changes the file between reads, the cache should be invalidated. Add a test that modifies the file's content and mtime between reads and verifies the second read returns the updated content. (`tests/unit/test_memory.py`)
+- [x] **Add test for `Memory` mtime cache consistency after external file modification** — `Memory.read_memory()` uses mtime-based caching. If an external process (e.g., a skill modifying MEMORY.md) changes the file between reads, the cache should be invalidated. Add a test that modifies the file's content and mtime between reads and verifies the second read returns the updated content. (`tests/unit/test_memory.py`)
 
 - [ ] **Add test for `TaskScheduler` DST transition handling** — The scheduler caches the local UTC offset and refreshes it hourly. DST transitions (e.g., spring forward) could cause scheduled daily tasks to fire an hour early or skip entirely. Add a test with mocked `datetime.now()` to verify correct behavior across DST boundaries. (`tests/unit/test_scheduler.py`)
 
