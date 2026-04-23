@@ -36,6 +36,15 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def outbound_key(chat_id: str, text: str) -> str:
+    """Content-addressable key via SHA-256.
+
+    Deterministic hash combining *chat_id* and *text* so identical
+    outbound messages to the same chat produce the same key.
+    """
+    return hashlib.sha256(f"{chat_id}\x00{text}".encode("utf-8")).hexdigest()
+
+
 @dataclass
 class DedupStats:
     """Snapshot of dedup hit/miss counters for both strategies."""
@@ -107,18 +116,13 @@ class DeduplicationService:
 
     # ── Outbound dedup (content-hash based, TTL LRU cache) ──────────────────
 
-    @staticmethod
-    def _outbound_key(chat_id: str, text: str) -> str:
-        """Content-addressable key via SHA-256."""
-        return hashlib.sha256(f"{chat_id}\x00{text}".encode("utf-8")).hexdigest()
-
     def is_outbound_duplicate(self, chat_id: str, text: str) -> bool:
         """Return ``True`` if *text* was recently sent to *chat_id*.
 
         Records the current timestamp on miss so subsequent calls detect it
         within the TTL window.
         """
-        key = self._outbound_key(chat_id, text)
+        key = outbound_key(chat_id, text)
         now = time.monotonic()
         sent_at = self._outbound_cache.get(key)
         if sent_at is not None and (now - sent_at) < self._outbound_ttl:
@@ -130,7 +134,7 @@ class DeduplicationService:
 
     def record_outbound(self, chat_id: str, text: str) -> None:
         """Explicitly record that *text* was sent to *chat_id*."""
-        key = self._outbound_key(chat_id, text)
+        key = outbound_key(chat_id, text)
         self._outbound_cache[key] = time.monotonic()
 
     # ── Stats ───────────────────────────────────────────────────────────────

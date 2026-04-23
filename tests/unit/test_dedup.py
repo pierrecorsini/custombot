@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.core.dedup import DedupStats, DeduplicationService
+from src.core.dedup import DedupStats, DeduplicationService, outbound_key
 from src.exceptions import DatabaseError
 
 
@@ -28,6 +28,33 @@ def _make_db(message_exists_return: bool = False) -> AsyncMock:
     db = AsyncMock()
     db.message_exists = AsyncMock(return_value=message_exists_return)
     return db
+
+
+# ===========================================================================
+# outbound_key — standalone hash function
+# ===========================================================================
+
+
+class TestOutboundKey:
+    """Tests for the module-level ``outbound_key`` hash function."""
+
+    def test_deterministic(self) -> None:
+        """Same inputs always produce the same key."""
+        assert outbound_key("chat_1", "hello") == outbound_key("chat_1", "hello")
+
+    def test_different_inputs_produce_different_keys(self) -> None:
+        assert outbound_key("chat_1", "hello") != outbound_key("chat_1", "world")
+        assert outbound_key("chat_1", "hello") != outbound_key("chat_2", "hello")
+
+    def test_returns_hex_string(self) -> None:
+        key = outbound_key("chat_1", "text")
+        assert isinstance(key, str)
+        assert len(key) == 64  # SHA-256 hex digest length
+
+    def test_empty_text(self) -> None:
+        """Empty text still produces a valid key."""
+        key = outbound_key("chat_1", "")
+        assert len(key) == 64
 
 
 # ===========================================================================
