@@ -30,6 +30,7 @@ from src.constants import (
     SCHEDULER_MAX_RETRIES,
     SCHEDULER_RETRY_INITIAL_DELAY,
 )
+from src.utils.path import sanitize_path_component
 from src.utils.retry import is_transient_error
 
 if TYPE_CHECKING:
@@ -220,12 +221,36 @@ class TaskScheduler:
 
     # ── persistence ────────────────────────────────────────────────────────
 
+    def _resolve_tasks_path(self, chat_id: str) -> Path | None:
+        """Build and validate the tasks.json path for a chat.
+
+        Sanitizes ``chat_id`` and verifies the resolved path stays within
+        the workspace root to prevent path-traversal attacks.
+
+        Returns:
+            Validated ``Path`` or ``None`` if workspace is unset / path is
+            outside the workspace tree.
+        """
+        if not self._workspace:
+            return None
+        safe_id = sanitize_path_component(chat_id)
+        dest = (self._workspace / safe_id / SCHEDULER_DIR / TASKS_FILE).resolve()
+        workspace_root = self._workspace.resolve()
+        if not dest.is_relative_to(workspace_root):
+            log.warning(
+                "Scheduler path traversal blocked for chat_id=%r (resolved: %s)",
+                chat_id,
+                dest,
+            )
+            return None
+        return dest
+
     async def _persist(self, chat_id: str) -> None:
         """Persist tasks to disk via thread pool to avoid blocking the event loop."""
-        if not self._workspace:
+        dest = self._resolve_tasks_path(chat_id)
+        if dest is None:
             return
         data = self._tasks.get(chat_id, [])
-        dest = self._workspace / chat_id / SCHEDULER_DIR / TASKS_FILE
         await asyncio.to_thread(self._write_tasks_file, dest, data)
 
     @staticmethod
@@ -236,11 +261,11 @@ class TaskScheduler:
 
     async def _load(self, chat_id: str) -> None:
         """Load tasks for a chat from disk via thread pool to avoid blocking."""
-        if not self._workspace:
+        dest = self._resolve_tasks_path(chat_id)
+        if dest is None:
             return
-        path = self._workspace / chat_id / SCHEDULER_DIR / TASKS_FILE
         try:
-            raw = await asyncio.to_thread(self._read_tasks_file, path)
+            raw = await asyncio.to_thread(self._read_tasks_file, dest)
             if raw is not None:
                 self._tasks[chat_id] = json.loads(raw)
         except (json.JSONDecodeError, OSError) as exc:
