@@ -206,6 +206,26 @@ class TestNameSanitization:
         assert len(content_rows) == 1
         assert content_rows[0]["name"] == "X" * 200
 
+    async def test_build_message_record_none_content_becomes_empty(
+        self, initialized_db: Database
+    ) -> None:
+        """None content is normalized to empty string before checksum and persist."""
+        db = initialized_db
+        await db.upsert_chat("chat_1", "Alice")
+        await db.save_message("chat_1", "assistant", None, "Bot")  # type: ignore[arg-type]
+
+        rows = await db.get_recent_messages("chat_1", limit=10)
+        assistant_rows = [r for r in rows if r["role"] == "assistant"]
+        assert len(assistant_rows) == 1
+        assert assistant_rows[0]["content"] == ""
+
+    def test_build_message_record_static_none_content(self) -> None:
+        """Static call: None content is coerced to empty string."""
+        record, mid = Database._build_message_record("tool", None, "skill_a")
+        assert record["content"] == ""
+        assert mid  # message ID was generated
+        assert "_checksum" in record
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Generation counter bounded growth

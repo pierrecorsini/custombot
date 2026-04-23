@@ -985,7 +985,7 @@ class Database:
     @staticmethod
     def _build_message_record(
         role: str,
-        content: str,
+        content: Optional[str],
         name: Optional[str] = None,
         message_id: Optional[str] = None,
     ) -> dict:
@@ -997,6 +997,7 @@ class Database:
         Returns:
             Tuple of ``(record_dict, message_id)``.
         """
+        content = content or ""
         mid = message_id or str(uuid.uuid4())
         timestamp = time.time()
         checksum = calculate_checksum(content, role, timestamp)
