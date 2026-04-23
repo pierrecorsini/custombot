@@ -1,11 +1,12 @@
 """Tests for Database.save_messages_batch() atomicity, generation counter,
-and name field sanitization.
+name field sanitization, and write circuit breaker.
 
 Verifies:
 - save_messages_batch persists all messages in a single lock acquisition
 - Generation counter increments on each write
 - Concurrent calls for the same chat are serialized
 - Name field is sanitized (control chars stripped, truncated)
+- Write circuit breaker fast-fails when open, records failures, recovers
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from pathlib import Path
 import pytest
 
 from src.db.db import Database, _sanitize_name
+from src.exceptions import DatabaseError
+from src.utils.circuit_breaker import CircuitState
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -293,3 +296,215 @@ class TestChatGenerationsBoundedGrowth:
         # "chat_first" should survive because it was moved to the end.
         assert "chat_first" in db._chat_generations
         assert db.get_generation("chat_first") == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Write circuit breaker tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestWriteCircuitBreaker:
+    """Verify the DB write circuit breaker fast-fails on sustained failures."""
+
+    async def test_initial_state_is_closed(self, db: Database) -> None:
+        """Circuit breaker starts in CLOSED state (normal operation)."""
+        assert db.write_breaker.state == CircuitState.CLOSED
+        assert db.write_breaker.failure_count == 0
+
+    async def test_write_succeeds_when_closed(
+        self, initialized_db: Database
+    ) -> None:
+        """Normal write goes through when breaker is CLOSED."""
+        mid = await initialized_db.save_message("chat_1", "user", "hello")
+        assert mid is not None
+        assert initialized_db.write_breaker.state == CircuitState.CLOSED
+
+    async def test_breaker_opens_after_consecutive_failures(
+        self, initialized_db: Database
+    ) -> None:
+        """Breaker transitions to OPEN after failure_threshold consecutive failures."""
+        db = initialized_db
+        # Force the message directory to be unwritable by pointing the
+        # _append_to_file at a non-existent nested path that can't be created.
+        original_append = db._append_to_file
+
+        def _failing_append(*args, **kwargs):
+            raise OSError("Simulated disk I/O failure")
+
+        db._append_to_file = _failing_append  # type: ignore[assignment]
+
+        from src.constants import DB_WRITE_CIRCUIT_FAILURE_THRESHOLD
+
+        for i in range(DB_WRITE_CIRCUIT_FAILURE_THRESHOLD):
+            with pytest.raises(Exception):
+                await db.save_message("chat_1", "user", f"msg_{i}")
+
+        assert db.write_breaker.state == CircuitState.OPEN
+
+        # Restore so teardown doesn't break
+        db._append_to_file = original_append  # type: ignore[assignment]
+
+    async def test_fast_fail_when_open(
+        self, initialized_db: Database
+    ) -> None:
+        """When breaker is OPEN, writes are rejected immediately without timeout."""
+        db = initialized_db
+
+        # Manually force the breaker open.
+        for _ in range(5):
+            await db.write_breaker.record_failure()
+        assert db.write_breaker.state == CircuitState.OPEN
+
+        with pytest.raises(DatabaseError, match="circuit breaker open"):
+            await db.save_message("chat_1", "user", "should be rejected")
+
+    async def test_success_resets_failures(
+        self, initialized_db: Database
+    ) -> None:
+        """A successful write resets the failure counter in CLOSED state."""
+        db = initialized_db
+
+        # Record a few failures (not enough to open).
+        for _ in range(3):
+            await db.write_breaker.record_failure()
+        assert db.write_breaker.failure_count == 3
+
+        # A successful write resets the count.
+        await db.save_message("chat_1", "user", "good write")
+        assert db.write_breaker.failure_count == 0
+        assert db.write_breaker.state == CircuitState.CLOSED
+
+    async def test_batch_write_guarded(
+        self, initialized_db: Database
+    ) -> None:
+        """save_messages_batch is also protected by the write breaker."""
+        db = initialized_db
+
+        # Force breaker open.
+        for _ in range(5):
+            await db.write_breaker.record_failure()
+        assert db.write_breaker.state == CircuitState.OPEN
+
+        with pytest.raises(DatabaseError, match="circuit breaker open"):
+            await db.save_messages_batch("chat_1", [
+                {"role": "user", "content": "batch msg"},
+            ])
+
+    async def test_upsert_chat_guarded(
+        self, initialized_db: Database
+    ) -> None:
+        """upsert_chat is also protected by the write breaker."""
+        db = initialized_db
+
+        # Force breaker open.
+        for _ in range(5):
+            await db.write_breaker.record_failure()
+        assert db.write_breaker.state == CircuitState.OPEN
+
+        with pytest.raises(DatabaseError, match="circuit breaker open"):
+            await db.upsert_chat("chat_1", "Alice")
+
+    async def test_read_not_blocked_by_open_breaker(
+        self, initialized_db: Database
+    ) -> None:
+        """Read operations bypass the write circuit breaker entirely."""
+        db = initialized_db
+
+        # Write a message first.
+        await db.save_message("chat_1", "user", "existing")
+
+        # Force breaker open.
+        for _ in range(5):
+            await db.write_breaker.record_failure()
+        assert db.write_breaker.state == CircuitState.OPEN
+
+        # Reads should still succeed — the write breaker doesn't affect them.
+        messages = await db.get_recent_messages("chat_1", limit=10)
+        assert len(messages) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Concurrent batch writes + compression race
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestConcurrentBatchAndCompression:
+    """Verify no data loss when concurrent batch writes trigger history compression.
+
+    Both save_messages_batch and compress_chat_history acquire the same per-chat
+    lock, so they are serialized.  This test exercises the race where a batch
+    write completes and triggers compression, while a second batch arrives
+    concurrently.  All messages must survive regardless of interleaving order.
+    """
+
+    async def test_concurrent_batches_with_compression_no_data_loss(
+        self,
+        initialized_db: Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Write two batches concurrently where one triggers compression.
+
+        Scenario:
+            1. Pre-fill chat to just below compression threshold
+            2. Launch two save_messages_batch calls concurrently via gather()
+            3. First to write pushes total lines over threshold,
+               triggering compress_chat_history after lock release
+            4. Second batch arrives while compression is pending / running
+            5. Verify ALL batch messages survive with no data loss
+        """
+        # Arrange — lower thresholds so compression fires at test scale
+        monkeypatch.setattr("src.db.db.COMPRESSION_LINE_THRESHOLD", 30)
+        monkeypatch.setattr("src.db.db.COMPRESSION_KEEP_RECENT", 10)
+
+        db = initialized_db
+        chat_id = "chat_race"
+        await db.upsert_chat(chat_id, "TestBot")
+
+        # Pre-fill with messages just below compression threshold.
+        # Long content ensures the file-size gate (threshold * 200 bytes) passes.
+        padding = "x" * 200
+        for i in range(29):
+            await db.save_message(chat_id, "user", f"prefill-{i}-{padding}")
+
+        # Act — two batches written concurrently; first triggers compression
+        batch1 = [
+            {"role": "user", "content": f"batch1-msg{i}-{padding}"} for i in range(5)
+        ]
+        batch2 = [
+            {"role": "user", "content": f"batch2-msg{i}-{padding}"} for i in range(5)
+        ]
+
+        ids1, ids2 = await asyncio.gather(
+            db.save_messages_batch(chat_id, batch1),
+            db.save_messages_batch(chat_id, batch2),
+        )
+
+        # Assert — both batches returned valid IDs
+        assert len(ids1) == 5
+        assert len(ids2) == 5
+
+        # JSONL file must be valid and fully parseable
+        msg_file = db._message_file(chat_id)
+        raw_lines = [
+            line
+            for line in msg_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        for line in raw_lines:
+            parsed = json.loads(line)
+            assert isinstance(parsed, dict), f"Invalid JSONL line: {line[:80]}"
+
+        # ALL batch messages must be present — no data loss
+        rows = await db.get_recent_messages(chat_id, limit=500)
+        contents = {r["content"] for r in rows if r.get("content")}
+
+        for i in range(5):
+            assert f"batch1-msg{i}-{padding}" in contents, (
+                f"batch1-msg{i} lost during concurrent compression"
+            )
+            assert f"batch2-msg{i}-{padding}" in contents, (
+                f"batch2-msg{i} lost during concurrent compression"
+            )
+
+        # Generation should reflect both batch writes (≥ 2 bumps)
+        assert db.get_generation(chat_id) >= 2
