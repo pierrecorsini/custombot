@@ -114,6 +114,16 @@ class ComponentSpec:
     depends_on: Sequence[str] = ()
 
 
+# ── Helper classes ─────────────────────────────────────────────────────
+
+
+class _NoOpApplier:
+    """Fallback config-change applier used when the channel doesn't support hot-reload."""
+
+    def apply(self, old_config, new_config):
+        log.debug("Config change detected but channel is mocked — skipping apply")
+
+
 # ── Step implementations ────────────────────────────────────────────────
 
 
@@ -274,10 +284,6 @@ async def _step_config_watcher(ctx: StartupContext) -> str | None:
         log.debug(
             "Config watcher: channel does not support hot-reload — using no-op applier"
         )
-
-        class _NoOpApplier:
-            def apply(self, old_config, new_config):
-                log.debug("Config change detected but channel is mocked — skipping apply")
 
         applier = _NoOpApplier()
 

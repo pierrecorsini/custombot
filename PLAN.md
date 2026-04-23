@@ -244,7 +244,7 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 - [x] **Move `_outbound_key()` hash computation from `DeduplicationService` to a standalone function** — The SHA-256 key derivation is a pure function with no `self` dependency. Extract it to module level so it can be unit-tested independently and reused if the outbound dedup logic is ever split into its own module. Minor readability win. (`src/core/dedup.py:110-113`)
 
-- [ ] **Extract `_NoOpApplier` from `_step_config_watcher` to module level** — `_NoOpApplier` is defined inside the startup step closure, meaning a new class object is created every time the step runs. Move it to module level in `startup.py` (or to `config_watcher.py`) so it's defined once. Minor, but avoids per-startup class creation and makes the fallback applier discoverable for tests. (`src/core/startup.py:278-281`)
+- [x] **Extract `_NoOpApplier` from `_step_config_watcher` to module level** — `_NoOpApplier` is defined inside the startup step closure, meaning a new class object is created every time the step runs. Move it to module level in `startup.py` (or to `config_watcher.py`) so it's defined once. Minor, but avoids per-startup class creation and makes the fallback applier discoverable for tests. (`src/core/startup.py:278-281`)
 
 ### Performance Optimization
 
