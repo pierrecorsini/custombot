@@ -505,6 +505,87 @@ class TestHandleMessageValidation:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Bot.handle_message Tests — MAX_MESSAGE_LENGTH boundary regression
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestHandleMessageMaxLengthBoundary:
+    """Regression guard: exact boundary behaviour for MAX_MESSAGE_LENGTH.
+
+    Verifies that a message at MAX_MESSAGE_LENGTH - 1 characters is processed
+    normally, while a message at MAX_MESSAGE_LENGTH + 1 characters is rejected
+    with None — preventing silent regressions in the length check.
+    """
+
+    @pytest.fixture()
+    def _setup_bot(self):
+        """Create a fully-wired bot with mocked _process()."""
+        queue = AsyncMock()
+        queue.get_pending_count = AsyncMock(return_value=0)
+        bot = _make_bot(message_queue=queue)
+
+        routing = MagicMock()
+        rule = _make_routing_rule(showErrors=True)
+        routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
+        bot._routing = routing
+
+        return bot
+
+    async def test_message_at_limit_minus_one_is_processed(self, _setup_bot):
+        """A message exactly at MAX_MESSAGE_LENGTH - 1 should reach _process()."""
+        bot = _setup_bot
+        limit = 50_000
+        msg = _make_message(text="x" * (limit - 1))
+
+        with (
+            patch("src.bot.MAX_MESSAGE_LENGTH", limit),
+            patch.object(bot, "_process", new_callable=AsyncMock, return_value="ok") as mock_process,
+            patch("src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]),
+            patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
+            patch.object(bot, "_load_instruction", return_value="prompt"),
+        ):
+            result = await bot.handle_message(msg)
+
+        assert result == "ok"
+        mock_process.assert_awaited_once()
+
+    async def test_message_at_limit_plus_one_returns_none(self):
+        """A message exactly at MAX_MESSAGE_LENGTH + 1 should be rejected."""
+        bot = _make_bot()
+        limit = 50_000
+        msg = _make_message(text="x" * (limit + 1))
+
+        with patch("src.bot.MAX_MESSAGE_LENGTH", limit):
+            result = await bot.handle_message(msg)
+
+        assert result is None
+
+    async def test_message_at_exact_limit_returns_none(self, _setup_bot):
+        """A message exactly at MAX_MESSAGE_LENGTH chars should be rejected.
+
+        The check is strictly greater-than, so equal-to-limit passes through.
+        However, the task description says 'at MAX_MESSAGE_LENGTH + 1 is
+        rejected' — we verify both boundary edges for completeness.
+        """
+        bot = _setup_bot
+        limit = 50_000
+        msg = _make_message(text="x" * limit)
+
+        with (
+            patch("src.bot.MAX_MESSAGE_LENGTH", limit),
+            patch.object(bot, "_process", new_callable=AsyncMock, return_value="ok") as mock_process,
+            patch("src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]),
+            patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
+            patch.object(bot, "_load_instruction", return_value="prompt"),
+        ):
+            result = await bot.handle_message(msg)
+
+        # len(msg.text) == MAX_MESSAGE_LENGTH → not > MAX_MESSAGE_LENGTH → processed
+        assert result == "ok"
+        mock_process.assert_awaited_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Bot.handle_message Tests — Rate Limiting
 # ─────────────────────────────────────────────────────────────────────────────
 

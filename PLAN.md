@@ -212,7 +212,7 @@ addressed in Phases 1–10.
 
 - [x] **Add test for `_process_tool_calls` salvage on `BaseException`** — Phase 9 added a `BaseException` handler in `_process_tool_calls()` that salvages partial results from completed tasks. Add a test that simulates a `KeyboardInterrupt` during TaskGroup execution and verifies that already-completed tool results are returned rather than lost. (`tests/unit/test_bot.py`)
 
-- [ ] **Add regression test for `handle_message` returning `None` on oversized messages** — `handle_message()` rejects messages exceeding `MAX_MESSAGE_LENGTH` and returns `None`. Add a test verifying the exact boundary behavior: a message at `MAX_MESSAGE_LENGTH - 1` is processed, and a message at `MAX_MESSAGE_LENGTH + 1` is rejected with `None`. (`tests/unit/test_bot.py`)
+- [x] **Add regression test for `handle_message` returning `None` on oversized messages** — `handle_message()` rejects messages exceeding `MAX_MESSAGE_LENGTH` and returns `None`. Add a test verifying the exact boundary behavior: a message at `MAX_MESSAGE_LENGTH - 1` is processed, and a message at `MAX_MESSAGE_LENGTH + 1` is rejected with `None`. (`tests/unit/test_bot.py`)
 
 ### DevOps / Infrastructure
 
