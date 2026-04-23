@@ -45,7 +45,7 @@ def outbound_key(chat_id: str, text: str) -> str:
     return hashlib.sha256(f"{chat_id}\x00{text}".encode("utf-8")).hexdigest()
 
 
-@dataclass
+@dataclass(slots=True)
 class DedupStats:
     """Snapshot of dedup hit/miss counters for both strategies."""
 
