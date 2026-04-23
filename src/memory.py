@@ -191,9 +191,15 @@ class Memory:
         path = self._chat_dir(chat_id) / MEMORY_FILENAME
         cached = self._memory_cache.get(chat_id)
         cached_mtime = cached[0] if cached else None
-        mtime, content = await asyncio.to_thread(
-            self._stat_and_read, path, cached_mtime,
-        )
+        try:
+            mtime, content = await asyncio.to_thread(
+                self._stat_and_read, path, cached_mtime,
+            )
+        except Exception as exc:
+            log.error("Failed to read MEMORY.md for chat %s: %s", chat_id, exc)
+            raise OSError(
+                f"Memory read failed for chat {chat_id}: {exc}"
+            ) from exc
         if mtime is None:
             return None
         if content is None:
@@ -404,9 +410,15 @@ class Memory:
         path = self._chat_dir(chat_id) / AGENTS_FILENAME
         cached = self._agents_cache.get(chat_id)
         cached_mtime = cached[0] if cached else None
-        mtime, content = await asyncio.to_thread(
-            self._stat_and_read, path, cached_mtime,
-        )
+        try:
+            mtime, content = await asyncio.to_thread(
+                self._stat_and_read, path, cached_mtime,
+            )
+        except Exception as exc:
+            log.error("Failed to read AGENTS.md for chat %s: %s", chat_id, exc)
+            raise OSError(
+                f"Agents read failed for chat {chat_id}: {exc}"
+            ) from exc
         if mtime is None:
             raise FileNotFoundError(
                 f"AGENTS.md not found for chat {chat_id} at {path}. "
