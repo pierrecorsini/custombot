@@ -361,7 +361,12 @@ class TaskScheduler:
         raise RuntimeError("Unreachable")  # pragma: no cover
 
     async def _execute_task(self, chat_id: str, task: dict[str, Any]) -> None:
-        """Execute a due task by invoking the bot."""
+        """Execute a due task by invoking the bot.
+
+        Note: the caller (_loop) is responsible for persisting updated task
+        state to disk after all tasks in a tick have completed.  This allows
+        batching — one write per unique chat_id instead of one per task.
+        """
         prompt = task.get("prompt", "")
         compare = task.get("compare", False)
         last_result = task.get("last_result")
@@ -381,7 +386,6 @@ class TaskScheduler:
             result = await self._trigger_with_retry(chat_id, prompt, task.get("task_id", ""))
             task["last_result"] = (result or "")[:2000]
             task["last_run"] = _now().isoformat()
-            await self._persist(chat_id)
 
             # Deliver result — transport layer handles reconnection
             if not result:
@@ -443,6 +447,8 @@ class TaskScheduler:
 
         All due tasks are collected first (snapshot), then executed
         concurrently so that long-running tasks don't block co-scheduled ones.
+        After execution, dirty chat_ids are persisted in batch — one file
+        write per unique chat_id instead of one per task.
         """
         while self._running:
             try:
@@ -466,6 +472,12 @@ class TaskScheduler:
                                 result,
                                 exc_info=(type(result), result, result.__traceback__),
                             )
+
+                    # Batch persist: one write per unique dirty chat_id
+                    dirty_chat_ids = {cid for cid, _ in due_tasks}
+                    await asyncio.gather(
+                        *(self._persist(cid) for cid in dirty_chat_ids)
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

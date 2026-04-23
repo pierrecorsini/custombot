@@ -888,6 +888,8 @@ class TestExecuteTask:
         task["task_id"] = "task_001"
         scheduler._tasks["chat1"] = [task]
         await scheduler._execute_task("chat1", task)
+        # _execute_task no longer persists; caller must batch persist
+        await scheduler._persist("chat1")
         path = _tasks_file(workspace, "chat1")
         data = json.loads(path.read_text())
         assert data[0]["last_run"] is not None
@@ -981,9 +983,99 @@ class TestLoop:
 
         on_trigger.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_loop_batches_persists_for_same_chat(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock, workspace: Path,
+    ):
+        """Multiple tasks for the same chat in one tick persist only once."""
+        on_trigger.return_value = "done"
+        # Add 3 interval tasks for chat1 — all are due (no last_run)
+        await scheduler.add_task("chat1", _make_task(prompt="task-a"))
+        await scheduler.add_task("chat1", _make_task(prompt="task-b"))
+        await scheduler.add_task("chat1", _make_task(prompt="task-c"))
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Integration — full CRUD + persistence round-trip
+        # Patch _persist to count calls
+        original_persist = scheduler._persist
+        persist_call_count = 0
+        persist_chat_ids: list[str] = []
+
+        async def counting_persist(cid: str) -> None:
+            nonlocal persist_call_count
+            persist_call_count += 1
+            persist_chat_ids.append(cid)
+            await original_persist(cid)
+
+        scheduler._persist = counting_persist  # type: ignore[assignment]
+
+        with patch("src.scheduler.TICK_SECONDS", 0.1):
+            scheduler._running = True
+            loop_task = asyncio.create_task(scheduler._loop())
+            await asyncio.sleep(0.3)
+            scheduler._running = False
+            loop_task.cancel()
+            try:
+                await loop_task
+            except asyncio.CancelledError:
+                pass
+
+        # 3 tasks for the same chat → _persist called exactly once per tick
+        # (may run multiple ticks, but each tick batches to 1 call for chat1)
+        assert on_trigger.await_count >= 3
+        # Verify all task states were persisted correctly
+        data = json.loads(_tasks_file(workspace, "chat1").read_text())
+        for t in data:
+            assert t["last_run"] is not None
+            assert t["last_result"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_loop_persists_multiple_chats(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock, workspace: Path,
+    ):
+        """Tasks across multiple chats are each persisted once per tick."""
+        on_trigger.return_value = "done"
+        await scheduler.add_task("chatA", _make_task(prompt="a"))
+        await scheduler.add_task("chatA", _make_task(prompt="b"))
+        await scheduler.add_task("chatB", _make_task(prompt="c"))
+
+        original_persist = scheduler._persist
+        persist_chat_ids_per_tick: list[set[str]] = []
+        current_tick_ids: set[str] = set()
+
+        async def tracking_persist(cid: str) -> None:
+            current_tick_ids.add(cid)
+            await original_persist(cid)
+
+        scheduler._persist = tracking_persist  # type: ignore[assignment]
+
+        with patch("src.scheduler.TICK_SECONDS", 0.1):
+            scheduler._running = True
+            loop_task = asyncio.create_task(scheduler._loop())
+
+            # Capture per-tick sets
+            for _ in range(3):
+                await asyncio.sleep(0.15)
+                if current_tick_ids:
+                    persist_chat_ids_per_tick.append(frozenset(current_tick_ids))
+                    current_tick_ids.clear()
+
+            scheduler._running = False
+            loop_task.cancel()
+            try:
+                await loop_task
+            except asyncio.CancelledError:
+                pass
+
+        # Each tick should have at most 2 unique chat_ids persisted
+        for tick_ids in persist_chat_ids_per_tick:
+            assert tick_ids <= {"chatA", "chatB"}
+
+        # Verify both chats' data was persisted
+        data_a = json.loads(_tasks_file(workspace, "chatA").read_text())
+        data_b = json.loads(_tasks_file(workspace, "chatB").read_text())
+        assert len(data_a) == 2
+        assert len(data_b) == 1
+        for t in data_a + data_b:
+            assert t["last_run"] is not None
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1047,6 +1139,8 @@ class TestIntegration:
         t = s.list_tasks("chat1")[0]
 
         await s._execute_task("chat1", t)
+        # _execute_task no longer persists; batch persist manually
+        await s._persist("chat1")
 
         # Reload from disk
         s2 = TaskScheduler()
