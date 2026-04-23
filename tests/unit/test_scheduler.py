@@ -1420,6 +1420,223 @@ class TestIsDueTimezoneEdgeCases:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — DST transition handling
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDSTTransitionHandling:
+    """Tests for TaskScheduler DST (Daylight Saving Time) transition handling.
+
+    DST transitions change the local UTC offset:
+      - Spring forward: CET (UTC+1) → CEST (UTC+2), offset increases by 1
+      - Fall back: CEST (UTC+2) → CET (UTC+1), offset decreases by 1
+
+    The scheduler caches the UTC offset with a 1-hour TTL. These tests
+    verify that daily and cron tasks behave correctly when the offset
+    changes, both with stale cached values and after cache refresh.
+    """
+
+    def test_daily_spring_forward_after_cache_refresh(
+        self, scheduler: TaskScheduler
+    ):
+        """After spring-forward, daily task fires at correct UTC time with refreshed offset.
+
+        CET (UTC+1) → CEST (UTC+2): local 09:00 shifts from UTC 08:00 to UTC 07:00.
+        """
+        now = datetime(2026, 3, 29, 7, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 2.0  # refreshed to CEST
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(schedule_type="daily", hour=9, minute=0)
+            assert scheduler._is_due(task) is True
+
+    def test_daily_spring_forward_stale_offset_misses_fire(
+        self, scheduler: TaskScheduler
+    ):
+        """With stale pre-DST offset, daily task misses the correct post-DST UTC time.
+
+        After spring-forward, actual offset is +2 (CEST). Stale cache is +1 (CET).
+        Local 09:00 with stale +1 computes as UTC 08:00, not the correct UTC 07:00.
+        """
+        now = datetime(2026, 3, 29, 7, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 1.0  # stale pre-DST CET
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(schedule_type="daily", hour=9, minute=0)
+            assert scheduler._is_due(task) is False
+
+    def test_daily_spring_forward_fires_at_stale_computed_time(
+        self, scheduler: TaskScheduler
+    ):
+        """With stale offset, the task fires at the old UTC time (one hour late post-DST).
+
+        After spring-forward, stale +1 maps local 09:00 to UTC 08:00.
+        The task fires at UTC 08:00, which is local 10:00 post-DST.
+        """
+        now = datetime(2026, 3, 29, 8, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 1.0  # stale CET
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(schedule_type="daily", hour=9, minute=0)
+            assert scheduler._is_due(task) is True
+
+    def test_daily_fall_back_after_cache_refresh(
+        self, scheduler: TaskScheduler
+    ):
+        """After fall-back, daily task fires at correct UTC time with refreshed offset.
+
+        CEST (UTC+2) → CET (UTC+1): local 09:00 shifts from UTC 07:00 to UTC 08:00.
+        """
+        now = datetime(2026, 10, 25, 8, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 1.0  # refreshed to CET
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(schedule_type="daily", hour=9, minute=0)
+            assert scheduler._is_due(task) is True
+
+    def test_daily_fall_back_with_stale_offset(
+        self, scheduler: TaskScheduler
+    ):
+        """With stale pre-fall-back offset, daily task misses the correct post-transition time.
+
+        After fall-back, actual offset is +1 (CET). Stale cache is +2 (CEST).
+        Local 09:00 with stale +2 computes as UTC 07:00, not the correct UTC 08:00.
+        """
+        now = datetime(2026, 10, 25, 8, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 2.0  # stale CEST
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(schedule_type="daily", hour=9, minute=0)
+            assert scheduler._is_due(task) is False
+
+    def test_daily_no_double_fire_across_spring_forward(
+        self, scheduler: TaskScheduler
+    ):
+        """Task doesn't fire twice on the same calendar day after spring-forward.
+
+        The _same_day check via last_run prevents duplicate firing even
+        when the offset cache refreshes mid-day.
+        """
+        now = datetime(2026, 3, 29, 7, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 2.0  # refreshed CEST
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(schedule_type="daily", hour=9, minute=0)
+            task["last_run"] = now.isoformat()  # already ran today
+            assert scheduler._is_due(task) is False
+
+    def test_daily_no_double_fire_across_fall_back(
+        self, scheduler: TaskScheduler
+    ):
+        """Task doesn't fire twice on the same calendar day after fall-back."""
+        now = datetime(2026, 10, 25, 8, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 1.0  # refreshed CET
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(schedule_type="daily", hour=9, minute=0)
+            task["last_run"] = now.isoformat()  # already ran today
+            assert scheduler._is_due(task) is False
+
+    def test_cron_spring_forward_after_cache_refresh(
+        self, scheduler: TaskScheduler
+    ):
+        """Cron task fires at correct UTC time after spring-forward with refreshed offset."""
+        # Monday after spring-forward in Europe
+        now = datetime(2026, 3, 30, 7, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 2.0  # CEST
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(
+                schedule_type="cron", hour=9, minute=0, weekdays=[now.weekday()]
+            )
+            assert scheduler._is_due(task) is True
+
+    def test_cron_fall_back_after_cache_refresh(
+        self, scheduler: TaskScheduler
+    ):
+        """Cron task fires at correct UTC time after fall-back with refreshed offset."""
+        # Monday after fall-back in Europe
+        now = datetime(2026, 10, 26, 8, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 1.0  # CET
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(
+                schedule_type="cron", hour=9, minute=0, weekdays=[now.weekday()]
+            )
+            assert scheduler._is_due(task) is True
+
+    def test_cache_refreshes_after_ttl_post_dst(
+        self, scheduler: TaskScheduler
+    ):
+        """After TTL expires post-DST, _get_cached_utc_offset refreshes to the new offset."""
+        scheduler._cached_utc_offset = 1.0  # pre-DST CET
+        scheduler._utc_offset_updated_at = time.monotonic() - 7200  # 2 hours past TTL
+
+        with patch("src.scheduler._utc_offset_hours", return_value=2.0):
+            result = scheduler._get_cached_utc_offset()
+            assert result == 2.0
+
+    def test_daily_correct_next_day_after_spring_forward(
+        self, scheduler: TaskScheduler
+    ):
+        """Task fires on the correct next calendar day after spring-forward.
+
+        Ran on March 28 at UTC 08:00 (pre-DST, CET+1, local 09:00).
+        Now March 29 at UTC 07:00 (post-DST, CEST+2, local 09:00) — should be due.
+        """
+        last_run = datetime(2026, 3, 28, 8, 0, tzinfo=timezone.utc).isoformat()
+        now = datetime(2026, 3, 29, 7, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 2.0  # refreshed CEST
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(schedule_type="daily", hour=9, minute=0)
+            task["last_run"] = last_run
+            assert scheduler._is_due(task) is True
+
+    def test_daily_correct_next_day_after_fall_back(
+        self, scheduler: TaskScheduler
+    ):
+        """Task fires on the correct next calendar day after fall-back.
+
+        Ran on Oct 24 at UTC 07:00 (pre-fall-back, CEST+2, local 09:00).
+        Now Oct 25 at UTC 08:00 (post-fall-back, CET+1, local 09:00) — should be due.
+        """
+        last_run = datetime(2026, 10, 24, 7, 0, tzinfo=timezone.utc).isoformat()
+        now = datetime(2026, 10, 25, 8, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 1.0  # refreshed CET
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(schedule_type="daily", hour=9, minute=0)
+            task["last_run"] = last_run
+            assert scheduler._is_due(task) is True
+
+    def test_interval_unaffected_by_dst(
+        self, scheduler: TaskScheduler
+    ):
+        """Interval tasks are DST-agnostic — they only measure elapsed seconds."""
+        last_run = datetime(2026, 3, 29, 6, 0, tzinfo=timezone.utc).isoformat()
+        now = datetime(2026, 3, 29, 7, 30, tzinfo=timezone.utc)  # 90 minutes later
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 2.0  # CEST
+            scheduler._utc_offset_updated_at = time.monotonic()
+
+            task = _make_task(schedule_type="interval", seconds=3600)
+            task["last_run"] = last_run
+            assert scheduler._is_due(task) is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TaskScheduler — _validate_task
 # ─────────────────────────────────────────────────────────────────────────────
 

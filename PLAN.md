@@ -208,7 +208,7 @@ addressed in Phases 1–10.
 
 - [x] **Add test for `Memory` mtime cache consistency after external file modification** — `Memory.read_memory()` uses mtime-based caching. If an external process (e.g., a skill modifying MEMORY.md) changes the file between reads, the cache should be invalidated. Add a test that modifies the file's content and mtime between reads and verifies the second read returns the updated content. (`tests/unit/test_memory.py`)
 
-- [ ] **Add test for `TaskScheduler` DST transition handling** — The scheduler caches the local UTC offset and refreshes it hourly. DST transitions (e.g., spring forward) could cause scheduled daily tasks to fire an hour early or skip entirely. Add a test with mocked `datetime.now()` to verify correct behavior across DST boundaries. (`tests/unit/test_scheduler.py`)
+- [x] **Add test for `TaskScheduler` DST transition handling** — The scheduler caches the local UTC offset and refreshes it hourly. DST transitions (e.g., spring forward) could cause scheduled daily tasks to fire an hour early or skip entirely. Add a test with mocked `datetime.now()` to verify correct behavior across DST boundaries. (`tests/unit/test_scheduler.py`)
 
 - [ ] **Add test for `_process_tool_calls` salvage on `BaseException`** — Phase 9 added a `BaseException` handler in `_process_tool_calls()` that salvages partial results from completed tasks. Add a test that simulates a `KeyboardInterrupt` during TaskGroup execution and verifies that already-completed tool results are returned rather than lost. (`tests/unit/test_bot.py`)
 
