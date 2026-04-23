@@ -210,7 +210,7 @@ addressed in Phases 1–10.
 
 - [x] **Add test for `TaskScheduler` DST transition handling** — The scheduler caches the local UTC offset and refreshes it hourly. DST transitions (e.g., spring forward) could cause scheduled daily tasks to fire an hour early or skip entirely. Add a test with mocked `datetime.now()` to verify correct behavior across DST boundaries. (`tests/unit/test_scheduler.py`)
 
-- [ ] **Add test for `_process_tool_calls` salvage on `BaseException`** — Phase 9 added a `BaseException` handler in `_process_tool_calls()` that salvages partial results from completed tasks. Add a test that simulates a `KeyboardInterrupt` during TaskGroup execution and verifies that already-completed tool results are returned rather than lost. (`tests/unit/test_bot.py`)
+- [x] **Add test for `_process_tool_calls` salvage on `BaseException`** — Phase 9 added a `BaseException` handler in `_process_tool_calls()` that salvages partial results from completed tasks. Add a test that simulates a `KeyboardInterrupt` during TaskGroup execution and verifies that already-completed tool results are returned rather than lost. (`tests/unit/test_bot.py`)
 
 - [ ] **Add regression test for `handle_message` returning `None` on oversized messages** — `handle_message()` rejects messages exceeding `MAX_MESSAGE_LENGTH` and returns `None`. Add a test verifying the exact boundary behavior: a message at `MAX_MESSAGE_LENGTH - 1` is processed, and a message at `MAX_MESSAGE_LENGTH + 1` is rejected with `None`. (`tests/unit/test_bot.py`)
 

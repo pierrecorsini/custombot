@@ -23,6 +23,8 @@ import pytest
 
 from src.bot import Bot, BotConfig, PreflightResult
 from src.channels.base import IncomingMessage
+from src.constants import REACT_LOOP_MAX_RETRIES
+from src.exceptions import ErrorCode, LLMError
 from src.rate_limiter import RateLimitResult
 from src.routing import RoutingRule
 
@@ -1417,6 +1419,207 @@ class TestProcessToolCalls:
         assert messages[1]["tool_call_id"] == "c1"
         assert messages[2]["tool_call_id"] == "c2"
 
+    async def test_tool_call_count_limit_truncates_excess(self):
+        """When LLM requests more than MAX_TOOL_CALLS_PER_TURN calls, excess
+        are rejected with a warning and only the first N are executed."""
+        from src.constants import MAX_TOOL_CALLS_PER_TURN
+
+        bot = _make_bot()
+
+        # Create 3 more tool calls than the limit
+        total = MAX_TOOL_CALLS_PER_TURN + 3
+        tool_calls = []
+        for i in range(total):
+            tc = _make_tool_call(
+                call_id=f"c{i}",
+                name=f"tool_{i}",
+                arguments=f'{{"arg": {i}}}',
+            )
+            tc.type = "function"  # MagicMock doesn't auto-match strings
+            tool_calls.append(tc)
+
+        choice = MagicMock()
+        choice.message.tool_calls = tool_calls
+        choice.message.content = None
+
+        bot._llm.tool_call_to_dict = MagicMock(
+            return_value={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [],
+            }
+        )
+        bot._tool_executor.execute = AsyncMock(
+            side_effect=[f"result_{i}" for i in range(total)]
+        )
+
+        messages: list = []
+        with patch("src.bot.log") as mock_log:
+            await bot._process_tool_calls(
+                choice, messages, "chat_123", Path("/tmp/ws")
+            )
+
+        # Warning should have been logged about the truncation
+        mock_log.warning.assert_called_once()
+        log_msg = mock_log.warning.call_args[0][0]
+        assert "limit reached" in log_msg
+
+        # Only MAX_TOOL_CALLS_PER_TURN calls should have been executed
+        assert bot._tool_executor.execute.await_count == MAX_TOOL_CALLS_PER_TURN
+
+        # All tool_call_ids must have results (executed + rejected)
+        # messages: [0] = assistant dict, [1..N] = executed, [N+1..] = rejected
+        tool_result_ids = [
+            m["tool_call_id"] for m in messages if m.get("role") == "tool"
+        ]
+        assert len(tool_result_ids) == total  # every call_id gets a result
+
+        # First MAX_TOOL_CALLS_PER_TURN results contain execution output
+        executed_ids = tool_result_ids[:MAX_TOOL_CALLS_PER_TURN]
+        assert executed_ids == [f"c{i}" for i in range(MAX_TOOL_CALLS_PER_TURN)]
+
+        # Remaining 3 results contain rejection messages
+        rejected_ids = tool_result_ids[MAX_TOOL_CALLS_PER_TURN:]
+        assert rejected_ids == [
+            f"c{MAX_TOOL_CALLS_PER_TURN}",
+            f"c{MAX_TOOL_CALLS_PER_TURN + 1}",
+            f"c{MAX_TOOL_CALLS_PER_TURN + 2}",
+        ]
+        for msg in messages[MAX_TOOL_CALLS_PER_TURN + 1 :]:
+            if msg.get("role") == "tool" and msg["tool_call_id"] in rejected_ids:
+                assert "rejected" in msg["content"].lower()
+                assert "limit" in msg["content"].lower()
+
+    async def test_tool_call_count_at_limit_not_truncated(self):
+        """Exactly MAX_TOOL_CALLS_PER_TURN calls should all execute normally."""
+        from src.constants import MAX_TOOL_CALLS_PER_TURN
+
+        bot = _make_bot()
+
+        tool_calls = []
+        for i in range(MAX_TOOL_CALLS_PER_TURN):
+            tc = _make_tool_call(call_id=f"c{i}", name=f"tool_{i}")
+            tc.type = "function"  # MagicMock doesn't auto-match strings
+            tool_calls.append(tc)
+
+        choice = MagicMock()
+        choice.message.tool_calls = tool_calls
+        choice.message.content = None
+
+        bot._llm.tool_call_to_dict = MagicMock(
+            return_value={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [],
+            }
+        )
+        bot._tool_executor.execute = AsyncMock(
+            side_effect=[f"result_{i}" for i in range(MAX_TOOL_CALLS_PER_TURN)]
+        )
+
+        messages: list = []
+        with patch("src.bot.log") as mock_log:
+            await bot._process_tool_calls(
+                choice, messages, "chat_123", Path("/tmp/ws")
+            )
+
+        # No warning should be logged
+        mock_log.warning.assert_not_called()
+
+        # All calls executed
+        assert bot._tool_executor.execute.await_count == MAX_TOOL_CALLS_PER_TURN
+
+        # Only executed results (no rejected)
+        tool_result_ids = [
+            m["tool_call_id"] for m in messages if m.get("role") == "tool"
+        ]
+        assert len(tool_result_ids) == MAX_TOOL_CALLS_PER_TURN
+
+    async def test_salvages_partial_results_on_base_exception(self):
+        """BaseException during TaskGroup salvages already-completed tool results.
+
+        When a BaseException (e.g. simulated interrupt) cancels the TaskGroup,
+        any tool calls that completed before the cancellation should have their
+        results preserved in the returned tool_log and buffered_persist, rather
+        than being silently lost.
+        """
+        from src.core.tool_formatter import ToolLogEntry
+
+        class _SimulatedInterrupt(BaseException):
+            """Non-KeyboardInterrupt BaseException to avoid pytest special handling."""
+
+        bot = _make_bot()
+
+        tc1 = _make_tool_call(call_id="c1", name="fast_tool", arguments='{"a": 1}')
+        tc1.type = "function"
+        tc2 = _make_tool_call(call_id="c2", name="slow_tool", arguments='{"b": 2}')
+        tc2.type = "function"
+
+        choice = MagicMock()
+        choice.message.tool_calls = [tc1, tc2]
+        choice.message.content = None
+
+        bot._llm.tool_call_to_dict = MagicMock(
+            return_value={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [],
+            }
+        )
+
+        # First tool completes immediately, second raises a BaseException.
+        # We use an Event to ensure the first tool finishes before the second
+        # raises — this guarantees task[0] is done() when the TG catches the error.
+        completed = asyncio.Event()
+        fast_result = (
+            "c1",
+            "fast_result",
+            ToolLogEntry(name="fast_tool", args={"a": 1}, result="fast_result"),
+        )
+
+        async def _mock_execute(tool_call, chat_id, workspace_dir, send_media=None):
+            if tool_call.id == "c1":
+                completed.set()
+                return fast_result
+            # Wait for the first tool to complete before raising
+            await completed.wait()
+            raise _SimulatedInterrupt("simulated interrupt")
+
+        with (
+            patch.object(bot, "_execute_tool_call", new_callable=AsyncMock) as mock_exec,
+            patch("src.bot.log") as mock_log,
+        ):
+            mock_exec.side_effect = _mock_execute
+            messages = []
+            tool_log, buffered = await bot._process_tool_calls(
+                choice, messages, "chat_123", Path("/tmp/ws")
+            )
+
+        # The TaskGroup interrupt should be logged
+        mock_log.warning.assert_called()
+        log_msg = mock_log.warning.call_args[0][0]
+        assert "salvaging" in log_msg
+
+        # The fast_tool result should be salvaged
+        assert len(tool_log) >= 1
+        assert tool_log[0].name == "fast_tool"
+        assert tool_log[0].result == "fast_result"
+
+        # buffered_persist should contain the assistant turn + salvaged tool result
+        assert len(buffered) >= 2
+        assert buffered[0]["role"] == "assistant"
+        assert any(
+            e.get("name") == "fast_tool" and e["content"] == "fast_result"
+            for e in buffered
+            if e.get("role") == "tool"
+        )
+
+        # The in-memory messages list should also have the salvaged tool result
+        tool_messages = [m for m in messages if m.get("role") == "tool"]
+        assert len(tool_messages) >= 1
+        assert tool_messages[0]["tool_call_id"] == "c1"
+        assert tool_messages[0]["content"] == "fast_result"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Bot._process Tests (via handle_message)
@@ -2233,3 +2436,241 @@ class TestScheduledPromptInjectionDetection:
 
         appended_msg = ctx_result.messages[-1]
         assert appended_msg.content == clean_prompt
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bot._call_llm_with_retry Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCallLlmWithRetry:
+    """Tests for the transient-LLM-error retry logic in _call_llm_with_retry."""
+
+    async def test_transient_rate_limit_retried_and_succeeds(self):
+        """Rate-limit error is retried and succeeds on the second attempt."""
+        bot = _make_bot()
+        bot._metrics = MagicMock()
+
+        rate_limit_error = LLMError(
+            message="rate limited",
+            error_code=ErrorCode.LLM_RATE_LIMITED,
+        )
+        success_response = _make_llm_response(content="Hello!", finish_reason="stop")
+        bot._llm.chat = AsyncMock(side_effect=[rate_limit_error, success_response])
+
+        result = await bot._call_llm_with_retry(
+            chat_id="chat_123",
+            messages=[],
+            tools=None,
+            stream_callback=None,
+            use_streaming=False,
+            iteration=0,
+            tool_log=[],
+            buffered_persist=[],
+        )
+
+        assert result is not None
+        assert result.choices[0].message.content == "Hello!"
+        assert bot._llm.chat.call_count == 2
+
+    async def test_transient_timeout_retried_and_succeeds(self):
+        """Timeout error is retried and succeeds on the second attempt."""
+        bot = _make_bot()
+        bot._metrics = MagicMock()
+
+        timeout_error = LLMError(
+            message="timed out",
+            error_code=ErrorCode.LLM_TIMEOUT,
+        )
+        success_response = _make_llm_response(content="Done!", finish_reason="stop")
+        bot._llm.chat = AsyncMock(side_effect=[timeout_error, success_response])
+
+        result = await bot._call_llm_with_retry(
+            chat_id="chat_123",
+            messages=[],
+            tools=None,
+            stream_callback=None,
+            use_streaming=False,
+            iteration=0,
+            tool_log=[],
+            buffered_persist=[],
+        )
+
+        assert result is not None
+        assert result.choices[0].message.content == "Done!"
+
+    async def test_transient_connection_error_retried(self):
+        """Connection-failed error is retried."""
+        bot = _make_bot()
+        bot._metrics = MagicMock()
+
+        conn_error = LLMError(
+            message="connection failed",
+            error_code=ErrorCode.LLM_CONNECTION_FAILED,
+        )
+        success_response = _make_llm_response(content="OK", finish_reason="stop")
+        bot._llm.chat = AsyncMock(side_effect=[conn_error, success_response])
+
+        result = await bot._call_llm_with_retry(
+            chat_id="chat_123",
+            messages=[],
+            tools=None,
+            stream_callback=None,
+            use_streaming=False,
+            iteration=0,
+            tool_log=[],
+            buffered_persist=[],
+        )
+
+        assert result is not None
+        assert bot._llm.chat.call_count == 2
+
+    async def test_transient_error_exhausts_retries_raises(self):
+        """Transient errors that exhaust all retries are re-raised."""
+        bot = _make_bot()
+        bot._metrics = MagicMock()
+
+        rate_limit_error = LLMError(
+            message="rate limited",
+            error_code=ErrorCode.LLM_RATE_LIMITED,
+        )
+        bot._llm.chat = AsyncMock(side_effect=rate_limit_error)
+
+        with pytest.raises(LLMError, match="rate limited"):
+            await bot._call_llm_with_retry(
+                chat_id="chat_123",
+                messages=[],
+                tools=None,
+                stream_callback=None,
+                use_streaming=False,
+                iteration=0,
+                tool_log=[],
+                buffered_persist=[],
+            )
+
+        # Initial call + REACT_LOOP_MAX_RETRIES retries
+        assert bot._llm.chat.call_count == REACT_LOOP_MAX_RETRIES + 1
+
+    async def test_non_transient_error_not_retried(self):
+        """Non-transient errors (e.g. invalid API key) are not retried."""
+        bot = _make_bot()
+        bot._metrics = MagicMock()
+
+        auth_error = LLMError(
+            message="invalid API key",
+            error_code=ErrorCode.LLM_API_KEY_INVALID,
+        )
+        bot._llm.chat = AsyncMock(side_effect=auth_error)
+
+        with pytest.raises(LLMError, match="invalid API key"):
+            await bot._call_llm_with_retry(
+                chat_id="chat_123",
+                messages=[],
+                tools=None,
+                stream_callback=None,
+                use_streaming=False,
+                iteration=0,
+                tool_log=[],
+                buffered_persist=[],
+            )
+
+        # Should only be called once — no retries
+        assert bot._llm.chat.call_count == 1
+
+    async def test_circuit_breaker_open_returns_none(self):
+        """Circuit-breaker-open error returns None immediately (no retry)."""
+        bot = _make_bot()
+        bot._metrics = MagicMock()
+
+        cb_error = LLMError(
+            message="circuit breaker open",
+            error_code=ErrorCode.LLM_CIRCUIT_BREAKER_OPEN,
+        )
+        bot._llm.chat = AsyncMock(side_effect=cb_error)
+
+        result = await bot._call_llm_with_retry(
+            chat_id="chat_123",
+            messages=[],
+            tools=None,
+            stream_callback=None,
+            use_streaming=False,
+            iteration=0,
+            tool_log=[],
+            buffered_persist=[],
+        )
+
+        assert result is None
+        assert bot._llm.chat.call_count == 1
+
+    async def test_circuit_breaker_tracks_iteration_metrics(self):
+        """Circuit-breaker-open records iteration and depth metrics."""
+        bot = _make_bot()
+        bot._metrics = MagicMock()
+
+        cb_error = LLMError(
+            message="circuit breaker open",
+            error_code=ErrorCode.LLM_CIRCUIT_BREAKER_OPEN,
+        )
+        bot._llm.chat = AsyncMock(side_effect=cb_error)
+
+        await bot._call_llm_with_retry(
+            chat_id="chat_123",
+            messages=[],
+            tools=None,
+            stream_callback=None,
+            use_streaming=False,
+            iteration=3,
+            tool_log=[],
+            buffered_persist=[],
+        )
+
+        bot._metrics.track_react_iterations.assert_called_once_with(4)
+        bot._metrics.track_conversation_depth.assert_called_once_with("chat_123", 4)
+
+    async def test_uses_streaming_when_configured(self):
+        """When use_streaming=True, uses chat_stream instead of chat."""
+        bot = _make_bot()
+        success_response = _make_llm_response(content="streamed!", finish_reason="stop")
+        bot._llm.chat_stream = AsyncMock(return_value=success_response)
+        bot._llm.chat = AsyncMock(return_value=_make_llm_response(content="wrong", finish_reason="stop"))
+
+        result = await bot._call_llm_with_retry(
+            chat_id="chat_123",
+            messages=[],
+            tools=None,
+            stream_callback=None,
+            use_streaming=True,
+            iteration=0,
+            tool_log=[],
+            buffered_persist=[],
+        )
+
+        assert result is not None
+        assert result.choices[0].message.content == "streamed!"
+        bot._llm.chat_stream.assert_called_once()
+        bot._llm.chat.assert_not_called()
+
+    async def test_context_length_exceeded_not_retried(self):
+        """Context-length-exceeded errors are permanent — no retry."""
+        bot = _make_bot()
+        bot._metrics = MagicMock()
+
+        ctx_error = LLMError(
+            message="context too long",
+            error_code=ErrorCode.LLM_CONTEXT_LENGTH_EXCEEDED,
+        )
+        bot._llm.chat = AsyncMock(side_effect=ctx_error)
+
+        with pytest.raises(LLMError, match="context too long"):
+            await bot._call_llm_with_retry(
+                chat_id="chat_123",
+                messages=[],
+                tools=None,
+                stream_callback=None,
+                use_streaming=False,
+                iteration=0,
+                tool_log=[],
+                buffered_persist=[],
+            )
+
+        assert bot._llm.chat.call_count == 1
