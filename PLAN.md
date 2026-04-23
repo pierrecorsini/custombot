@@ -223,3 +223,87 @@ addressed in Phases 1–10.
 - [x] **Add `--cov-fail-under` threshold increase roadmap to CI** — Current CI requires 60% coverage (`--cov-fail-under=60`). Add a plan to incrementally raise this threshold (60 → 65 → 70 → 75) over subsequent phases, ensuring each phase contributes test coverage improvements. Document the target timeline. (`.github/workflows/ci.yml:79`, `PLAN.md`)
 
 - [x] **Add `pip-audit` or `safety` scan to CI pipeline** — Dependencies are pinned to major versions (e.g., `openai~=2.29.0`) but there's no automated vulnerability scanning. Add a `pip-audit` step to CI to catch known CVEs in transitive dependencies before they reach production. (`.github/workflows/ci.yml`)
+
+---
+
+## Phase 12 — Senior Review (2026-04-23)
+
+Generated from a twelfth-pass codebase audit focusing on architectural
+complexity reduction, data-integrity hardening, performance tuning,
+and test-coverage gaps not addressed in Phases 1–11.
+
+---
+
+### Refactoring
+
+- [x] **Extract `_process()` persistence + event emission into a `_finalize_response()` helper** — `_process()` in `bot.py` is ~100 lines that does 7 distinct things: persist user turn, ensure workspace, build context, run ReAct loop, finalize topic, filter content, append tool summary, persist batch, and emit events. Extract the post-ReAct steps (steps 5–7 in `_process()`: topic finalization, content filtering, tool-summary formatting, generation-check batch write, event emission) into a `_finalize_response(chat_id, raw_response, tool_log, buffered_persist, generation, verbose)` method. This makes `_process()` a straight-line pipeline and makes the finalization independently testable. (`src/bot.py:926-966`)
+
+- [x] **Replace `channel_type` string dispatch with an enum** — `IncomingMessage.channel_type` is a free-form string validated only by regex. Multiple modules check `channel_type == "whatsapp"` or `channel_type == "cli"` in ad-hoc `if` statements. Introduce a `ChannelType` enum (`WHATSAPP`, `CLI`, etc.) and use it in `IncomingMessage`, `BaseChannel`, logging, and metrics. This eliminates the risk of typo-based mismatches and makes channel-type coverage auditable via IDE find-references. (`src/channels/base.py:33-36, 117`)
+
+- [ ] **Consolidate `_chat_dir()` and `_ensure_chat_dir()` in `Memory` to avoid path duplication** — Both methods construct the same path (`self._root / "whatsapp_data" / sanitize_path_component(chat_id)`) and both call `self._validate_path()`. Extract the path construction into a `_resolve_chat_path()` that returns the validated `Path`, then have `_chat_dir()` call it directly and `_ensure_chat_dir()` call it + `mkdir`. Removes the duplicated `_validate_path` call and the hardcoded `"whatsapp_data"` segment appearing in two places. (`src/memory.py:111-122`)
+
+- [ ] **Move `_outbound_key()` hash computation from `DeduplicationService` to a standalone function** — The SHA-256 key derivation is a pure function with no `self` dependency. Extract it to module level so it can be unit-tested independently and reused if the outbound dedup logic is ever split into its own module. Minor readability win. (`src/core/dedup.py:110-113`)
+
+- [ ] **Extract `_NoOpApplier` from `_step_config_watcher` to module level** — `_NoOpApplier` is defined inside the startup step closure, meaning a new class object is created every time the step runs. Move it to module level in `startup.py` (or to `config_watcher.py`) so it's defined once. Minor, but avoids per-startup class creation and makes the fallback applier discoverable for tests. (`src/core/startup.py:278-281`)
+
+### Performance Optimization
+
+- [ ] **Cache `_message_file()` path resolution to avoid repeated `sanitize_path_component` + `_validate_chat_id` on every DB operation** — `_message_file()` is called on every `save_message`, `save_messages_batch`, `get_recent_messages`, and `compress_chat_history` call. Each invocation runs sanitize + validate + Path construction. For a high-volume bot processing dozens of messages per second across a handful of active chats, these are redundant. Add an LRU cache (`functools.lru_cache` or `LRUDict`) on `_message_file()` keyed by `chat_id`, invalidated only when a new chat_id is first seen. The cache size should match `MAX_LRU_CACHE_SIZE`. (`src/db/db.py:857-863`)
+
+- [ ] **Batch `_persist()` calls when multiple scheduler tasks fire in the same tick** — `_loop()` in `scheduler.py` executes all due tasks concurrently via `asyncio.gather`, but each `_execute_task()` calls `_persist(chat_id)` independently. If 5 tasks fire for the same chat in one tick, `_persist` writes `tasks.json` 5 times sequentially. Collect the set of dirty `chat_id`s during a tick and persist each once after all tasks complete. Reduces file I/O from N tasks × M duplicates to N unique chats. (`src/scheduler.py:441-474`)
+
+- [ ] **Add `__slots__` to `DeduplicationService` for memory efficiency** — The class already declares `__slots__` correctly. However, `DedupStats` is a `@dataclass` without `slots=True`. Add `slots=True` to `DedupStats` for consistency and to reduce per-instance memory (4 int fields). Minor but follows the project's pattern for frozen data containers. (`src/core/dedup.py:39-54`)
+
+- [ ] **Pre-compute `tool_definitions` as a cached property invalidated by skill registration changes** — Phase 11 added this as a task but verify it's truly cached. If `SkillRegistry.tool_definitions` still rebuilds Pydantic models on every property access, add a `_tool_defs_cache: list | None` field that's set to `None` on `register()` / `unregister()` and lazily rebuilt on access. Confirm with a benchmark test that 100 consecutive accesses don't trigger 100 rebuilds. (`src/skills/__init__.py`)
+
+### Error Handling & Resilience
+
+- [ ] **Handle `read_text` failure in `_compress_chat_history_sync` gracefully** — If the JSONL file is deleted between the `stat()` check and the `read_text()` call (race with `repair_message_file` or manual deletion), the `OSError` is caught and returns `{"compressed": False}`, but the `FileNotFoundError` subclass isn't explicitly handled. Add explicit `FileNotFoundError` handling to distinguish "file disappeared" (log + skip) from "I/O error" (log warning), improving debuggability. (`src/db/db.py:1280-1284`)
+
+- [ ] **Guard `_build_message_record()` against `None` content** — `_build_message_record()` is called with `content` from various sources. If a skill returns `None` (instead of an empty string) and it propagates through `str(result)` → `None`, the `calculate_checksum(content, ...)` call would fail with `TypeError`. Add an early `content = content or ""` guard to ensure content is always a string before checksum calculation. (`src/db/db.py:976-1021`)
+
+- [ ] **Add timeout to `_execute_task()` in the scheduler** — `_execute_task()` calls `_trigger_with_retry()` which can retry multiple times with backoff, but the total execution time is unbounded. If the bot is stuck (e.g., LLM provider down, each retry waiting 30s), a single task could block the scheduler for minutes. Wrap the task execution in `asyncio.wait_for()` with a maximum total timeout (e.g., 300 seconds = 5 minutes) so a stuck task doesn't indefinitely delay co-scheduled tasks. (`src/scheduler.py:363-437`)
+
+- [ ] **Handle `asyncio.to_thread` exceptions in `Memory.read_memory()` / `read_agents_md()`** — Both methods call `await asyncio.to_thread(self._stat_and_read, ...)`. If the thread pool is exhausted or the function raises an unexpected exception, it propagates as a `RuntimeError` to `ContextAssembler`, which handles it via `return_exceptions=True`. However, the error message is opaque. Add an explicit `try/except Exception` around the `await asyncio.to_thread()` call in both methods to log the failure with the chat_id and raise a more descriptive error. (`src/memory.py:191-193, 404-406`)
+
+### Security
+
+- [ ] **Audit and restrict file paths in `_write_tasks_file()` and `_read_tasks_file()`** — The scheduler's `_persist()` constructs `workspace / chat_id / SCHEDULER_DIR / TASKS_FILE` but doesn't validate that `chat_id` doesn't contain path traversal characters before constructing the path. While `_sanitize_chat_id_for_path` and `_validate_chat_id` exist in `db.py`, the scheduler doesn't call them. Add path validation in `_persist()` and `_load()` to ensure the resolved path stays within `workspace/`. (`src/scheduler.py:222-253`)
+
+- [ ] **Strip sensitive query parameters from `base_url` in LLM client logs** — `LLMClient.__init__` receives `cfg.base_url` which may contain API keys as query parameters (e.g., `http://localhost:11434/v1?key=secret`). While the OpenAI SDK uses `api_key` for auth, some providers embed credentials in the URL. Audit all log statements that reference `cfg.base_url` or `cfg.model` and ensure no credential material leaks. Add URL sanitization that strips query parameters before logging. (`src/llm.py:210-237`, `src/builder.py:115`)
+
+- [ ] **Add rate limiting to `_confirm_send()` in safe mode** — The safe-mode `_confirm_send()` uses `input()` in a loop with no exit limit. A misconfigured or automated input source could send unlimited characters to `input()`. Add a maximum retry count (e.g., 3 attempts) after which the send is automatically rejected, preventing an accidental infinite prompt loop. (`src/channels/base.py:326-335`)
+
+### Observability & Monitoring
+
+- [ ] **Add `custombot_react_loop_iterations_total` Prometheus counter** — `PerformanceMetrics` tracks `track_react_iterations()` but the Prometheus output in `/metrics` should expose a counter (`custombot_react_iterations_total`) so operators can set alerts on high iteration counts (indicating the LLM is stuck in tool-call loops). Currently this metric is only logged to the session summary, not exposed via `/metrics`. (`src/monitoring/performance.py`, `src/health/server.py`)
+
+- [ ] **Track and expose conversation-context token budget utilization** — `build_context()` trims messages to fit within a token budget, but the actual vs. budget ratio isn't tracked. Add a metric (`custombot_context_budget_utilization`) that records the ratio of used tokens to the max budget on each context build. This helps operators identify chats that consistently hit the budget ceiling (indicating they need compression or higher limits). (`src/core/context_builder.py`)
+
+- [ ] **Add structured startup-duration breakdown to `/health` endpoint** — The health endpoint returns component status but not startup timing. `component_durations` is tracked in `StartupContext` but not exposed. Add a `startup_durations` field to the `/health` response (behind HMAC auth) so operators can identify slow-starting components (e.g., embedding model probe, workspace integrity check). (`src/health/server.py`, `src/core/startup.py:80`)
+
+- [ ] **Log skill argument size distribution for capacity planning** — When skills receive oversized arguments (>100KB), `ToolExecutor` rejects them silently. Add a metric counter (`custombot_skill_args_oversized_total`) and log the skill name + arg size when the limit is hit, so operators can identify which skills are being abused or misconfigured. (`src/core/tool_executor.py:114-128`)
+
+### Test Coverage
+
+- [ ] **Add test for `_finalize_response()` extraction — verify topic finalization, content filtering, and batch persist in isolation** — Once `_finalize_response()` is extracted, test that: (a) META blocks are parsed and topic cache updated, (b) `filter_response_content` is called and sanitized output is used, (c) tool summary formatting is applied for `verbose="summary"`, (d) generation check logs warning on conflict, (e) `save_messages_batch` is called with correct buffered_persist + assistant message. (`tests/unit/test_bot.py`)
+
+- [ ] **Add property-based test for `_read_file_lines()` reverse-seek correctness** — Use `hypothesis` (already a dev dependency) to generate files of varying sizes and line counts, then verify that `_read_file_lines(path, limit)` returns exactly the last `limit` non-empty lines in chronological order. Covers edge cases: file smaller than limit, file exactly at limit, file with trailing newline, file with no newlines (corrupted), empty file. (`tests/unit/test_db.py`)
+
+- [ ] **Add test for scheduler task-execution timeout** — Create a scheduled task where `_trigger_with_retry` hangs beyond the maximum timeout. Verify that: (a) the timeout fires and the task is marked as failed, (b) other co-scheduled tasks in the same tick are not blocked, (c) the scheduler loop continues to the next tick. (`tests/unit/test_scheduler.py`)
+
+- [ ] **Add test for `_message_file()` path-cache correctness** — Verify that: (a) repeated calls with the same `chat_id` return the same `Path` object (or equivalent), (b) invalid `chat_id` values raise `ValueError` before caching, (c) the cache doesn't grow beyond `MAX_LRU_CACHE_SIZE`. (`tests/unit/test_db.py`)
+
+- [ ] **Add test for config hot-reload applying `BotConfig` changes without restart** — Specifically verify that changing `max_tool_iterations` from 10 to 5 in `config.json` causes the bot's next ReAct loop to use the new limit. This is a regression test for the config-watcher → BotConfig → ReAct-loop data flow. (`tests/integration/test_application_lifecycle.py`)
+
+- [ ] **Add test for `_chat_generations` TTL/eviction under sustained writes** — Simulate a bot running for weeks by generating writes for more than `MAX_CHAT_GENERATIONS` unique chat IDs. Verify: (a) the dict never exceeds the cap, (b) recently-written chats are preserved (LRU eviction), (c) `get_generation()` returns 0 for evicted entries without error. (`tests/unit/test_db.py`)
+
+- [ ] **Add integration test for concurrent compression and read** — Start a `compress_chat_history()` operation and concurrently call `get_recent_messages()` for the same chat. Verify that: (a) no data corruption occurs, (b) `get_recent_messages()` returns either the pre-compression or post-compression view (never a partial/truncated view), (c) no exceptions are raised. (`tests/integration/test_concurrent_load.py`)
+
+### DevOps / Infrastructure
+
+- [ ] **Add Python 3.13 to CI test matrix** — Python 3.13 is the latest stable release. Adding it to the matrix alongside 3.11 and 3.12 ensures forward-compatibility and catches deprecation warnings early. If 3.13-specific failures occur, document them as known issues rather than blocking the build. (`.github/workflows/ci.yml:57`)
+
+- [ ] **Add `--tb=short` to pytest invocation in CI for cleaner failure output** — Default tracebacks in CI can be verbose, especially with asyncio. Adding `--tb=short` reduces CI log noise while preserving the essential failure information. (`.github/workflows/ci.yml:81`)
+
+- [ ] **Bump `--cov-fail-under` from 60 to 65 in CI** — Phase 12 adds 7 new tests (above). If coverage exceeds 65% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 11. (`.github/workflows/ci.yml:86`)
