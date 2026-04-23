@@ -220,6 +220,6 @@ addressed in Phases 1–10.
 
 - [x] **Expand `.dockerignore` to exclude all development artifacts** — The `.dockerignore` may not exclude `.pytest_cache/`, `.ruff_cache/`, `.mypy_cache/`, `.hypothesis/`, `.tmp/`, `.opencode/`, `.agents/`, `.claude/`, and `*.pyc` files. These inflate the build context sent to the Docker daemon, slowing builds. Audit and add all dev-only paths. (`.dockerignore`)
 
-- [ ] **Add `--cov-fail-under` threshold increase roadmap to CI** — Current CI requires 60% coverage (`--cov-fail-under=60`). Add a plan to incrementally raise this threshold (60 → 65 → 70 → 75) over subsequent phases, ensuring each phase contributes test coverage improvements. Document the target timeline. (`.github/workflows/ci.yml:79`, `PLAN.md`)
+- [x] **Add `--cov-fail-under` threshold increase roadmap to CI** — Current CI requires 60% coverage (`--cov-fail-under=60`). Add a plan to incrementally raise this threshold (60 → 65 → 70 → 75) over subsequent phases, ensuring each phase contributes test coverage improvements. Document the target timeline. (`.github/workflows/ci.yml:79`, `PLAN.md`)
 
-- [ ] **Add `pip-audit` or `safety` scan to CI pipeline** — Dependencies are pinned to major versions (e.g., `openai~=2.29.0`) but there's no automated vulnerability scanning. Add a `pip-audit` step to CI to catch known CVEs in transitive dependencies before they reach production. (`.github/workflows/ci.yml`)
+- [x] **Add `pip-audit` or `safety` scan to CI pipeline** — Dependencies are pinned to major versions (e.g., `openai~=2.29.0`) but there's no automated vulnerability scanning. Add a `pip-audit` step to CI to catch known CVEs in transitive dependencies before they reach production. (`.github/workflows/ci.yml`)

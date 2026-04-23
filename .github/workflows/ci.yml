@@ -69,6 +69,13 @@ jobs:
           pip install -r requirements-dev.txt
           pip install hypothesis>=6.100.0
 
+      # Coverage Threshold Roadmap:
+      #   Phase 9-11: 60% (current baseline)
+      #   Phase 12:   65% — target: 2026-05-15
+      #   Phase 13:   70% — target: 2026-06-01
+      #   Phase 14:   75% — target: 2026-06-15
+      # Each phase must contribute test coverage improvements before bumping.
+      # Update this value when the actual coverage consistently exceeds the next target.
       - name: Run tests with coverage
         run: |
           pytest \
@@ -85,3 +92,22 @@ jobs:
         with:
           name: coverage-report
           path: coverage.xml
+
+  security:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install pip-audit
+        run: pip install pip-audit>=0.3.0
+
+      - name: Run pip-audit
+        run: pip-audit --desc
