@@ -17,7 +17,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Builder — installs dependencies
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS builder
+FROM python:3.11.12-slim-bookworm AS builder
 
 WORKDIR /build
 
@@ -41,7 +41,7 @@ RUN if [ -f requirements-dev.txt ]; then \
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime — minimal production image
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS runtime
+FROM python:3.11.12-slim-bookworm AS runtime
 
 LABEL org.opencontainers.image.title="CustomBot"
 LABEL org.opencontainers.image.description="A lightweight WhatsApp AI assistant"
