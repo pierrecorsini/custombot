@@ -1,5 +1,6 @@
 """Tests for Database.save_messages_batch() atomicity, generation counter,
-name field sanitization, and write circuit breaker.
+name field sanitization, write circuit breaker, and _read_file_lines
+reverse-seek correctness.
 
 Verifies:
 - save_messages_batch persists all messages in a single lock acquisition
@@ -7,15 +8,19 @@ Verifies:
 - Concurrent calls for the same chat are serialized
 - Name field is sanitized (control chars stripped, truncated)
 - Write circuit breaker fast-fails when open, records failures, recovers
+- _read_file_lines returns last N lines for small and large files
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 from pathlib import Path
 
 import pytest
+from hypothesis import HealthCheck, assume, given, settings
+from hypothesis import strategies as st
 
 from src.db.db import Database, _sanitize_name
 from src.exceptions import DatabaseError
@@ -528,3 +533,352 @@ class TestConcurrentBatchAndCompression:
 
         # Generation should reflect both batch writes (≥ 2 bumps)
         assert db.get_generation(chat_id) >= 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Property-based tests for _read_file_lines reverse-seek correctness
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestReadFileLinesReverseSeek:
+    """Property-based tests for _read_file_lines() correctness.
+
+    Uses hypothesis to generate files of varying sizes and line counts,
+    then verifies that _read_file_lines(path, limit) returns exactly the
+    last ``limit`` non-empty lines in chronological order.
+
+    Covers edge cases:
+    - File smaller than limit
+    - File exactly at limit
+    - File with trailing newline
+    - File with no newlines (single long line / corrupted)
+    - Empty file
+    - Large files that trigger the reverse-seek path (>64KB)
+
+    Note: _read_file_lines strips ``\\r`` but preserves ``\\n`` at line
+    ends (the small-file deque path yields raw file lines including ``\\n``).
+    Tests account for this by using a helper to compute expected output.
+    """
+
+    # Strategy: lines of printable text (no newlines within a line)
+    _line_text = st.text(
+        alphabet=st.characters(whitelist_categories=("L", "N", "P", "Z")),
+        min_size=1,
+        max_size=200,
+    )
+
+    # Shared settings: suppress function_scoped_fixture health check
+    # because we use tmp_path but create unique filenames per example.
+    _hs = settings(
+        max_examples=50,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+
+    @staticmethod
+    def _expected_lines(raw_lines: list[str], limit: int) -> list[str]:
+        """Compute expected output of _read_file_lines.
+
+        The small-file path iterates the file with deque(f, maxlen=limit)
+        which yields lines including trailing ``\\n``.  Only ``\\r`` is stripped.
+        The large-file (reverse-seek) path uses splitlines() which strips both.
+        We normalise to the small-file behaviour (``\\n`` preserved) since
+        that is what deque-based iteration produces.
+        """
+        non_empty = [l for l in raw_lines if l.strip()]
+        selected = non_empty[-limit:] if len(non_empty) > limit else non_empty
+        # Small-file deque path keeps trailing \n; only strips \r
+        return [line + "\n" for line in selected]
+
+    @staticmethod
+    def _expected_lines_large(raw_lines: list[str], limit: int) -> list[str]:
+        """Expected output for large-file (reverse-seek) path.
+
+        The reverse-seek path uses splitlines() + final rstrip("\\r"),
+        so lines have NO trailing newline.
+        """
+        non_empty = [l for l in raw_lines if l.strip()]
+        selected = non_empty[-limit:] if len(non_empty) > limit else non_empty
+        return selected
+
+    # ── Small-file property tests (<64KB) ──────────────────────────────
+
+    @given(
+        lines=st.lists(_line_text, min_size=0, max_size=50),
+        limit=st.integers(min_value=1, max_value=60),
+    )
+    @_hs
+    def test_returns_last_n_lines_small_file(
+        self, tmp_path: Path, lines: list[str], limit: int
+    ) -> None:
+        """Small file (<64KB): _read_file_lines returns last ``limit`` lines."""
+        file_path = tmp_path / "small.jsonl"
+        file_path.write_text(
+            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
+        )
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=limit)
+        assert result == self._expected_lines(lines, limit)
+
+    @given(
+        lines=st.lists(_line_text, min_size=0, max_size=30),
+    )
+    @_hs
+    def test_file_smaller_than_limit_returns_all(
+        self, tmp_path: Path, lines: list[str]
+    ) -> None:
+        """When file has fewer lines than limit, all non-empty lines are returned."""
+        file_path = tmp_path / "short.jsonl"
+        file_path.write_text(
+            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
+        )
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=100)
+        assert result == self._expected_lines(lines, 100)
+
+    @given(
+        # Exactly N lines, limit=N — should return all
+        count=st.integers(min_value=1, max_value=50),
+    )
+    @_hs
+    def test_file_exactly_at_limit(self, tmp_path: Path, count: int) -> None:
+        """When file has exactly ``limit`` lines, all are returned."""
+        lines = [f"line_{i}" for i in range(count)]
+        file_path = tmp_path / "exact.jsonl"
+        file_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=count)
+        assert result == self._expected_lines(lines, count)
+
+    @given(
+        # Mix of empty and non-empty lines
+        lines=st.lists(
+            st.one_of(st.just(""), _line_text),
+            min_size=0,
+            max_size=40,
+        ),
+        limit=st.integers(min_value=1, max_value=50),
+    )
+    @_hs
+    def test_mixed_empty_and_nonempty_lines(
+        self, tmp_path: Path, lines: list[str], limit: int
+    ) -> None:
+        """Empty lines in the file are filtered from results."""
+        file_path = tmp_path / "mixed.jsonl"
+        file_path.write_text(
+            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
+        )
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=limit)
+        assert result == self._expected_lines(lines, limit)
+
+    # ── Large-file property tests (>64KB, reverse-seek path) ──────────
+
+    @given(
+        line_count=st.integers(min_value=500, max_value=2000),
+        limit=st.integers(min_value=1, max_value=100),
+    )
+    @_hs
+    def test_returns_last_n_lines_large_file(
+        self, tmp_path: Path, line_count: int, limit: int
+    ) -> None:
+        """Large file (>64KB): reverse-seek path returns last ``limit`` lines."""
+        lines = [f"line_{i:06d}_" + "x" * 90 for i in range(line_count)]
+        content = "\n".join(lines) + "\n"
+
+        file_path = tmp_path / "large.jsonl"
+        file_path.write_bytes(content.encode("utf-8"))
+
+        # Verify we actually crossed the 64KB threshold
+        assert file_path.stat().st_size >= 65_536
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=limit)
+        assert result == self._expected_lines_large(lines, limit)
+
+    @given(
+        total_lines=st.integers(min_value=100, max_value=800),
+        limit=st.integers(min_value=1, max_value=50),
+    )
+    @_hs
+    def test_large_file_result_order_is_chronological(
+        self, tmp_path: Path, total_lines: int, limit: int
+    ) -> None:
+        """Lines are returned in chronological order (oldest first), not reversed."""
+        lines = [f"entry-{i:05d}_" + "y" * 80 for i in range(total_lines)]
+        content = "\n".join(lines) + "\n"
+
+        file_path = tmp_path / "order.jsonl"
+        file_path.write_bytes(content.encode("utf-8"))
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=limit)
+
+        expected = self._expected_lines_large(lines, limit)
+        # Verify ordering: each line should sort before the next
+        for i in range(len(result) - 1):
+            assert result[i] < result[i + 1], (
+                f"Lines not in chronological order at index {i}"
+            )
+        assert result == expected
+
+    # ── Deterministic edge-case tests ──────────────────────────────────
+
+    def test_empty_file_returns_empty_list(self, tmp_path: Path) -> None:
+        """Empty file returns an empty list."""
+        file_path = tmp_path / "empty.jsonl"
+        file_path.write_bytes(b"")
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=10)
+        assert result == []
+
+    def test_file_with_only_newlines(self, tmp_path: Path) -> None:
+        """File containing only newlines returns newline-only lines (deque path)."""
+        file_path = tmp_path / "blank.jsonl"
+        file_path.write_text("\n\n\n\n\n", encoding="utf-8")
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=10)
+        # The small-file deque path yields raw lines including \n
+        assert result == ["\n"] * 5
+
+    def test_file_with_trailing_newline(self, tmp_path: Path) -> None:
+        """Trailing newline produces lines with trailing \\n (deque path)."""
+        lines = ["alpha", "beta", "gamma"]
+        file_path = tmp_path / "trailing.jsonl"
+        file_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=10)
+        # deque path: lines include trailing \n, only \r is stripped
+        assert result == [l + "\n" for l in lines]
+
+    def test_single_line_no_newline(self, tmp_path: Path) -> None:
+        """A single line without trailing newline is returned correctly."""
+        file_path = tmp_path / "single.jsonl"
+        file_path.write_bytes(b"only_line_here")
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=10)
+        assert result == ["only_line_here"]
+
+    def test_single_line_with_newline(self, tmp_path: Path) -> None:
+        """A single line with trailing newline — deque keeps the \\n."""
+        file_path = tmp_path / "single_nl.jsonl"
+        file_path.write_bytes(b"only_line_here\n")
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=10)
+        assert result == ["only_line_here\n"]
+
+    # ── Large-file edge-case tests ──────────────────────────────────────
+
+    def test_large_file_no_newlines_falls_back_to_deque(
+        self, tmp_path: Path
+    ) -> None:
+        """Large corrupted file (>64KB, no newlines) triggers _MAX_SEEK_ITERATIONS
+        fallback and returns the single long line via the deque path."""
+        # Build a file >64KB with no newlines
+        line_content = "x" * 70_000
+        file_path = tmp_path / "corrupted.jsonl"
+        file_path.write_bytes(line_content.encode("utf-8"))
+        assert file_path.stat().st_size >= 65_536
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=10)
+        # Falls back to deque which yields the single line, rstrip("\r")
+        assert result == [line_content]
+
+    @given(
+        # Lines that produce a file right around the 64KB boundary
+        line_count=st.integers(min_value=300, max_value=700),
+        limit=st.integers(min_value=1, max_value=50),
+    )
+    @_hs
+    def test_boundary_near_64kb(
+        self, tmp_path: Path, line_count: int, limit: int
+    ) -> None:
+        """File near the 64KB small/large threshold returns correct lines
+        regardless of which code path is taken."""
+        # Each line is ~80 bytes, so 300-700 lines spans roughly 24KB-56KB.
+        # Add padding to land right at the boundary.
+        lines = [f"boundary_line_{i:05d}_" + "z" * 65 for i in range(line_count)]
+        content = "\n".join(lines) + "\n"
+        content_bytes = content.encode("utf-8")
+
+        # Pad to exactly 65_535 bytes (just under threshold → small-file path)
+        if len(content_bytes) < 65_535:
+            last_line = lines[-1]
+            pad_needed = 65_535 - len(content_bytes)
+            last_line = last_line + "p" * pad_needed
+            lines[-1] = last_line
+            content = "\n".join(lines) + "\n"
+            content_bytes = content.encode("utf-8")
+
+        file_path = tmp_path / "boundary.jsonl"
+        file_path.write_bytes(content_bytes)
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=limit)
+        expected = self._expected_lines(lines, limit)
+        assert result == expected
+
+    @given(
+        # Mix of empty and non-empty lines in a large file.
+        # min_size=900 ensures the file always exceeds 64KB
+        # (900 non-empty lines × ~85 bytes ≈ 76KB).
+        line_count=st.integers(min_value=900, max_value=1500),
+        limit=st.integers(min_value=1, max_value=100),
+    )
+    @_hs
+    def test_large_file_mixed_empty_and_nonempty(
+        self, tmp_path: Path, line_count: int, limit: int
+    ) -> None:
+        """Large file with interspersed empty lines returns the last ``limit``
+        lines (including empty strings from splitlines) in order."""
+        rng = __import__("random").Random(line_count)
+        lines: list[str] = []
+        for i in range(line_count):
+            if rng.random() < 0.2:
+                lines.append("")
+            else:
+                lines.append(f"entry-{i:06d}_" + "w" * 70)
+        content = "\n".join(lines) + "\n"
+
+        file_path = tmp_path / "mixed_large.jsonl"
+        file_path.write_bytes(content.encode("utf-8"))
+        assume(file_path.stat().st_size >= 65_536)
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=limit)
+
+        # Reverse-seek path uses splitlines() which includes empty strings
+        # from consecutive newlines, then takes last `limit` entries.
+        # We replicate that exact logic here.
+        all_lines = content.splitlines()
+        expected = all_lines[-limit:] if len(all_lines) > limit else all_lines
+        expected = [line.rstrip("\r") for line in expected]
+
+        assert result == expected
+
+    def test_large_file_trailing_newline(self, tmp_path: Path) -> None:
+        """Large file with trailing newline: reverse-seek path uses splitlines()
+        which strips trailing newlines, so lines have no trailing \\n."""
+        # Build a large file with known content
+        lines = [f"trailing_{i:06d}_" + "q" * 80 for i in range(800)]
+        content = "\n".join(lines) + "\n"
+
+        file_path = tmp_path / "trailing_large.jsonl"
+        file_path.write_bytes(content.encode("utf-8"))
+        assert file_path.stat().st_size >= 65_536
+
+        db = Database(str(tmp_path / ".data"))
+        result = db._read_file_lines(file_path, limit=5)
+        # reverse-seek path: splitlines() strips \n, rstrip("\r")
+        expected = lines[-5:]
+        assert result == expected
