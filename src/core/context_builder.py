@@ -114,6 +114,7 @@ async def build_context(
     channel_prompt: str | None = None,
     project_context: str | None = None,
     topic_summary: str | None = None,
+    compressed_summary: str | None = None,
 ) -> list[ChatMessage]:
     """
     Build the LLM message context for a chat.
@@ -128,6 +129,7 @@ async def build_context(
         channel_prompt: Optional channel-specific prompt.
         project_context: Optional project knowledge context for injection.
         topic_summary: Cached summary from a previous topic change.
+        compressed_summary: Summary of archived messages from history compression.
 
     Returns:
         List of ChatMessage objects for context manipulation.
@@ -158,6 +160,12 @@ async def build_context(
     if topic_summary:
         system_parts.append(
             "\n---\n## 📋 Previous Conversation Summary\n\n" + topic_summary.strip()
+        )
+
+    # Inject compressed history summary (archived messages)
+    if compressed_summary:
+        system_parts.append(
+            "\n---\n## 📋 Archived Conversation History\n\n" + compressed_summary.strip()
         )
 
     if project_context:
@@ -193,6 +201,17 @@ async def build_context(
     # Trim history to fit within the token budget
     system_tokens = estimate_tokens(system_content)
     bundle = _trim_history_to_budget(bundle, system_tokens)
+
+    # Track token budget utilization for monitoring
+    history_tokens = sum(m._cached_tokens for m in bundle.messages)
+    total_used = system_tokens + history_tokens
+    from src.monitoring.performance import get_metrics_collector
+    try:
+        get_metrics_collector().track_context_budget_utilization(
+            total_used, DEFAULT_CONTEXT_TOKEN_BUDGET
+        )
+    except Exception:
+        pass  # metrics collection must never break context building
 
     # Sanitize user messages in history to prevent delayed injection
     sanitized_history = _sanitize_history(bundle)

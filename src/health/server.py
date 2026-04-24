@@ -634,6 +634,41 @@ def _build_prometheus_output(
         )
     )
 
+    # ── Context Budget Utilization ──────────────────────────────────────────
+    if snapshot.context_budget_count > 0:
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_context_budget_utilization_mean",
+                "Mean ratio of used tokens to max context budget",
+                "gauge",
+                round(snapshot.context_budget_mean_ratio, 4),
+            )
+        )
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_context_budget_utilization_max",
+                "Maximum observed ratio of used tokens to max context budget",
+                "gauge",
+                round(snapshot.context_budget_max_ratio, 4),
+            )
+        )
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_context_budget_utilization_p95",
+                "P95 ratio of used tokens to max context budget",
+                "gauge",
+                round(snapshot.context_budget_p95_ratio, 4),
+            )
+        )
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_context_budget_utilization_samples",
+                "Number of context-budget utilization samples collected",
+                "gauge",
+                snapshot.context_budget_count,
+            )
+        )
+
     # ── Database Metrics ────────────────────────────────────────────────────
     db_lat = snapshot.db_latency
     lines.append(

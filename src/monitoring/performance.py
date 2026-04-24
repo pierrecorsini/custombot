@@ -265,6 +265,12 @@ class PerformanceSnapshot:
     react_iterations: LatencyStats = field(default_factory=LatencyStats)
     react_iterations_total: int = 0
 
+    # Context budget utilization (ratio of used tokens to max budget)
+    context_budget_count: int = 0
+    context_budget_mean_ratio: float = 0.0
+    context_budget_max_ratio: float = 0.0
+    context_budget_p95_ratio: float = 0.0
+
     # Queue metrics
     queue_depth: int = 0
     queue_max_depth: int = 0
@@ -319,6 +325,12 @@ class PerformanceSnapshot:
                 "count": self.react_iteration_count,
                 "stats": self.react_iterations.to_dict(),
                 "total": self.react_iterations_total,
+            },
+            "context_budget": {
+                "count": self.context_budget_count,
+                "mean_ratio": round(self.context_budget_mean_ratio, 4),
+                "max_ratio": round(self.context_budget_max_ratio, 4),
+                "p95_ratio": round(self.context_budget_p95_ratio, 4),
             },
             "queue": {
                 "depth": self.queue_depth,
@@ -415,6 +427,17 @@ def _calculate_timeout_ratio(samples: deque[float]) -> SkillTimeoutRatio:
         mean_ratio=statistics.mean(data),
         p95_ratio=pct(95),
     )
+
+
+def _percentile(sorted_data: list[float], p: float) -> float:
+    """Compute the p-th percentile of *sorted* data (0–100 scale)."""
+    if not sorted_data:
+        return 0.0
+    count = len(sorted_data)
+    k = (count - 1) * p / 100
+    f = int(k)
+    c = f + 1 if f + 1 < count else f
+    return sorted_data[f] + (k - f) * (sorted_data[c] - sorted_data[f])
 
 
 class LatencyHistogram:
@@ -522,6 +545,9 @@ class PerformanceMetrics:
         # Cumulative total of ReAct loop iterations across all conversations
         self._react_iterations_total: int = 0
 
+        # Context token-budget utilization ratios (used_tokens / max_budget)
+        self._context_budget_ratios: deque[float] = deque(maxlen=history_size)
+
         # Per-skill latency tracking (lazy initialization)
         self._skill_latencies: dict[str, deque[float]] = {}
 
@@ -605,6 +631,19 @@ class PerformanceMetrics:
         """Record the number of ReAct loop iterations for a conversation."""
         self._react_iteration_counts.append(float(count))
         self._react_iterations_total += count
+
+    def track_context_budget_utilization(
+        self, used_tokens: int, budget: int
+    ) -> None:
+        """Record the ratio of tokens used to the max budget on a context build.
+
+        A ratio near 1.0 indicates the context is hitting the budget ceiling
+        and the chat may need compression or higher limits.
+        """
+        if budget <= 0:
+            return
+        ratio = used_tokens / budget
+        self._context_budget_ratios.append(ratio)
 
     def track_db_latency(self, latency_seconds: float) -> None:
         """
@@ -841,6 +880,16 @@ class PerformanceMetrics:
             react_iteration_count=len(self._react_iteration_counts),
             react_iterations=_calculate_latency_stats(self._react_iteration_counts),
             react_iterations_total=self._react_iterations_total,
+            context_budget_count=len(self._context_budget_ratios),
+            context_budget_mean_ratio=statistics.mean(self._context_budget_ratios)
+            if self._context_budget_ratios
+            else 0.0,
+            context_budget_max_ratio=max(self._context_budget_ratios)
+            if self._context_budget_ratios
+            else 0.0,
+            context_budget_p95_ratio=_percentile(list(self._context_budget_ratios), 95)
+            if self._context_budget_ratios
+            else 0.0,
             queue_depth=self._queue_depth,
             queue_max_depth=self._queue_max_depth,
             active_chat_count=self._active_chat_count,
