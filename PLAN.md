@@ -290,7 +290,7 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 - [x] **Add property-based test for `_read_file_lines()` reverse-seek correctness** — Use `hypothesis` (already a dev dependency) to generate files of varying sizes and line counts, then verify that `_read_file_lines(path, limit)` returns exactly the last `limit` non-empty lines in chronological order. Covers edge cases: file smaller than limit, file exactly at limit, file with trailing newline, file with no newlines (corrupted), empty file. (`tests/unit/test_db.py`)
 
-- [ ] **Add test for scheduler task-execution timeout** — Create a scheduled task where `_trigger_with_retry` hangs beyond the maximum timeout. Verify that: (a) the timeout fires and the task is marked as failed, (b) other co-scheduled tasks in the same tick are not blocked, (c) the scheduler loop continues to the next tick. (`tests/unit/test_scheduler.py`)
+- [x] **Add test for scheduler task-execution timeout** — Create a scheduled task where `_trigger_with_retry` hangs beyond the maximum timeout. Verify that: (a) the timeout fires and the task is marked as failed, (b) other co-scheduled tasks in the same tick are not blocked, (c) the scheduler loop continues to the next tick. (`tests/unit/test_scheduler.py`)
 
 - [ ] **Add test for `_message_file()` path-cache correctness** — Verify that: (a) repeated calls with the same `chat_id` return the same `Path` object (or equivalent), (b) invalid `chat_id` values raise `ValueError` before caching, (c) the cache doesn't grow beyond `MAX_LRU_CACHE_SIZE`. (`tests/unit/test_db.py`)
 

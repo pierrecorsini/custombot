@@ -1313,6 +1313,112 @@ def _make_transient_error(message: str) -> Exception:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — task-execution timeout
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestExecuteTaskTimeout:
+    """Tests for _execute_task timeout when _trigger_with_retry hangs."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_fires_task_marked_failed(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock,
+    ):
+        """A hanging trigger times out and the task is recorded as failed."""
+        async def hang_forever(chat_id: str, prompt: str) -> str:
+            await asyncio.sleep(600)
+
+        on_trigger.side_effect = hang_forever
+
+        task = _make_task()
+        task["task_id"] = "task_001"
+
+        with patch("src.scheduler.DEFAULT_SCHEDULER_TASK_TIMEOUT", 0.05):
+            await scheduler._execute_task("chat1", task)
+
+        assert scheduler._failure_count == 1
+        assert scheduler._success_count == 0
+        assert task["last_run"] is None
+        # Verify a failure entry was recorded
+        assert len(scheduler._recent_executions) == 1
+        entry = scheduler._recent_executions[0]
+        assert entry["status"] == "failure"
+        assert "timed out" in entry["error_summary"]
+
+    @pytest.mark.asyncio
+    async def test_other_tasks_not_blocked_by_timeout(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock, on_send: AsyncMock,
+    ):
+        """Co-scheduled tasks complete even when one task times out."""
+        fast_task = _make_task(prompt="fast")
+        fast_task["task_id"] = "task_fast"
+        slow_task = _make_task(prompt="slow")
+        slow_task["task_id"] = "task_slow"
+
+        # First call hangs (slow task), second call succeeds (fast task)
+        call_count = 0
+
+        async def selective_hang(chat_id: str, prompt: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            if "slow" in prompt:
+                await asyncio.sleep(600)
+            return "fast result"
+
+        on_trigger.side_effect = selective_hang
+
+        with patch("src.scheduler.DEFAULT_SCHEDULER_TASK_TIMEOUT", 0.05):
+            results = await asyncio.gather(
+                scheduler._execute_task("chat1", slow_task),
+                scheduler._execute_task("chat2", fast_task),
+                return_exceptions=True,
+            )
+
+        # Fast task should succeed; slow task should have timed out
+        assert scheduler._success_count == 1
+        assert scheduler._failure_count == 1
+        assert fast_task["last_run"] is not None
+        assert fast_task["last_result"] == "fast result"
+        assert slow_task["last_run"] is None
+
+    @pytest.mark.asyncio
+    async def test_loop_continues_after_timeout(
+        self, scheduler: TaskScheduler, on_trigger: AsyncMock, workspace: Path,
+    ):
+        """Scheduler loop continues to the next tick after a task timeout."""
+        await scheduler.add_task("chat1", _make_task(prompt="hang"))
+
+        call_count = 0
+
+        async def hang_then_succeed(chat_id: str, prompt: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            # First invocation hangs; subsequent ones succeed quickly
+            if call_count == 1:
+                await asyncio.sleep(600)
+            return "recovered"
+
+        on_trigger.side_effect = hang_then_succeed
+
+        with patch("src.scheduler.DEFAULT_SCHEDULER_TASK_TIMEOUT", 0.05):
+            with patch("src.scheduler.TICK_SECONDS", 0.1):
+                scheduler._running = True
+                loop_task = asyncio.create_task(scheduler._loop())
+                await asyncio.sleep(0.4)
+                scheduler._running = False
+                loop_task.cancel()
+                try:
+                    await loop_task
+                except asyncio.CancelledError:
+                    pass
+
+        # At least 2 trigger attempts: first times out, second succeeds
+        assert on_trigger.await_count >= 2
+        assert scheduler._success_count >= 1
+        assert scheduler._failure_count >= 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TaskScheduler — _is_due timezone edge cases
 # ─────────────────────────────────────────────────────────────────────────────
 
