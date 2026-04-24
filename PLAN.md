@@ -282,7 +282,7 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 - [x] **Add structured startup-duration breakdown to `/health` endpoint** — The health endpoint returns component status but not startup timing. `component_durations` is tracked in `StartupContext` but not exposed. Add a `startup_durations` field to the `/health` response (behind HMAC auth) so operators can identify slow-starting components (e.g., embedding model probe, workspace integrity check). (`src/health/server.py`, `src/core/startup.py:80`)
 
-- [ ] **Log skill argument size distribution for capacity planning** — When skills receive oversized arguments (>100KB), `ToolExecutor` rejects them silently. Add a metric counter (`custombot_skill_args_oversized_total`) and log the skill name + arg size when the limit is hit, so operators can identify which skills are being abused or misconfigured. (`src/core/tool_executor.py:114-128`)
+- [x] **Log skill argument size distribution for capacity planning** — When skills receive oversized arguments (>100KB), `ToolExecutor` rejects them silently. Add a metric counter (`custombot_skill_args_oversized_total`) and log the skill name + arg size when the limit is hit, so operators can identify which skills are being abused or misconfigured. (`src/core/tool_executor.py:114-128`)
 
 ### Test Coverage
 
