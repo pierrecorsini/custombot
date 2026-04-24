@@ -302,7 +302,7 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 ### DevOps / Infrastructure
 
-- [ ] **Add Python 3.13 to CI test matrix** — Python 3.13 is the latest stable release. Adding it to the matrix alongside 3.11 and 3.12 ensures forward-compatibility and catches deprecation warnings early. If 3.13-specific failures occur, document them as known issues rather than blocking the build. (`.github/workflows/ci.yml:57`)
+- [x] **Add Python 3.13 to CI test matrix** — Python 3.13 is the latest stable release. Adding it to the matrix alongside 3.11 and 3.12 ensures forward-compatibility and catches deprecation warnings early. If 3.13-specific failures occur, document them as known issues rather than blocking the build. (`.github/workflows/ci.yml:57`)
 
 - [ ] **Add `--tb=short` to pytest invocation in CI for cleaner failure output** — Default tracebacks in CI can be verbose, especially with asyncio. Adding `--tb=short` reduces CI log noise while preserving the essential failure information. (`.github/workflows/ci.yml:81`)
 
