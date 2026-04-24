@@ -304,6 +304,6 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 - [x] **Add Python 3.13 to CI test matrix** — Python 3.13 is the latest stable release. Adding it to the matrix alongside 3.11 and 3.12 ensures forward-compatibility and catches deprecation warnings early. If 3.13-specific failures occur, document them as known issues rather than blocking the build. (`.github/workflows/ci.yml:57`)
 
-- [ ] **Add `--tb=short` to pytest invocation in CI for cleaner failure output** — Default tracebacks in CI can be verbose, especially with asyncio. Adding `--tb=short` reduces CI log noise while preserving the essential failure information. (`.github/workflows/ci.yml:81`)
+- [x] **Add `--tb=short` to pytest invocation in CI for cleaner failure output** — Default tracebacks in CI can be verbose, especially with asyncio. Adding `--tb=short` reduces CI log noise while preserving the essential failure information. (`.github/workflows/ci.yml:81`)
 
 - [ ] **Bump `--cov-fail-under` from 60 to 65 in CI** — Phase 12 adds 7 new tests (above). If coverage exceeds 65% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 11. (`.github/workflows/ci.yml:86`)

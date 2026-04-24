@@ -87,6 +87,7 @@ jobs:
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
             --cov-fail-under=60 \
+            --tb=short \
             -v
 
       - name: Upload coverage report
