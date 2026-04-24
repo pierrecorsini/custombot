@@ -625,6 +625,14 @@ def _build_prometheus_output(
             else None,
         )
     )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_react_loop_iterations_total",
+            "Cumulative total ReAct loop iterations across all conversations",
+            "counter",
+            snapshot.react_iterations_total,
+        )
+    )
 
     # ── Database Metrics ────────────────────────────────────────────────────
     db_lat = snapshot.db_latency

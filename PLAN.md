@@ -276,7 +276,7 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 ### Observability & Monitoring
 
-- [ ] **Add `custombot_react_loop_iterations_total` Prometheus counter** — `PerformanceMetrics` tracks `track_react_iterations()` but the Prometheus output in `/metrics` should expose a counter (`custombot_react_iterations_total`) so operators can set alerts on high iteration counts (indicating the LLM is stuck in tool-call loops). Currently this metric is only logged to the session summary, not exposed via `/metrics`. (`src/monitoring/performance.py`, `src/health/server.py`)
+- [x] **Add `custombot_react_loop_iterations_total` Prometheus counter** — `PerformanceMetrics` tracks `track_react_iterations()` but the Prometheus output in `/metrics` should expose a counter (`custombot_react_iterations_total`) so operators can set alerts on high iteration counts (indicating the LLM is stuck in tool-call loops). Currently this metric is only logged to the session summary, not exposed via `/metrics`. (`src/monitoring/performance.py`, `src/health/server.py`)
 
 - [ ] **Track and expose conversation-context token budget utilization** — `build_context()` trims messages to fit within a token budget, but the actual vs. budget ratio isn't tracked. Add a metric (`custombot_context_budget_utilization`) that records the ratio of used tokens to the max budget on each context build. This helps operators identify chats that consistently hit the budget ceiling (indicating they need compression or higher limits). (`src/core/context_builder.py`)
 

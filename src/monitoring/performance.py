@@ -263,6 +263,7 @@ class PerformanceSnapshot:
     # ReAct loop iteration metrics
     react_iteration_count: int = 0
     react_iterations: LatencyStats = field(default_factory=LatencyStats)
+    react_iterations_total: int = 0
 
     # Queue metrics
     queue_depth: int = 0
@@ -317,6 +318,7 @@ class PerformanceSnapshot:
             "react_iterations": {
                 "count": self.react_iteration_count,
                 "stats": self.react_iterations.to_dict(),
+                "total": self.react_iterations_total,
             },
             "queue": {
                 "depth": self.queue_depth,
@@ -517,6 +519,9 @@ class PerformanceMetrics:
         # ReAct loop iteration counts per conversation
         self._react_iteration_counts: deque[float] = deque(maxlen=history_size)
 
+        # Cumulative total of ReAct loop iterations across all conversations
+        self._react_iterations_total: int = 0
+
         # Per-skill latency tracking (lazy initialization)
         self._skill_latencies: dict[str, deque[float]] = {}
 
@@ -599,6 +604,7 @@ class PerformanceMetrics:
     def track_react_iterations(self, count: int) -> None:
         """Record the number of ReAct loop iterations for a conversation."""
         self._react_iteration_counts.append(float(count))
+        self._react_iterations_total += count
 
     def track_db_latency(self, latency_seconds: float) -> None:
         """
@@ -834,6 +840,7 @@ class PerformanceMetrics:
             db_latency=_calculate_latency_stats(self._db_latencies),
             react_iteration_count=len(self._react_iteration_counts),
             react_iterations=_calculate_latency_stats(self._react_iteration_counts),
+            react_iterations_total=self._react_iterations_total,
             queue_depth=self._queue_depth,
             queue_max_depth=self._queue_max_depth,
             active_chat_count=self._active_chat_count,
