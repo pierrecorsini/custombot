@@ -294,7 +294,7 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 - [x] **Add test for `_message_file()` path-cache correctness** — Verify that: (a) repeated calls with the same `chat_id` return the same `Path` object (or equivalent), (b) invalid `chat_id` values raise `ValueError` before caching, (c) the cache doesn't grow beyond `MAX_LRU_CACHE_SIZE`. (`tests/unit/test_db.py`)
 
-- [ ] **Add test for config hot-reload applying `BotConfig` changes without restart** — Specifically verify that changing `max_tool_iterations` from 10 to 5 in `config.json` causes the bot's next ReAct loop to use the new limit. This is a regression test for the config-watcher → BotConfig → ReAct-loop data flow. (`tests/integration/test_application_lifecycle.py`)
+- [x] **Add test for config hot-reload applying `BotConfig` changes without restart** — Specifically verify that changing `max_tool_iterations` from 10 to 5 in `config.json` causes the bot's next ReAct loop to use the new limit. This is a regression test for the config-watcher → BotConfig → ReAct-loop data flow. (`tests/integration/test_application_lifecycle.py`)
 
 - [ ] **Add test for `_chat_generations` TTL/eviction under sustained writes** — Simulate a bot running for weeks by generating writes for more than `MAX_CHAT_GENERATIONS` unique chat IDs. Verify: (a) the dict never exceeds the cap, (b) recently-written chats are preserved (LRU eviction), (c) `get_generation()` returns 0 for evicted entries without error. (`tests/unit/test_db.py`)
 
