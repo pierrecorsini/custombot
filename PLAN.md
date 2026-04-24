@@ -307,3 +307,93 @@ and test-coverage gaps not addressed in Phases 1–11.
 - [x] **Add `--tb=short` to pytest invocation in CI for cleaner failure output** — Default tracebacks in CI can be verbose, especially with asyncio. Adding `--tb=short` reduces CI log noise while preserving the essential failure information. (`.github/workflows/ci.yml:81`)
 
 - [x] **Bump `--cov-fail-under` from 60 to 65 in CI** — Phase 12 adds 7 new tests (above). If coverage exceeds 65% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 11. (`.github/workflows/ci.yml:86`)
+
+---
+
+## Phase 13 — Senior Review (2026-04-24)
+
+Generated from a thirteenth-pass codebase audit focusing on type safety,
+operational robustness, architectural debt, test infrastructure, and
+production readiness gaps not addressed in Phases 1–12.
+
+---
+
+### Refactoring
+
+- [x] **Replace `Any` type annotations in `StartupContext` with protocol references** — `StartupContext` uses `Any` for `app`, `components`, `scheduler`, `channel`, `pipeline`, `workspace_monitor`, `config_watcher`, and `health_server` fields. This defeats mypy's ability to catch attribute-access errors in startup steps (e.g., calling a nonexistent method on `ctx.channel` would only fail at runtime). Replace with `TYPE_CHECKING`-guarded protocol or concrete types (e.g., `from src.channels.base import BaseChannel`, `from src.scheduler import TaskScheduler`) to get compile-time safety. (`src/core/startup.py:56-80`)
+
+- [ ] **Extract `MockChatCompletion` from `conftest.py` into a shared test helper module** — `MockChatCompletion` is a reusable test fixture that constructs OpenAI-compatible response objects. It's currently in `tests/conftest.py` but its usage pattern (customizing content, tool_calls, finish_reason) is needed across multiple test files. Extract into `tests/helpers/llm_mocks.py` alongside builder helpers (e.g., `make_tool_call_response(tool_calls=[...])`, `make_streaming_response(chunks=[...])`) so test authors don't reinvent mock responses. (`tests/conftest.py:89-113`, new file `tests/helpers/llm_mocks.py`)
+
+- [ ] **Consolidate `LRUDict` and `LRULockCache` eviction strategies into a single generic `BoundedDict`** — `LRUDict` (in `src/utils/__init__.py`) evicts by popping the oldest half when full. `TokenUsage._per_chat` (in `src/llm.py`) uses a plain `dict` with manual oldest-half eviction that duplicates the same pattern. `DeduplicationService._outbound_cache` is another `OrderedDict` with TTL + eviction. Consolidate into a single `BoundedOrderedDict[K, V]` class with configurable eviction policy (LRU count, TTL, or both) to eliminate three independent eviction implementations. (`src/utils/__init__.py`, `src/llm.py:166-188`, `src/core/dedup.py`)
+
+- [ ] **Add `__slots__` to `TokenUsage` dataclass for memory consistency** — `TokenUsage` is a `@dataclass` without `slots=True`, unlike `DedupStats` and `DeduplicationService` which were upgraded in Phase 12. It holds `_per_chat` (a dict that can grow to 1000 entries) and a `threading.Lock`. Adding `slots=True` reduces per-instance memory overhead and is consistent with the project's pattern for data containers. (`src/llm.py:136-146`)
+
+- [ ] **Move `_classify_llm_error()` from `llm.py` to a dedicated `src/llm_error_classifier.py` module** — `_classify_llm_error()` is a 70-line function that maps OpenAI SDK exceptions to domain `LLMError` instances. It imports 7 exception classes from `openai` at call time (inside the function body for lazy imports). Moving it to its own module (1) keeps `llm.py` focused on the client, (2) allows the classifier to be unit-tested in isolation without instantiating an `LLMClient`, and (3) makes it reusable if a future multi-provider architecture needs different classifiers per provider. (`src/llm.py:50-132`)
+
+### Performance Optimization
+
+- [ ] **Pre-warm httpx connection pool during startup** — `LLMClient.__init__` creates an `httpx.AsyncClient` but the first LLM call pays the TCP + TLS handshake cost. For providers with high-latency handshakes (e.g., self-hosted proxies, Ollama over VPN), this adds 1-3 seconds to the first message response. Add an optional `_warmup()` call during `_step_bot_components` that sends a lightweight request (e.g., models list) to pre-establish the connection before the first user message arrives. (`src/llm.py:213-227`, `src/core/startup.py:159-170`)
+
+- [ ] **Use `orjson` for JSONL message serialization in `Database`** — The project lists `orjson~=3.10.0` as a dependency ("Fast JSON serialization — hot-path acceleration") but `Database` uses stdlib `json.dumps`/`json.loads` for JSONL read/write operations. On a bot processing dozens of messages per second, the JSONL serialization in `_write_messages_sync`, `_read_file_lines`, and `save_messages_batch` is a hot path. Switch to `orjson` (already imported as `json_dumps`/`json_loads` in `src/utils/__init__.py`) for measurable latency reduction on large conversation histories. (`src/db/db.py` — all `json.dumps`/`json.loads` call sites)
+
+- [ ] **Add `mmap`-based reverse-seek for large JSONL files in `_read_file_lines()`** — `_read_file_lines()` does a reverse byte-seek to read the last N lines from a JSONL file. For very large files (5000+ lines), this involves reading potentially hundreds of KB sequentially. Using `mmap.mmap()` for the seek operation avoids loading the entire file into Python memory and allows the OS to manage page-level access. This is a targeted optimization for the compression-threshold scenario. (`src/db/db.py` — `_read_file_lines` method)
+
+- [ ] **Batch `save_message` calls in `process_scheduled()` into a single `save_messages_batch`** — `process_scheduled()` calls `upsert_chat`, then `save_message` for the user turn, then `save_message` for the assistant turn (3 separate file writes). Each `save_message` acquires the per-chat lock, opens the JSONL file, appends, and closes. Combine all 3 writes into a single `save_messages_batch` call to reduce file I/O from 3 round-trips to 1, consistent with how `_finalize_response` already batches writes. (`src/bot.py:777-789`)
+
+### Error Handling & Resilience
+
+- [ ] **Handle `orjson.JSONDecodeError` alongside `json.JSONDecodeError` in `_read_file_lines()`** — If the migration to `orjson` is implemented, `safe_json_parse()` will throw `orjson.JSONDecodeError` instead of `json.JSONDecodeError`. The current error handlers in `db.py` catch `json.JSONDecodeError` explicitly. Audit all JSON parse error handlers to catch both exception types (or use a common base class) to prevent `orjson` decode errors from crashing the DB layer. (`src/db/db.py` — all `except json.JSONDecodeError` blocks)
+
+- [ ] **Add retry-with-backoff for database file write failures in `save_messages_batch()`** — `save_messages_batch()` writes to the JSONL file once. If the write fails (transient disk I/O error, NFS hiccup), the entire message batch is lost and the user sees an error. Add a lightweight retry (1-2 attempts with short backoff) for write failures in `save_messages_batch`, similar to how `_react_loop` retries transient LLM errors. This protects against the most common transient failure mode. (`src/db/db.py` — `save_messages_batch` method)
+
+- [ ] **Guard `chat_stream()` against `usage_data` being `None` when computing token counts** — In `chat_stream()` lines 536-545, `prompt_tokens` and `completion_tokens` are only initialized inside the `if usage_data:` block, but `self._token_usage.add(prompt_tokens, completion_tokens)` is called unconditionally outside it. If a provider doesn't return `usage` data, `NameError` will be raised. Add an `else` branch that sets both to 0, or move the `add` call inside the `if` block. (`src/llm.py:536-545`)
+
+- [ ] **Add structured error event for `_execute_tool_call()` path traversal detection** — When the workspace path traversal guard fires in `_execute_tool_call()`, the incident is logged at ERROR level but no event is emitted on the EventBus. Security events like path traversal attempts should emit an `error_occurred` event so monitoring subscribers can trigger alerts (e.g., notify the operator that a potential attack was detected). (`src/bot.py:1340-1358`)
+
+- [ ] **Sanitize correlation ID in `set_correlation_id()` to prevent log injection** — `set_correlation_id()` accepts any string and it eventually appears in log output via structured extra fields. A malicious `IncomingMessage.correlation_id` containing newline characters or ANSI escape sequences could inject fake log lines or manipulate terminal output. Add validation in `set_correlation_id()` to strip control characters and truncate to a reasonable length (e.g., 64 chars). (`src/logging/logging_config.py` — `set_correlation_id` function)
+
+### Security
+
+- [ ] **Add `Content-Security-Policy` and security headers to health server responses** — The health server's aiohttp handler returns JSON responses but doesn't set security headers. While the health endpoint is typically internal, defense-in-depth requires `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Content-Type: application/json`, and `Cache-Control: no-store` headers on all responses to prevent content-type sniffing, clickjacking, and caching of sensitive metrics data. (`src/health/server.py` — all response handlers)
+
+- [ ] **Add request method validation to health server — reject non-GET/HEAD/OPTIONS** — The health server accepts any HTTP method. While it only serves GET endpoints, a POST/PUT/DELETE request still invokes the handler logic (path matching, HMAC verification). Add middleware that rejects non-GET/HEAD/OPTIONS requests with 405 Method Not Allowed before reaching the handler, reducing the attack surface. (`src/health/server.py`)
+
+- [ ] **Enforce `allowed_numbers` ACL at the channel level before `handle_message()`** — Currently, `allowed_numbers` filtering happens in the WhatsApp channel's message callback before calling `_on_message`. But `IncomingMessage` doesn't carry a "passed ACL" flag — any code that calls `bot.handle_message()` directly (e.g., crash recovery, CLI channel) bypasses the ACL. Add an `acl_passed: bool` field to `IncomingMessage` and validate it in `handle_message()`, or document that ACL enforcement is the channel's responsibility and add a guard in recovery code. (`src/channels/base.py:38-88`, `src/bot.py:332-438`)
+
+- [ ] **Add TTL for `SkillAuditLogger` log files to prevent unbounded disk growth** — `SkillAuditLogger` writes to `workspace/logs/skill_audit/` without rotation or cleanup. Unlike LLM logs (which have `LLM_LOG_MAX_FILES` and `LLM_LOG_MAX_AGE_DAYS`), audit logs grow without bound. Add a `AUDIT_LOG_MAX_FILES` constant and periodic cleanup integrated with the `WorkspaceMonitor`'s cleanup cycle. (`src/security/audit.py`, `src/monitoring/workspace_monitor.py`)
+
+### Observability & Monitoring
+
+- [ ] **Add `custombot_db_write_latency` Prometheus metric** — `PerformanceMetrics` tracks `track_db_latency()` but the `/metrics` endpoint doesn't expose a `custombot_db_write_latency_milliseconds` counter or histogram. Operators cannot set alerts on slow database writes. Add a DB latency metric to the Prometheus output alongside the existing LLM latency metric. (`src/monitoring/performance.py`, `src/health/server.py`)
+
+- [ ] **Track and expose `EventBus` subscriber counts and emission counts** — The EventBus tracks handler subscriptions but doesn't expose usage metrics. Add counters for total emissions per event name and total handler invocations, and expose them via `/metrics` as `custombot_event_emitted_total{event="..."}` and `custombot_event_handler_invocations_total{event="..."}`. This helps operators verify that plugins are actually receiving events and detect stuck or slow handlers. (`src/core/event_bus.py`, `src/health/server.py`)
+
+- [ ] **Add structured log correlation between `_on_message` pipeline stages** — The message pipeline's middleware chain processes a message through 6+ stages (operation tracker, metrics, logging, preflight, typing, handle message). Each stage logs independently but without a shared pipeline-stage identifier. Add a `pipeline_stage` field to the structured log extra dict so that operators can trace which stage a message reached when debugging pipeline failures. (`src/core/message_pipeline.py`)
+
+- [ ] **Add per-provider LLM error classification histogram to metrics** — `_classify_llm_error()` produces rich error codes but they're only logged, not aggregated. Add a counter metric `custombot_llm_errors_total{code="..."}` that increments per error code, so operators can set targeted alerts (e.g., "alert on LLM_API_KEY_INVALID within 5 minutes"). (`src/llm.py:50-132`, `src/monitoring/performance.py`)
+
+### Test Coverage
+
+- [ ] **Add E2E test directory with at least one smoke test** — The `tests/e2e/` directory exists but is empty (no Python files found). The coverage roadmap targets 75% by Phase 14, but E2E tests validate the full integration path. Add at least one smoke test that instantiates the full `Application` lifecycle with a mock channel and verifies that a message flows through the pipeline to a response. (`tests/e2e/`, new file `tests/e2e/test_smoke.py`)
+
+- [ ] **Add parametrized test for `_classify_llm_error()` covering all OpenAI exception types** — `_classify_llm_error()` handles 7 exception types (AuthenticationError, PermissionDeniedError, RateLimitError, APITimeoutError, NotFoundError, APIConnectionError, BadRequestError) plus a generic fallback. There's no dedicated test verifying each mapping. Add a parametrized test that passes each exception type and verifies the returned `LLMError.error_code` and `LLMError.suggestion` are correct. (`tests/unit/test_llm.py`)
+
+- [ ] **Add test for `chat_stream()` missing `usage_data` edge case** — Verify that when a streaming provider doesn't return `usage` data in the stream events, `chat_stream()` doesn't raise `NameError` or `UnboundLocalError` and token tracking is skipped gracefully. (`tests/unit/test_llm.py`)
+
+- [ ] **Add test for `process_scheduled()` injection detection with confidence thresholds** — Verify that a scheduled prompt with injection patterns (e.g., "Ignore all previous instructions") is flagged by `detect_injection()` and that the sanitized version is used. Test both high-confidence (blocked) and low-confidence (logged but allowed) scenarios. (`tests/unit/test_bot.py`)
+
+- [ ] **Add property-based test for `outbound_key()` hash collision resistance** — Use `hypothesis` to generate pairs of distinct `(chat_id, text)` inputs and verify that `outbound_key()` produces different SHA-256 hashes. While collisions are astronomically unlikely for SHA-256, the test also validates that the null-byte separator prevents prefix collisions (e.g., `("a", "bc")` vs `("ab", "c")`). (`tests/unit/test_dedup.py`)
+
+- [ ] **Add test for `StartupOrchestrator._resolve_order()` circular dependency detection** — `_resolve_order()` raises `ValueError` on circular dependencies but this is untested. Add a test with a cycle (A depends on B, B depends on A) and verify the error message is informative. Also test missing dependency detection. (`tests/unit/test_startup.py`)
+
+- [ ] **Add regression test for `TokenUsage` LRU eviction correctness** — `TokenUsage._per_chat` evicts the oldest half when `_per_chat_max` is reached. Verify that: (a) eviction happens exactly when the cap is exceeded, (b) the evicted entries are the oldest (first-inserted), (c) recent entries are preserved, (d) total token counts are not affected by eviction (they're tracked globally). (`tests/unit/test_llm.py`)
+
+### DevOps / Infrastructure
+
+- [ ] **Add `mypy --strict` opt-in CI job for progressive type safety** — The current mypy config has `disallow_untyped_defs = false` and `ignore_missing_imports = true`. While appropriate for the current codebase, adding a separate CI job that runs `mypy --strict` on a curated subset of files (e.g., `src/core/*.py`, `src/bot.py`) would catch regressions in the most critical modules without blocking the main build. Mark as `continue-on-error: true` initially. (`.github/workflows/ci.yml`)
+
+- [ ] **Add `pytest-xdist` for parallel test execution in CI** — The test suite has 38 unit tests and 5 integration tests. Running them sequentially on a single core is acceptable now but won't scale. Add `pytest-xdist` to dev dependencies and run `pytest -n auto` in CI to utilize all available cores, reducing CI feedback time by 2-3x. (`requirements-dev.txt`, `.github/workflows/ci.yml`)
+
+- [ ] **Add Docker health check with configurable timeout via build arg** — The Dockerfile's `HEALTHCHECK` has hardcoded `--timeout=5s` and `--interval=30s`. In production, operators may need different intervals (e.g., longer timeout for slow networks). Add `ARG HEALTH_INTERVAL=30s` and `ARG HEALTH_TIMEOUT=5s` to the Dockerfile so they can be overridden at build time. (`Dockerfile:75-76`)
+
+- [ ] **Bump `--cov-fail-under` from 65 to 70 in CI** — Phase 13 adds 7 new tests (above). If coverage exceeds 70% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 12. (`.github/workflows/ci.yml:89`)

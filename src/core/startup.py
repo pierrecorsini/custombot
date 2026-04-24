@@ -43,8 +43,17 @@ from src.lifecycle import (
 )
 
 if TYPE_CHECKING:
+    from src.app import Application
+    from src.builder import BotComponents
+    from src.channels.base import BaseChannel
     from src.config import Config
+    from src.config.config_watcher import ConfigWatcher
+    from src.core.message_pipeline import MessagePipeline
+    from src.health import HealthServer
     from src.monitoring import SessionMetrics
+    from src.monitoring.workspace_monitor import WorkspaceMonitor
+    from src.scheduler import TaskScheduler
+    from src.shutdown import GracefulShutdown
 
 log = logging.getLogger(__name__)
 
@@ -62,18 +71,18 @@ class StartupContext:
 
     config: Config
     session_metrics: SessionMetrics
-    app: Any  # Application — avoids circular import
+    app: Application  # TYPE_CHECKING-guarded to avoid circular import
 
     # Populated by steps
-    shutdown_mgr: Any | None = None
+    shutdown_mgr: GracefulShutdown | None = None
     executor: ThreadPoolExecutor | None = None
-    components: Any | None = None  # BotComponents
-    scheduler: Any | None = None
-    channel: Any | None = None
-    pipeline: Any | None = None
-    workspace_monitor: Any | None = None
-    config_watcher: Any | None = None
-    health_server: Any | None = None
+    components: BotComponents | None = None
+    scheduler: TaskScheduler | None = None
+    channel: BaseChannel | None = None
+    pipeline: MessagePipeline | None = None
+    workspace_monitor: WorkspaceMonitor | None = None
+    config_watcher: ConfigWatcher | None = None
+    health_server: HealthServer | None = None
 
     # Tracking
     initialized_components: list[str] = field(default_factory=list)
@@ -219,6 +228,13 @@ async def _step_health_server(ctx: StartupContext) -> str | None:
 
     from src.health import HealthServer
 
+    # Merge sub-component durations from the builder into the
+    # orchestration-level durations so the /health endpoint has a
+    # complete picture of every init phase.
+    startup_durations = dict(ctx.component_durations)
+    if ctx.components is not None and ctx.components.component_durations:
+        startup_durations.update(ctx.components.component_durations)
+
     try:
         health_server = HealthServer(
             db=ctx.components.db,
@@ -230,6 +246,7 @@ async def _step_health_server(ctx: StartupContext) -> str | None:
             ),
             workspace_dir=WORKSPACE_DIR,
             shutdown_mgr=ctx.shutdown_mgr,
+            startup_durations=startup_durations,
         )
         await health_server.start(port=health_port)
         ctx.health_server = health_server
