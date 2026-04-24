@@ -306,4 +306,4 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 - [x] **Add `--tb=short` to pytest invocation in CI for cleaner failure output** — Default tracebacks in CI can be verbose, especially with asyncio. Adding `--tb=short` reduces CI log noise while preserving the essential failure information. (`.github/workflows/ci.yml:81`)
 
-- [ ] **Bump `--cov-fail-under` from 60 to 65 in CI** — Phase 12 adds 7 new tests (above). If coverage exceeds 65% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 11. (`.github/workflows/ci.yml:86`)
+- [x] **Bump `--cov-fail-under` from 60 to 65 in CI** — Phase 12 adds 7 new tests (above). If coverage exceeds 65% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 11. (`.github/workflows/ci.yml:86`)
