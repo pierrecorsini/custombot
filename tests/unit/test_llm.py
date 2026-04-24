@@ -25,8 +25,8 @@ from src.exceptions import ErrorCode, LLMError
 from src.llm import (
     LLMClient,
     TokenUsage,
-    _classify_llm_error,
 )
+from src.llm_error_classifier import classify_llm_error
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -1114,12 +1114,12 @@ class TestConnectionAndAuthErrors:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _classify_llm_error — structured error classification
+# classify_llm_error — structured error classification
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class TestClassifyLLMError:
-    """Tests for _classify_llm_error() mapping of OpenAI errors to LLMError."""
+    """Tests for classify_llm_error() mapping of OpenAI errors to LLMError."""
 
     def test_authentication_error(self):
         """AuthenticationError → LLM_API_KEY_INVALID."""
@@ -1130,7 +1130,7 @@ class TestClassifyLLMError:
             response=MagicMock(status_code=401),
             body=None,
         )
-        result = _classify_llm_error(err)
+        result = classify_llm_error(err)
         assert isinstance(result, LLMError)
         assert result.error_code == ErrorCode.LLM_API_KEY_INVALID
         assert "authentication" in result.message.lower()
@@ -1144,7 +1144,7 @@ class TestClassifyLLMError:
             response=MagicMock(status_code=403),
             body=None,
         )
-        result = _classify_llm_error(err)
+        result = classify_llm_error(err)
         assert result.error_code == ErrorCode.LLM_API_KEY_INVALID
         assert "permission" in result.message.lower()
 
@@ -1157,7 +1157,7 @@ class TestClassifyLLMError:
             response=MagicMock(status_code=429),
             body=None,
         )
-        result = _classify_llm_error(err)
+        result = classify_llm_error(err)
         assert result.error_code == ErrorCode.LLM_RATE_LIMITED
         assert "rate limit" in result.message.lower()
 
@@ -1166,7 +1166,7 @@ class TestClassifyLLMError:
         from openai import APITimeoutError
 
         err = APITimeoutError(request=MagicMock())
-        result = _classify_llm_error(err)
+        result = classify_llm_error(err)
         assert result.error_code == ErrorCode.LLM_TIMEOUT
         assert "timed out" in result.message.lower()
 
@@ -1179,7 +1179,7 @@ class TestClassifyLLMError:
             response=MagicMock(status_code=404),
             body=None,
         )
-        result = _classify_llm_error(err)
+        result = classify_llm_error(err)
         assert result.error_code == ErrorCode.LLM_MODEL_UNAVAILABLE
         assert "not found" in result.message.lower()
 
@@ -1188,7 +1188,7 @@ class TestClassifyLLMError:
         from openai import APIConnectionError
 
         err = APIConnectionError(request=MagicMock())
-        result = _classify_llm_error(err)
+        result = classify_llm_error(err)
         assert result.error_code == ErrorCode.LLM_CONNECTION_FAILED
         assert "connect" in result.message.lower()
 
@@ -1201,7 +1201,7 @@ class TestClassifyLLMError:
             response=MagicMock(status_code=400),
             body=None,
         )
-        result = _classify_llm_error(err)
+        result = classify_llm_error(err)
         assert result.error_code == ErrorCode.LLM_INVALID_REQUEST
         assert "bad request" in result.message.lower()
 
@@ -1214,7 +1214,7 @@ class TestClassifyLLMError:
             response=MagicMock(status_code=400),
             body=None,
         )
-        result = _classify_llm_error(err)
+        result = classify_llm_error(err)
         assert result.error_code == ErrorCode.LLM_CONTEXT_LENGTH_EXCEEDED
         assert "context length" in result.message.lower()
 
@@ -1227,12 +1227,12 @@ class TestClassifyLLMError:
             response=MagicMock(status_code=400),
             body=None,
         )
-        result = _classify_llm_error(err)
+        result = classify_llm_error(err)
         assert result.error_code == ErrorCode.LLM_CONTEXT_LENGTH_EXCEEDED
 
     def test_generic_exception_fallback(self):
         """Unknown exception type → generic LLMError without error code."""
-        result = _classify_llm_error(RuntimeError("something broke"))
+        result = classify_llm_error(RuntimeError("something broke"))
         assert isinstance(result, LLMError)
         assert result.error_code == ErrorCode.UNKNOWN
         assert "something broke" in result.message
@@ -1260,7 +1260,7 @@ class TestClassifyLLMError:
             RuntimeError("unknown"),
         ]
         for err in errors:
-            result = _classify_llm_error(err)
+            result = classify_llm_error(err)
             assert isinstance(result, LLMError), f"Expected LLMError for {type(err).__name__}"
             assert result.suggestion, f"Missing suggestion for {type(err).__name__}"
 

@@ -35,6 +35,7 @@ from src.constants import (
     WORKSPACE_DIR,
 )
 from src.exceptions import ErrorCode, LLMError
+from src.llm_error_classifier import classify_llm_error
 from src.logging import get_correlation_id
 from src.security.url_sanitizer import sanitize_url_for_logging
 from src.utils import BoundedOrderedDict
@@ -47,90 +48,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-
-def _classify_llm_error(error: Exception) -> LLMError:
-    """Map an OpenAI API exception to a structured :class:`LLMError`.
-
-    Uses ``isinstance`` checks against the OpenAI SDK exception hierarchy
-    so that each error category gets the right :class:`ErrorCode`,
-    user-facing message, and actionable suggestion.
-
-    Args:
-        error: A raw exception raised by the OpenAI SDK.
-
-    Returns:
-        An :class:`LLMError` with classified ``error_code`` and ``suggestion``.
-    """
-    from openai import (
-        APIConnectionError,
-        APITimeoutError,
-        AuthenticationError,
-        BadRequestError,
-        NotFoundError,
-        PermissionDeniedError,
-        RateLimitError,
-    )
-
-    if isinstance(error, AuthenticationError):
-        return LLMError(
-            message="LLM API authentication failed",
-            suggestion="Check your API key in config.json",
-            error_code=ErrorCode.LLM_API_KEY_INVALID,
-            provider="openai",
-        )
-    if isinstance(error, PermissionDeniedError):
-        return LLMError(
-            message="LLM API permission denied",
-            suggestion="Verify your API key has access to the requested model",
-            error_code=ErrorCode.LLM_API_KEY_INVALID,
-            provider="openai",
-        )
-    if isinstance(error, RateLimitError):
-        return LLMError(
-            message="LLM API rate limit exceeded",
-            suggestion="Wait a moment and try again",
-            error_code=ErrorCode.LLM_RATE_LIMITED,
-        )
-    if isinstance(error, APITimeoutError):
-        return LLMError(
-            message="LLM API request timed out",
-            suggestion="Try again or increase the timeout in config",
-            error_code=ErrorCode.LLM_TIMEOUT,
-        )
-    if isinstance(error, NotFoundError):
-        return LLMError(
-            message=f"LLM model not found: {error}",
-            suggestion="Check the model name in config.json",
-            error_code=ErrorCode.LLM_MODEL_UNAVAILABLE,
-        )
-    if isinstance(error, APIConnectionError):
-        return LLMError(
-            message="Could not connect to LLM API",
-            suggestion="Check your network connection and base_url in config.json",
-            error_code=ErrorCode.LLM_CONNECTION_FAILED,
-        )
-    if isinstance(error, BadRequestError):
-        error_msg = str(error).lower()
-        if any(
-            token in error_msg
-            for token in ("context_length", "context length", "max_tokens", "too many tokens")
-        ):
-            return LLMError(
-                message="Conversation exceeds model's context length",
-                suggestion="Start a new conversation or reduce message history",
-                error_code=ErrorCode.LLM_CONTEXT_LENGTH_EXCEEDED,
-            )
-        return LLMError(
-            message=f"LLM API bad request: {error}",
-            suggestion="Check your request parameters",
-            error_code=ErrorCode.LLM_INVALID_REQUEST,
-        )
-
-    # Generic fallback for any other API error
-    return LLMError(
-        message=f"LLM API error: {error}",
-        suggestion="Check the error details and try again",
-    )
+# Backward-compatible alias — prefer importing from src.llm_error_classifier directly.
+_classify_llm_error = classify_llm_error
 
 
 @dataclass(slots=True)
@@ -397,7 +316,7 @@ class LLMClient:
             raise
         except Exception as exc:
             await self._circuit_breaker.record_failure()
-            classified = _classify_llm_error(exc)
+            classified = classify_llm_error(exc)
             log.error(
                 "LLM error classified: %s → %s (code=%s)",
                 type(exc).__name__,
@@ -591,7 +510,7 @@ class LLMClient:
             raise
         except Exception as exc:
             await self._circuit_breaker.record_failure()
-            classified = _classify_llm_error(exc)
+            classified = classify_llm_error(exc)
             log.error(
                 "LLM streaming error classified: %s → %s (code=%s)",
                 type(exc).__name__,
