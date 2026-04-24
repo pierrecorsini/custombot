@@ -298,7 +298,7 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 - [x] **Add test for `_chat_generations` TTL/eviction under sustained writes** — Simulate a bot running for weeks by generating writes for more than `MAX_CHAT_GENERATIONS` unique chat IDs. Verify: (a) the dict never exceeds the cap, (b) recently-written chats are preserved (LRU eviction), (c) `get_generation()` returns 0 for evicted entries without error. (`tests/unit/test_db.py`)
 
-- [ ] **Add integration test for concurrent compression and read** — Start a `compress_chat_history()` operation and concurrently call `get_recent_messages()` for the same chat. Verify that: (a) no data corruption occurs, (b) `get_recent_messages()` returns either the pre-compression or post-compression view (never a partial/truncated view), (c) no exceptions are raised. (`tests/integration/test_concurrent_load.py`)
+- [x] **Add integration test for concurrent compression and read** — Start a `compress_chat_history()` operation and concurrently call `get_recent_messages()` for the same chat. Verify that: (a) no data corruption occurs, (b) `get_recent_messages()` returns either the pre-compression or post-compression view (never a partial/truncated view), (c) no exceptions are raised. (`tests/integration/test_concurrent_load.py`)
 
 ### DevOps / Infrastructure
 

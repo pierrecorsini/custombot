@@ -18,6 +18,7 @@ are real instances operating on ``tmp_path``.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -852,5 +853,254 @@ class TestConcurrentDatabaseReadWrite:
             assert expected in contents, (
                 f"Missing expected content '{expected}' in final messages"
             )
+
+        await db.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test: Concurrent compress_chat_history + get_recent_messages on same chat
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestConcurrentCompressionAndRead:
+    """
+    Verify that compress_chat_history() and get_recent_messages() running
+    concurrently on the same chat never produce data corruption or partial
+    views.
+
+    Both operations acquire the same per-chat asyncio lock, so they are
+    serialized.  This test exercises the race where:
+      1. A chat has enough history to trigger compression.
+      2. Compression runs while a concurrent read is attempted.
+      3. The read returns either the pre-compression or post-compression
+         snapshot — never a truncated or corrupt view.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_compress_and_read_no_corruption(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Pre-fill a chat above the compression threshold, then fire
+        compress_chat_history() and several get_recent_messages() calls
+        concurrently.
+
+        Verifies:
+          (a) No exceptions are raised from any operation.
+          (b) Every read returns a consistent view (all messages parseable).
+          (c) The final file is valid and contains the expected messages.
+        """
+        data_dir = tmp_path / ".data"
+        db = Database(str(data_dir))
+        await db.connect()
+
+        chat_id = "chat-compress-read-001"
+        await db.upsert_chat(chat_id, "TestBot")
+
+        # Pre-fill with messages BEFORE lowering thresholds so
+        # save_message's internal compress_chat_history check won't trigger.
+        padding = "x" * 200
+        num_prefill = 35
+        for i in range(num_prefill):
+            await db.save_message(
+                chat_id, "user", f"prefill-{i}-{padding}",
+                message_id=f"msg-prefill-{i:04d}",
+            )
+
+        # Verify the file is above the threshold we're about to set
+        msg_file = db._message_file(chat_id)
+        assert msg_file.exists()
+        raw_lines = [
+            line for line in msg_file.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith('{"_version"')
+        ]
+        assert len(raw_lines) >= num_prefill, (
+            f"Pre-fill should produce ≥{num_prefill} lines, got {len(raw_lines)}"
+        )
+
+        # NOW lower thresholds so the next compress_chat_history call will fire
+        monkeypatch.setattr("src.db.db.COMPRESSION_LINE_THRESHOLD", 30)
+        monkeypatch.setattr("src.db.db.COMPRESSION_KEEP_RECENT", 10)
+
+        # Collect read results for consistency verification
+        read_results: list[list[dict]] = []
+        read_lock = asyncio.Lock()
+
+        async def _compress() -> bool:
+            return await db.compress_chat_history(chat_id)
+
+        async def _reader(idx: int) -> list[dict]:
+            msgs = await db.get_recent_messages(chat_id, limit=500)
+            async with read_lock:
+                read_results.append(msgs)
+            return msgs
+
+        # Fire compression and reads concurrently
+        tasks = [_compress()] + [_reader(i) for i in range(5)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # (a) No operation should raise
+        for i, r in enumerate(results):
+            assert not isinstance(r, Exception), (
+                f"Operation {i} raised: {r!r}"
+            )
+
+        # First result is the compression return value
+        compressed = results[0]
+        assert isinstance(compressed, bool)
+
+        # (b) Every read result must be a consistent, parseable snapshot
+        for snap_idx, msgs in enumerate(read_results):
+            assert isinstance(msgs, list), (
+                f"Snapshot {snap_idx} is not a list: {type(msgs)}"
+            )
+            for msg in msgs:
+                assert "role" in msg, (
+                    f"Snapshot {snap_idx}: message missing 'role': {msg}"
+                )
+                assert "content" in msg, (
+                    f"Snapshot {snap_idx}: message missing 'content': {msg}"
+                )
+
+            # Count must be ≤ total messages written (no phantom messages)
+            assert len(msgs) <= num_prefill, (
+                f"Snapshot {snap_idx}: saw {len(msgs)} messages, "
+                f"more than {num_prefill} total writes"
+            )
+
+        # (c) Final read: file must be valid JSONL with expected messages
+        final_messages = await db.get_recent_messages(chat_id, limit=500)
+        assert len(final_messages) > 0, "Final read should return messages"
+
+        # Verify JSONL file is fully parseable (no corruption)
+        content = msg_file.read_text(encoding="utf-8")
+        for line_num, line in enumerate(content.splitlines(), 1):
+            line = line.strip()
+            if not line:
+                continue
+            parsed = json.loads(line)
+            if isinstance(parsed, dict) and parsed.get("type") == "header":
+                continue
+            assert "role" in parsed, f"Line {line_num}: missing 'role'"
+
+        # If compression ran, recent messages should be ≤ COMPRESSION_KEEP_RECENT
+        if compressed:
+            assert len(final_messages) <= 15, (  # 10 kept + margin
+                f"After compression, expected ≤15 messages, got {len(final_messages)}"
+            )
+
+        await db.close()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_compress_and_read_consistent_snapshot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Verify every concurrent read returns a *complete* snapshot — either
+        the full pre-compression view (all messages) or the post-compression
+        view (only the kept recent messages).  An intermediate count would
+        indicate a partial / truncated read caused by a data race.
+
+        Both compress_chat_history() and get_recent_messages() share the
+        same per-chat asyncio lock, so they are serialized.  This test
+        confirms that serialization guarantee holds under concurrent load.
+        """
+        data_dir = tmp_path / ".data"
+        db = Database(str(data_dir))
+        await db.connect()
+
+        chat_id = "chat-compress-snapshot-001"
+        await db.upsert_chat(chat_id, "TestBot")
+
+        # Pre-fill messages above the compression threshold
+        padding = "x" * 200
+        num_prefill = 35
+        compression_keep = 10
+        for i in range(num_prefill):
+            await db.save_message(
+                chat_id, "user", f"prefill-{i:04d}-{padding}",
+                message_id=f"msg-snap-{i:04d}",
+            )
+
+        # Lower thresholds AFTER pre-fill so compress will trigger
+        monkeypatch.setattr("src.db.db.COMPRESSION_LINE_THRESHOLD", 30)
+        monkeypatch.setattr("src.db.db.COMPRESSION_KEEP_RECENT", compression_keep)
+
+        # Collect read snapshots for consistency verification
+        snapshots: list[list[dict]] = []
+        snapshot_lock = asyncio.Lock()
+
+        async def _compress() -> bool:
+            return await db.compress_chat_history(chat_id)
+
+        async def _reader(_idx: int) -> list[dict]:
+            msgs = await db.get_recent_messages(chat_id, limit=500)
+            async with snapshot_lock:
+                snapshots.append(msgs)
+            return msgs
+
+        # Fire 1 compression + many concurrent reads
+        tasks = [_compress()] + [_reader(i) for i in range(10)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # (a) No operation should raise
+        for i, r in enumerate(results):
+            assert not isinstance(r, Exception), f"Operation {i} raised: {r!r}"
+
+        compressed = results[0]
+        assert isinstance(compressed, bool)
+
+        # (b) Every snapshot must be a consistent, complete view.
+        # +1 accounts for the JSONL header line ({"_version":...}) which
+        # get_recent_messages() parses as a pseudo-message (no "role" field,
+        # defaults to "user").
+        _header_overhead = 1
+        pre_count = num_prefill + _header_overhead
+        post_max = compression_keep + _header_overhead
+
+        for snap_idx, msgs in enumerate(snapshots):
+            assert isinstance(msgs, list), f"Snapshot {snap_idx} is not a list"
+
+            # Each message must have valid structure
+            for msg in msgs:
+                assert "role" in msg, f"Snapshot {snap_idx}: missing 'role': {msg}"
+                assert "content" in msg, f"Snapshot {snap_idx}: missing 'content': {msg}"
+
+            count = len(msgs)
+            is_pre = count == pre_count
+            is_post = count <= post_max
+
+            # A snapshot must be either pre-compression (all messages) or
+            # post-compression (only kept messages).  Any intermediate count
+            # indicates a partial/truncated view — a data race.
+            assert is_pre or is_post, (
+                f"Snapshot {snap_idx}: inconsistent view with {count} messages. "
+                f"Expected {pre_count} (pre-compression) or "
+                f"≤{post_max} (post-compression), "
+                f"never an intermediate count."
+            )
+
+            # Post-compression: kept messages must be the most recent ones
+            if is_post and count > 0:
+                last_content = msgs[-1]["content"]
+                last_idx = int(last_content.split("-")[1])
+                assert last_idx >= num_prefill - compression_keep, (
+                    f"Snapshot {snap_idx}: post-compression messages aren't "
+                    f"the most recent. Last index {last_idx}, "
+                    f"expected ≥{num_prefill - compression_keep}"
+                )
+
+        # (c) Final file is valid, parseable JSONL
+        msg_file = db._message_file(chat_id)
+        assert msg_file.exists()
+        content = msg_file.read_text(encoding="utf-8")
+        for line_num, line in enumerate(content.splitlines(), 1):
+            line = line.strip()
+            if not line:
+                continue
+            parsed = json.loads(line)
+            if isinstance(parsed, dict) and parsed.get("type") == "header":
+                continue
+            assert "role" in parsed, f"Line {line_num}: missing 'role'"
 
         await db.close()
