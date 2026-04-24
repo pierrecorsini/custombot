@@ -65,6 +65,11 @@ DEFAULT_HTTPX_MAX_CONNECTIONS: int = 20
 # overhead for sequential requests to the same provider endpoint.
 DEFAULT_HTTPX_MAX_KEEPALIVE_CONNECTIONS: int = 10
 
+# Timeout for the LLM connection warmup request during startup (seconds).
+# Sends a lightweight models.list() call to pre-establish the TCP + TLS
+# connection before the first user message arrives.  Failures are non-fatal.
+LLM_WARMUP_TIMEOUT: float = 10.0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM Configuration Defaults
 # ─────────────────────────────────────────────────────────────────────────────

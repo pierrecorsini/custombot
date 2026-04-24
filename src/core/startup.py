@@ -173,6 +173,11 @@ async def _step_bot_components(ctx: StartupContext) -> str | None:
     components.bot.validate_wiring()
     ctx.components = components
     ctx.app._components = components
+
+    # Pre-warm the httpx connection pool so the first user message
+    # doesn't pay the TCP + TLS handshake latency.
+    await components.llm.warmup()
+
     # Track multiple sub-components
     ctx.initialized_components.append("Bot (LLM, Memory, Skills, Routing)")
     ctx.initialized_components.append("Database")

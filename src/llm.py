@@ -31,6 +31,7 @@ from src.constants import (
     CIRCUIT_BREAKER_FAILURE_THRESHOLD,
     DEFAULT_HTTPX_MAX_CONNECTIONS,
     DEFAULT_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
+    LLM_WARMUP_TIMEOUT,
     STREAM_MIN_CHUNK_CHARS,
     WORKSPACE_DIR,
 )
@@ -167,6 +168,33 @@ class LLMClient:
     def token_usage(self) -> TokenUsage:
         """Token usage statistics for this client instance."""
         return self._token_usage
+
+    async def warmup(self) -> bool:
+        """Pre-establish the TCP + TLS connection to the LLM provider.
+
+        Sends a lightweight ``models.list()`` request during startup so the
+        first real user message doesn't pay the cold-start handshake cost
+        (typically 1–3 s for remote proxies).  Failures are non-fatal and
+        simply logged — the first message will still work, just slower.
+
+        Returns ``True`` if the warmup succeeded, ``False`` otherwise.
+        """
+        import asyncio
+
+        try:
+            await asyncio.wait_for(
+                self._client.models.list(),
+                timeout=LLM_WARMUP_TIMEOUT,
+            )
+            log.info("LLM connection warmup succeeded")
+            return True
+        except Exception as exc:
+            log.warning(
+                "LLM connection warmup failed (non-fatal): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return False
 
     @retry_with_backoff(max_retries=3, initial_delay=1.0, max_total_seconds=180)
     async def _raw_chat(
