@@ -286,7 +286,7 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 ### Test Coverage
 
-- [ ] **Add test for `_finalize_response()` extraction — verify topic finalization, content filtering, and batch persist in isolation** — Once `_finalize_response()` is extracted, test that: (a) META blocks are parsed and topic cache updated, (b) `filter_response_content` is called and sanitized output is used, (c) tool summary formatting is applied for `verbose="summary"`, (d) generation check logs warning on conflict, (e) `save_messages_batch` is called with correct buffered_persist + assistant message. (`tests/unit/test_bot.py`)
+- [x] **Add test for `_finalize_response()` extraction — verify topic finalization, content filtering, and batch persist in isolation** — Once `_finalize_response()` is extracted, test that: (a) META blocks are parsed and topic cache updated, (b) `filter_response_content` is called and sanitized output is used, (c) tool summary formatting is applied for `verbose="summary"`, (d) generation check logs warning on conflict, (e) `save_messages_batch` is called with correct buffered_persist + assistant message. (`tests/unit/test_bot.py`)
 
 - [ ] **Add property-based test for `_read_file_lines()` reverse-seek correctness** — Use `hypothesis` (already a dev dependency) to generate files of varying sizes and line counts, then verify that `_read_file_lines(path, limit)` returns exactly the last `limit` non-empty lines in chronological order. Covers edge cases: file smaller than limit, file exactly at limit, file with trailing newline, file with no newlines (corrupted), empty file. (`tests/unit/test_db.py`)
 
