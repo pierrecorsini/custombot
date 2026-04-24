@@ -24,9 +24,11 @@ import pytest
 from src.bot import Bot, BotConfig, PreflightResult
 from src.channels.base import IncomingMessage
 from src.constants import REACT_LOOP_MAX_RETRIES
+from src.core.tool_formatter import ToolLogEntry
 from src.exceptions import ErrorCode, LLMError
 from src.rate_limiter import RateLimitResult
 from src.routing import RoutingRule
+from src.security.prompt_injection import ContentFilterResult
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -2658,10 +2660,341 @@ class TestCallLlmWithRetry:
         # Should only be called once — no retries
         assert bot._llm.chat.call_count == 1
 
-    async def test_circuit_breaker_open_returns_none(self):
-        """Circuit-breaker-open error returns None immediately (no retry)."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bot._finalize_response Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestFinalizeResponse:
+    """Tests for Bot._finalize_response — post-ReAct finalization pipeline.
+
+    Covers:
+    (a) META block parsing and topic cache update via finalize_turn
+    (b) filter_response_content called and sanitized output used
+    (c) tool summary formatting applied for verbose="summary"
+    (d) generation check logs warning on conflict
+    (e) save_messages_batch called with correct buffered_persist + assistant message
+    (f) response_sent event emitted with correct metadata
+    """
+
+    async def test_topic_meta_parsed_and_cache_updated(self):
+        """finalize_turn is called and its cleaned result is used downstream."""
         bot = _make_bot()
-        bot._metrics = MagicMock()
+
+        with (
+            patch.object(
+                bot._context_assembler,
+                "finalize_turn",
+                return_value="Cleaned response",
+            ) as mock_finalize,
+            patch("src.bot.filter_response_content", return_value=ContentFilterResult(flagged=False)),
+            patch("src.bot.get_event_bus") as mock_get_bus,
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            result = await bot._finalize_response(
+                chat_id="chat_123",
+                raw_response='Response\n---META---\n{"topic_changed": true}',
+                tool_log=[],
+                buffered_persist=[],
+                generation=0,
+                verbose="",
+            )
+
+            mock_finalize.assert_called_once_with(
+                "chat_123",
+                'Response\n---META---\n{"topic_changed": true}',
+            )
+            assert result == "Cleaned response"
+
+    async def test_sensitive_content_filtered(self):
+        """When filter flags content, sanitized version replaces the response."""
+        bot = _make_bot()
+
+        filtered = ContentFilterResult(
+            flagged=True,
+            categories=["api_key"],
+            sanitized_content="Response with [REDACTED]",
+        )
+
+        with (
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Response with sk-abc123"),
+            patch("src.bot.filter_response_content", return_value=filtered),
+            patch("src.bot.get_event_bus") as mock_get_bus,
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            result = await bot._finalize_response(
+                chat_id="chat_456",
+                raw_response="Response with sk-abc123",
+                tool_log=[],
+                buffered_persist=[],
+                generation=0,
+                verbose="",
+            )
+
+        assert result == "Response with [REDACTED]"
+
+    async def test_no_filter_when_not_flagged(self):
+        """When filter returns flagged=False, the original response is kept."""
+        bot = _make_bot()
+
+        with (
+            patch.object(bot._context_assembler, "finalize_turn", return_value="All good"),
+            patch(
+                "src.bot.filter_response_content",
+                return_value=ContentFilterResult(flagged=False),
+            ),
+            patch("src.bot.get_event_bus") as mock_get_bus,
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            result = await bot._finalize_response(
+                chat_id="chat_789",
+                raw_response="All good",
+                tool_log=[],
+                buffered_persist=[],
+                generation=0,
+                verbose="",
+            )
+
+        assert result == "All good"
+
+    async def test_tool_summary_appended_when_verbose_summary(self):
+        """When verbose='summary' and tool_log is non-empty, summary is appended."""
+        bot = _make_bot()
+        tool_log = [ToolLogEntry(name="web_search", args={"query": "test"}, result="found")]
+
+        with (
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Here are results"),
+            patch("src.bot.filter_response_content", return_value=ContentFilterResult(flagged=False)),
+            patch("src.bot.format_response_with_tool_log", return_value="Here are results\n---\n## 🔧 Tool Executions") as mock_format,
+            patch("src.bot.get_event_bus") as mock_get_bus,
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            result = await bot._finalize_response(
+                chat_id="chat_abc",
+                raw_response="Here are results",
+                tool_log=tool_log,
+                buffered_persist=[],
+                generation=0,
+                verbose="summary",
+            )
+
+        mock_format.assert_called_once_with("Here are results", tool_log)
+        assert result == "Here are results\n---\n## 🔧 Tool Executions"
+
+    async def test_no_tool_summary_when_verbose_not_summary(self):
+        """When verbose != 'summary', tool summary is NOT appended."""
+        bot = _make_bot()
+        tool_log = [ToolLogEntry(name="bash", args={"command": "ls"}, result="files")]
+
+        with (
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Done"),
+            patch("src.bot.filter_response_content", return_value=ContentFilterResult(flagged=False)),
+            patch("src.bot.format_response_with_tool_log") as mock_format,
+            patch("src.bot.get_event_bus") as mock_get_bus,
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            result = await bot._finalize_response(
+                chat_id="chat_def",
+                raw_response="Done",
+                tool_log=tool_log,
+                buffered_persist=[],
+                generation=0,
+                verbose="full",
+            )
+
+        mock_format.assert_not_called()
+        assert result == "Done"
+
+    async def test_no_tool_summary_when_tool_log_empty(self):
+        """Even with verbose='summary', no summary is appended if tool_log is empty."""
+        bot = _make_bot()
+
+        with (
+            patch.object(bot._context_assembler, "finalize_turn", return_value="No tools used"),
+            patch("src.bot.filter_response_content", return_value=ContentFilterResult(flagged=False)),
+            patch("src.bot.format_response_with_tool_log") as mock_format,
+            patch("src.bot.get_event_bus") as mock_get_bus,
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            result = await bot._finalize_response(
+                chat_id="chat_ghi",
+                raw_response="No tools used",
+                tool_log=[],
+                buffered_persist=[],
+                generation=0,
+                verbose="summary",
+            )
+
+        mock_format.assert_not_called()
+        assert result == "No tools used"
+
+    async def test_generation_conflict_logs_warning(self):
+        """When check_generation returns False, a warning is logged."""
+        bot = _make_bot()
+        bot._db.check_generation = MagicMock(return_value=False)
+
+        with (
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Response"),
+            patch("src.bot.filter_response_content", return_value=ContentFilterResult(flagged=False)),
+            patch("src.bot.get_event_bus") as mock_get_bus,
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            with patch("src.bot.log") as mock_log:
+                result = await bot._finalize_response(
+                    chat_id="chat_conflict",
+                    raw_response="Response",
+                    tool_log=[],
+                    buffered_persist=[],
+                    generation=5,
+                    verbose="",
+                )
+
+        bot._db.check_generation.assert_called_once_with("chat_conflict", 5)
+        mock_log.warning.assert_any_call(
+            "Write conflict detected for chat %s — generation changed during "
+            "processing. Re-reading latest history before persist.",
+            "chat_conflict",
+            extra={"chat_id": "chat_conflict"},
+        )
+        assert result == "Response"
+
+    async def test_save_messages_batch_called_with_correct_batch(self):
+        """save_messages_batch receives buffered_persist + assistant message."""
+        bot = _make_bot()
+        bot._db.check_generation = MagicMock(return_value=True)
+        bot._db.save_messages_batch = AsyncMock(return_value=["id1", "id2", "id3"])
+
+        buffered = [
+            {"role": "tool", "content": "tool result", "name": "bash"},
+            {"role": "tool", "content": "more output", "name": "bash"},
+        ]
+
+        with (
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Final answer"),
+            patch("src.bot.filter_response_content", return_value=ContentFilterResult(flagged=False)),
+            patch("src.bot.get_event_bus") as mock_get_bus,
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            result = await bot._finalize_response(
+                chat_id="chat_batch",
+                raw_response="Final answer",
+                tool_log=[],
+                buffered_persist=buffered,
+                generation=1,
+                verbose="",
+            )
+
+        expected_batch = [
+            {"role": "tool", "content": "tool result", "name": "bash"},
+            {"role": "tool", "content": "more output", "name": "bash"},
+            {"role": "assistant", "content": "Final answer"},
+        ]
+        bot._db.save_messages_batch.assert_awaited_once_with(
+            chat_id="chat_batch",
+            messages=expected_batch,
+        )
+        assert result == "Final answer"
+
+    async def test_response_sent_event_emitted(self):
+        """response_sent event is emitted with chat_id and response_length."""
+        bot = _make_bot()
+
+        with (
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Hello!"),
+            patch("src.bot.filter_response_content", return_value=ContentFilterResult(flagged=False)),
+            patch("src.bot.get_event_bus") as mock_get_bus,
+            patch("src.bot.get_correlation_id", return_value="corr-999"),
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            result = await bot._finalize_response(
+                chat_id="chat_event",
+                raw_response="Hello!",
+                tool_log=[],
+                buffered_persist=[],
+                generation=0,
+                verbose="",
+            )
+
+        mock_bus.emit.assert_awaited_once()
+        event = mock_bus.emit.call_args[0][0]
+        assert event.name == "response_sent"
+        assert event.data == {"chat_id": "chat_event", "response_length": 6}
+        assert event.source == "Bot._finalize_response"
+        assert event.correlation_id == "corr-999"
+
+    async def test_full_pipeline_with_all_steps(self):
+        """End-to-end _finalize_response with filtering + summary + conflict + event."""
+        bot = _make_bot()
+        bot._db.check_generation = MagicMock(return_value=False)
+        bot._db.save_messages_batch = AsyncMock(return_value=["id1", "id2"])
+
+        tool_log = [ToolLogEntry(name="shell", args={"command": "echo hi"}, result="hi")]
+        buffered = [{"role": "tool", "content": "hi", "name": "shell"}]
+        filtered = ContentFilterResult(
+            flagged=True,
+            categories=["secret"],
+            sanitized_content="Safe response",
+        )
+
+        with (
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Response with secret") as mock_finalize,
+            patch("src.bot.filter_response_content", return_value=filtered),
+            patch("src.bot.format_response_with_tool_log", return_value="Safe response\n---\n## 🔧 summary") as mock_format,
+            patch("src.bot.get_event_bus") as mock_get_bus,
+            patch("src.bot.get_correlation_id", return_value=None),
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            result = await bot._finalize_response(
+                chat_id="chat_full",
+                raw_response="Response with secret",
+                tool_log=tool_log,
+                buffered_persist=buffered,
+                generation=3,
+                verbose="summary",
+            )
+
+            # (a) finalize_turn called
+            mock_finalize.assert_called_once_with("chat_full", "Response with secret")
+            # (b) content filtered
+            assert result == "Safe response\n---\n## 🔧 summary"
+            # (c) tool summary called with filtered text
+            mock_format.assert_called_once_with("Safe response", tool_log)
+            # (d) generation check done
+            bot._db.check_generation.assert_called_once_with("chat_full", 3)
+            # (e) batch persist includes buffered + assistant
+            expected_batch = [
+                {"role": "tool", "content": "hi", "name": "shell"},
+                {"role": "assistant", "content": "Safe response\n---\n## 🔧 summary"},
+            ]
+            bot._db.save_messages_batch.assert_awaited_once_with(
+                chat_id="chat_full", messages=expected_batch,
+            )
+            # (f) event emitted
+            mock_bus.emit.assert_awaited_once()
+            event = mock_bus.emit.call_args[0][0]
+            assert event.name == "response_sent"
+            assert event.data["chat_id"] == "chat_full"
 
         cb_error = LLMError(
             message="circuit breaker open",
