@@ -272,7 +272,7 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 - [x] **Strip sensitive query parameters from `base_url` in LLM client logs** — `LLMClient.__init__` receives `cfg.base_url` which may contain API keys as query parameters (e.g., `http://localhost:11434/v1?key=secret`). While the OpenAI SDK uses `api_key` for auth, some providers embed credentials in the URL. Audit all log statements that reference `cfg.base_url` or `cfg.model` and ensure no credential material leaks. Add URL sanitization that strips query parameters before logging. (`src/llm.py:210-237`, `src/builder.py:115`)
 
-- [ ] **Add rate limiting to `_confirm_send()` in safe mode** — The safe-mode `_confirm_send()` uses `input()` in a loop with no exit limit. A misconfigured or automated input source could send unlimited characters to `input()`. Add a maximum retry count (e.g., 3 attempts) after which the send is automatically rejected, preventing an accidental infinite prompt loop. (`src/channels/base.py:326-335`)
+- [x] **Add rate limiting to `_confirm_send()` in safe mode** — The safe-mode `_confirm_send()` uses `input()` in a loop with no exit limit. A misconfigured or automated input source could send unlimited characters to `input()`. Add a maximum retry count (e.g., 3 attempts) after which the send is automatically rejected, preventing an accidental infinite prompt loop. (`src/channels/base.py:326-335`)
 
 ### Observability & Monitoring
 

@@ -484,6 +484,15 @@ COMPRESSION_KEEP_RECENT: int = 500
 MAX_CHAT_GENERATIONS: int = 10_000
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Safe-Mode Confirmation Limits
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of invalid input attempts before auto-rejecting a safe-mode
+# send confirmation.  Prevents an infinite prompt loop from misconfigured or
+# automated input sources.
+SAFE_MODE_MAX_CONFIRM_RETRIES: int = 3
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Tool Result Persistence Limits
 # ─────────────────────────────────────────────────────────────────────────────
 

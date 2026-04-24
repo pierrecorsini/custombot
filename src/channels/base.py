@@ -16,6 +16,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
@@ -25,12 +26,27 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Known valid channel types. Future channel implementations should register
-# their identifier here. Unknown alphanumeric strings are also accepted so
-# that third-party / experimental channels work without code changes, but
-# strings containing special characters (path separators, punctuation, etc.)
-# are rejected to prevent injection into logs, metrics, or cache keys.
-VALID_CHANNEL_TYPES: frozenset[str] = frozenset({"whatsapp", "cli", ""})
+
+class ChannelType(StrEnum):
+    """Typed constants for known channel identifiers.
+
+    ``StrEnum`` members are plain strings, so all existing string
+    comparisons, routing-rule matching, and logging continue to work
+    unchanged.  New channel implementations should add their identifier
+    here and register it in ``VALID_CHANNEL_TYPES``.
+    """
+
+    WHATSAPP = "whatsapp"
+    CLI = "cli"
+
+
+# Known valid channel types.  Automatically includes every ``ChannelType``
+# member plus the empty-string default.  Unknown alphanumeric strings are
+# also accepted so that third-party / experimental channels work without
+# code changes, but strings containing special characters (path separators,
+# punctuation, etc.) are rejected to prevent injection into logs, metrics,
+# or cache keys.
+VALID_CHANNEL_TYPES: frozenset[str] = frozenset(e.value for e in ChannelType) | {""}
 
 # Alphanumeric + underscore pattern for unknown-but-safe channel identifiers.
 _CHANNEL_TYPE_RE = re.compile(r"^[a-z0-9_]+$")
@@ -114,7 +130,7 @@ class IncomingMessage:
     sender_name: str
     text: str
     timestamp: float
-    channel_type: str = ""
+    channel_type: ChannelType | str = ""
     fromMe: bool = False
     toMe: bool = False
     is_historical: bool = False
@@ -324,12 +340,29 @@ class BaseChannel(ABC):
 
 
 async def _confirm_send(chat_id: str) -> bool:
-    """Prompt Y/N for sending a message. Returns True to send."""
-    while True:
+    """Prompt Y/N for sending a message. Returns True to send.
+
+    After ``SAFE_MODE_MAX_CONFIRM_RETRIES`` invalid inputs the send is
+    automatically rejected to prevent an infinite prompt loop from
+    misconfigured or automated input sources.
+    """
+    from src.constants import SAFE_MODE_MAX_CONFIRM_RETRIES
+
+    for attempt in range(1, SAFE_MODE_MAX_CONFIRM_RETRIES + 1):
         raw = await asyncio.to_thread(input, f"  Send to {chat_id}? [Y/N]: ")
         choice = raw.strip().lower()
         if choice in ("y", "yes"):
             return True
         if choice in ("n", "no"):
             return False
-        print("  Please enter Y or N.")
+        remaining = SAFE_MODE_MAX_CONFIRM_RETRIES - attempt
+        if remaining > 0:
+            print(f"  Please enter Y or N. ({remaining} attempt{'s' if remaining != 1 else ''} remaining)")
+        else:
+            print("  Too many invalid inputs. Send rejected.")
+            log.warning(
+                "Safe-mode confirmation auto-rejected after %d invalid inputs for chat %s",
+                SAFE_MODE_MAX_CONFIRM_RETRIES,
+                chat_id,
+            )
+    return False
