@@ -36,6 +36,8 @@ from src.constants import (
 )
 from src.exceptions import ErrorCode, LLMError
 from src.logging import get_correlation_id
+from src.security.url_sanitizer import sanitize_url_for_logging
+from src.utils import BoundedOrderedDict
 from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.retry import retry_with_backoff
 from src.utils.type_guards import is_llm_config
@@ -131,7 +133,7 @@ def _classify_llm_error(error: Exception) -> LLMError:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class TokenUsage:
     """Token usage statistics for LLM API calls."""
 
@@ -140,9 +142,11 @@ class TokenUsage:
     total_tokens: int = 0
     request_count: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    # Per-chat token tracking (bounded OrderedDict — evicts LRU when full).
-    _per_chat: dict[str, dict[str, int]] = field(default_factory=dict, repr=False)
-    _per_chat_max: int = 1000
+    # Per-chat token tracking — BoundedOrderedDict with half-eviction policy.
+    _per_chat: BoundedOrderedDict[str, dict[str, int]] = field(
+        default_factory=lambda: BoundedOrderedDict(max_size=1000, eviction="half"),
+        repr=False,
+    )
 
     def to_dict(self) -> Dict[str, int]:
         """Convert to dictionary for serialization."""
@@ -162,7 +166,7 @@ class TokenUsage:
             self.request_count += 1
 
     def add_for_chat(self, chat_id: str, prompt: int, completion: int) -> None:
-        """Add per-chat token usage (thread-safe, bounded LRU)."""
+        """Add per-chat token usage (thread-safe, bounded LRU with half-eviction)."""
         with self._lock:
             self.prompt_tokens += prompt
             self.completion_tokens += completion
@@ -176,10 +180,6 @@ class TokenUsage:
                 # Move to end for LRU ordering
                 self._per_chat[chat_id] = entry
             else:
-                if len(self._per_chat) >= self._per_chat_max:
-                    # Evict oldest half
-                    for _ in range(len(self._per_chat) // 2):
-                        self._per_chat.pop(next(iter(self._per_chat)))
                 self._per_chat[chat_id] = {
                     "prompt": prompt,
                     "completion": completion,
@@ -235,6 +235,12 @@ class LLMClient:
             log_dir = f"{WORKSPACE_DIR}/logs/llm"
             self._llm_logger = LLMLogger(log_dir)
             log.info("LLM request/response logging enabled → %s", log_dir)
+
+        log.info(
+            "LLM client initialized: model=%s, base_url=%s",
+            cfg.model,
+            sanitize_url_for_logging(cfg.base_url),
+        )
 
     # ── public API ─────────────────────────────────────────────────────────
 
