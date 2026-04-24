@@ -325,6 +325,39 @@ class TestChatGenerationsBoundedGrowth:
         assert "chat_first" in db._chat_generations
         assert db.get_generation("chat_first") == 2
 
+    def test_sustained_writes_dict_never_exceeds_cap(self, db: Database) -> None:
+        """Simulate weeks of operation with 3× MAX_CHAT_GENERATIONS unique chats.
+
+        Verify: (a) dict never exceeds cap after any _bump_generation call,
+        (b) recently-written chats survive LRU eviction, (c) get_generation()
+        returns 0 for evicted entries without error.
+        """
+        from src.constants import MAX_CHAT_GENERATIONS
+
+        total_chats = MAX_CHAT_GENERATIONS * 3
+
+        # Write 3× the cap in unique chat IDs, simulating sustained operation.
+        for i in range(total_chats):
+            db._bump_generation(f"chat_{i:08d}")
+            # (a) Dict never exceeds cap after each _bump_generation returns.
+            assert len(db._chat_generations) <= MAX_CHAT_GENERATIONS
+
+        # (b) Recently-written chats survive LRU eviction.
+        # With quarter-eviction, the last ~MAX_CHAT_GENERATIONS chats remain.
+        surviving_start = total_chats - MAX_CHAT_GENERATIONS
+        for i in range(surviving_start, total_chats):
+            chat_id = f"chat_{i:08d}"
+            assert chat_id in db._chat_generations, (
+                f"Recent {chat_id} should survive eviction"
+            )
+
+        # (c) Early chats were evicted — get_generation() returns 0 without error.
+        for i in range(0, MAX_CHAT_GENERATIONS, 100):
+            chat_id = f"chat_{i:08d}"
+            assert db.get_generation(chat_id) == 0, (
+                f"Evicted {chat_id} should return generation 0"
+            )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Write circuit breaker tests
