@@ -1,6 +1,6 @@
 """Tests for Database.save_messages_batch() atomicity, generation counter,
-name field sanitization, write circuit breaker, and _read_file_lines
-reverse-seek correctness.
+name field sanitization, write circuit breaker, _read_file_lines
+reverse-seek correctness, and _message_file() path-cache correctness.
 
 Verifies:
 - save_messages_batch persists all messages in a single lock acquisition
@@ -9,6 +9,9 @@ Verifies:
 - Name field is sanitized (control chars stripped, truncated)
 - Write circuit breaker fast-fails when open, records failures, recovers
 - _read_file_lines returns last N lines for small and large files
+- _message_file() returns cached paths for repeated chat_ids
+- _message_file() rejects invalid chat_ids before caching
+- _message_file() cache stays within MAX_LRU_CACHE_SIZE
 """
 
 from __future__ import annotations
@@ -882,3 +885,158 @@ class TestReadFileLinesReverseSeek:
         # reverse-seek path: splitlines() strips \n, rstrip("\r")
         expected = lines[-5:]
         assert result == expected
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _message_file() path-cache correctness
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestMessageFilePathCache:
+    """Verify _message_file() caching behaviour.
+
+    The LRU-backed cache must:
+    (a) return the same Path for repeated calls with the same chat_id,
+    (b) reject invalid chat_ids before they are cached,
+    (c) never exceed MAX_LRU_CACHE_SIZE entries.
+    """
+
+    def test_repeated_call_returns_same_path(self, db: Database) -> None:
+        """Repeated calls with the same chat_id return the same Path."""
+        path1 = db._message_file("chat_abc")
+        path2 = db._message_file("chat_abc")
+        assert path1 == path2
+        assert path1 is path2  # same object from cache
+
+    def test_different_chat_ids_return_different_paths(
+        self, db: Database
+    ) -> None:
+        """Different chat_ids resolve to different message files."""
+        path_a = db._message_file("chat_alpha")
+        path_b = db._message_file("chat_beta")
+        assert path_a != path_b
+        assert path_a.name == "chat_alpha.jsonl"
+        assert path_b.name == "chat_beta.jsonl"
+
+    def test_path_points_to_messages_dir(self, db: Database) -> None:
+        """Returned path is under the messages directory."""
+        path = db._message_file("chat_123")
+        assert path.parent == db._messages_dir
+        assert path.suffix == ".jsonl"
+        assert path.stem == "chat_123"
+
+    def test_invalid_chat_id_empty_raises_before_caching(
+        self, db: Database
+    ) -> None:
+        """Empty chat_id raises ValueError and is NOT cached."""
+        with pytest.raises(ValueError, match="chat_id"):
+            db._message_file("")
+        # Cache should remain empty — the invalid ID was not stored.
+        assert "" not in db._message_file_cache
+
+    def test_special_chars_sanitized_and_cached(self, db: Database) -> None:
+        """chat_id with path-traversal chars is sanitized into a valid name."""
+        # Path traversal characters are replaced by the sanitizer, not rejected.
+        path = db._message_file("../../etc/passwd")
+        assert path.name.endswith(".jsonl")
+        # The sanitized key is cached using the original chat_id.
+        assert "../../etc/passwd" in db._message_file_cache
+        # The sanitized filename must not contain forward slashes or backslashes
+        # (the dangerous path separators), though dots are allowed in filenames.
+        assert "/" not in path.stem
+        assert "\\" not in path.stem
+
+    def test_slash_sanitized_and_cached(self, db: Database) -> None:
+        """chat_id with slashes is sanitized (slashes replaced) and cached."""
+        path = db._message_file("foo/bar")
+        assert path.name.endswith(".jsonl")
+        assert "foo/bar" in db._message_file_cache
+        assert "/" not in path.stem
+
+    def test_whitespace_only_sanitized_and_cached(self, db: Database) -> None:
+        """Whitespace-only chat_id is sanitized to underscores and cached."""
+        path = db._message_file("   ")
+        assert path.name.endswith(".jsonl")
+        assert "   " in db._message_file_cache
+
+    def test_valid_chat_id_cached_after_first_call(
+        self, db: Database
+    ) -> None:
+        """A valid chat_id appears in the cache after first resolution."""
+        assert "chat_valid" not in db._message_file_cache
+        db._message_file("chat_valid")
+        assert "chat_valid" in db._message_file_cache
+
+    def test_cache_does_not_exceed_max_size(self, db: Database) -> None:
+        """Cache evicts oldest entries when MAX_LRU_CACHE_SIZE is exceeded."""
+        from src.constants import MAX_LRU_CACHE_SIZE
+
+        # Fill cache to the max.
+        for i in range(MAX_LRU_CACHE_SIZE):
+            db._message_file(f"chat_{i:06d}")
+        assert len(db._message_file_cache) == MAX_LRU_CACHE_SIZE
+
+        # First entry should still be present.
+        assert "chat_000000" in db._message_file_cache
+
+        # One more entry triggers LRU eviction of the oldest.
+        db._message_file("chat_overflow")
+        assert len(db._message_file_cache) == MAX_LRU_CACHE_SIZE
+        # The oldest entry was evicted.
+        assert "chat_000000" not in db._message_file_cache
+        # The newest entry is present.
+        assert "chat_overflow" in db._message_file_cache
+
+    def test_lru_eviction_removes_oldest_first(self, db: Database) -> None:
+        """When the cache overflows, the least-recently-used entry is evicted."""
+        from src.constants import MAX_LRU_CACHE_SIZE
+
+        # Insert two specific entries we'll track.
+        db._message_file("chat_old")
+        db._message_file("chat_mid")
+
+        # Fill the rest of the cache (MAX_LRU_CACHE_SIZE - 2 more).
+        for i in range(MAX_LRU_CACHE_SIZE - 2):
+            db._message_file(f"chat_fill_{i:06d}")
+
+        # All should be present — cache is exactly at capacity.
+        assert len(db._message_file_cache) == MAX_LRU_CACHE_SIZE
+        assert "chat_old" in db._message_file_cache
+        assert "chat_mid" in db._message_file_cache
+
+        # Overflow: "chat_old" (least recently used) should be evicted.
+        db._message_file("chat_new_overflow")
+        assert "chat_old" not in db._message_file_cache
+        assert "chat_mid" in db._message_file_cache
+        assert "chat_new_overflow" in db._message_file_cache
+
+    def test_repeated_access_refreshes_lru_position(
+        self, db: Database
+    ) -> None:
+        """Accessing a cached entry moves it to most-recently-used."""
+        from src.constants import MAX_LRU_CACHE_SIZE
+
+        db._message_file("chat_precious")
+
+        # Fill cache to capacity — "chat_precious" is the oldest entry.
+        for i in range(MAX_LRU_CACHE_SIZE - 1):
+            db._message_file(f"chat_fill_{i:06d}")
+
+        assert len(db._message_file_cache) == MAX_LRU_CACHE_SIZE
+
+        # Re-access "chat_precious" to refresh its LRU position.
+        db._message_file("chat_precious")
+
+        # Now overflow the cache — "chat_precious" should survive.
+        db._message_file("chat_overflow")
+        assert "chat_precious" in db._message_file_cache
+        # The fill entries starting from 0 should be evicted instead.
+        assert "chat_fill_000000" not in db._message_file_cache
+
+    def test_sanitized_chat_id_used_in_filename(self, db: Database) -> None:
+        """chat_id with special chars like @ is sanitized for the filename."""
+        # WhatsApp-style IDs with @ are common and get sanitized.
+        path = db._message_file("123456789@s.whatsapp.com")
+        # The @ and . characters should be replaced in the filename.
+        assert path.name.endswith(".jsonl")
+        assert "@" not in path.stem

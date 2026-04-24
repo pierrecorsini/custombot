@@ -292,7 +292,7 @@ and test-coverage gaps not addressed in Phases 1–11.
 
 - [x] **Add test for scheduler task-execution timeout** — Create a scheduled task where `_trigger_with_retry` hangs beyond the maximum timeout. Verify that: (a) the timeout fires and the task is marked as failed, (b) other co-scheduled tasks in the same tick are not blocked, (c) the scheduler loop continues to the next tick. (`tests/unit/test_scheduler.py`)
 
-- [ ] **Add test for `_message_file()` path-cache correctness** — Verify that: (a) repeated calls with the same `chat_id` return the same `Path` object (or equivalent), (b) invalid `chat_id` values raise `ValueError` before caching, (c) the cache doesn't grow beyond `MAX_LRU_CACHE_SIZE`. (`tests/unit/test_db.py`)
+- [x] **Add test for `_message_file()` path-cache correctness** — Verify that: (a) repeated calls with the same `chat_id` return the same `Path` object (or equivalent), (b) invalid `chat_id` values raise `ValueError` before caching, (c) the cache doesn't grow beyond `MAX_LRU_CACHE_SIZE`. (`tests/unit/test_db.py`)
 
 - [ ] **Add test for config hot-reload applying `BotConfig` changes without restart** — Specifically verify that changing `max_tool_iterations` from 10 to 5 in `config.json` causes the bot's next ReAct loop to use the new limit. This is a regression test for the config-watcher → BotConfig → ReAct-loop data flow. (`tests/integration/test_application_lifecycle.py`)
 
