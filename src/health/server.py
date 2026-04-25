@@ -21,7 +21,6 @@ import logging
 import os
 import re
 import time
-from collections import OrderedDict
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -38,6 +37,7 @@ from src.health.checks import (
 )
 from src.health.models import ComponentHealth, HealthReport, HealthStatus
 from src.rate_limiter import SlidingWindowTracker
+from src.utils import BoundedOrderedDict
 
 if TYPE_CHECKING:
     from src.bot import Bot
@@ -79,19 +79,15 @@ class _IPLimiter:
     def __init__(self, limit: int, window_seconds: float, max_ips: int) -> None:
         self._limit = limit
         self._window_seconds = window_seconds
-        self._max_ips = max_ips
-        self._trackers: OrderedDict[str, SlidingWindowTracker] = OrderedDict()
+        self._trackers: BoundedOrderedDict[str, SlidingWindowTracker] = (
+            BoundedOrderedDict(max_size=max_ips, eviction="half")
+        )
         self._lock = Lock()
 
     def _get_tracker(self, ip: str) -> SlidingWindowTracker:
         with self._lock:
             if ip in self._trackers:
-                self._trackers.move_to_end(ip)
                 return self._trackers[ip]
-            if len(self._trackers) >= self._max_ips:
-                # Evict oldest half (LRU)
-                for _ in range(len(self._trackers) // 2):
-                    self._trackers.popitem(last=False)
             tracker = SlidingWindowTracker(self._window_seconds, self._limit)
             self._trackers[ip] = tracker
             return tracker
@@ -627,6 +623,16 @@ def _build_prometheus_output(
             snapshot.llm_call_count,
         )
     )
+
+    # ── LLM Error Classification Counter ────────────────────────────────────
+    # Prometheus exposition format requires exactly one HELP and one TYPE line
+    # per metric name, followed by all label variants.
+    if snapshot.llm_error_classifications:
+        lines.append("# HELP custombot_llm_errors_total LLM errors classified by error code\n")
+        lines.append("# TYPE custombot_llm_errors_total counter\n")
+        for code, count in sorted(snapshot.llm_error_classifications.items()):
+            safe_code = code.replace('"', '\\"')
+            lines.append(f'custombot_llm_errors_total{{code="{safe_code}"}} {count}\n')
 
     # ── LLM Latency Histogram ──────────────────────────────────────────────
     lines.append(

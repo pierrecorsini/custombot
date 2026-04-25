@@ -417,7 +417,7 @@ not addressed in Phases 1–13.
 
 - [x] **Consolidate `RoutingEngine._match_cache` TTL+LRU logic into `BoundedOrderedDict`** — `_match_cache` (an `OrderedDict` at line 246) implements its own TTL expiry (`_cache_get` lines 369–380) and LRU eviction (`_cache_put` lines 382–388) identical to what `BoundedOrderedDict` already provides. Replace with `BoundedOrderedDict(max_size=ROUTING_MATCH_CACHE_MAX_SIZE, eviction="half", ttl=ROUTING_MATCH_CACHE_TTL_SECONDS)` to eliminate the fourth independent cache implementation. (`src/routing.py:246, 368-388`)
 
-- [ ] **Consolidate `_IPLimiter._trackers` half-eviction into `BoundedOrderedDict`** — `_IPLimiter` in `health/server.py` (lines 76–97) implements yet another LRU-ordered dict with half-eviction (`popitem(last=False)` in a loop at lines 93–94). Replace with `BoundedOrderedDict(max_size=max_ips, eviction="half")` for consistency. (`src/health/server.py:76-97`)
+- [x] **Consolidate `_IPLimiter._trackers` half-eviction into `BoundedOrderedDict`** — `_IPLimiter` in `health/server.py` (lines 76–97) implements yet another LRU-ordered dict with half-eviction (`popitem(last=False)` in a loop at lines 93–94). Replace with `BoundedOrderedDict(max_size=max_ips, eviction="half")` for consistency. (`src/health/server.py:76-97`)
 
 - [ ] **Extract `_build_message_record()` inline imports to module-level** — `_build_message_record()` in `db.py` imports `detect_injection` and `sanitize_user_input` from `src.security.prompt_injection` *inside the function body* at lines 1027–1031. This runs on every user-role message write, adding import overhead (module is cached, but the name lookup still occurs). Move to module-level imports behind `TYPE_CHECKING` or lazy-import at module init. (`src/db/db.py:1027-1031`)
 
