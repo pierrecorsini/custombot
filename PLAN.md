@@ -431,7 +431,7 @@ not addressed in Phases 1–13.
 
 - [x] **Add connection-pool warmup for `VectorMemory` SQLite reads** — `VectorMemory._get_read_connection()` creates a new SQLite connection on first access per thread. During startup, the first search query pays the sqlite-vec extension loading cost (~5ms). Pre-warm one read connection during `_step_bot_components()` by calling `_get_read_connection()` once after `connect()`, so the first user-facing query doesn't pay this latency. (`src/vector_memory.py:172-196`, `src/core/startup.py:168-184`)
 
-- [ ] **Lazy-init `Bot._audit_logger` (`SkillAuditLogger`) only when skills are actually executed** — `Bot.__init__` creates a `SkillAuditLogger` instance at line 214, which opens the audit log directory on every bot startup even if no skills are ever invoked (e.g., a bot that only handles simple chat). Defer creation to first use inside `ToolExecutor.execute()` to avoid unnecessary filesystem I/O during startup. (`src/bot.py:214`)
+- [x] **Lazy-init `Bot._audit_logger` (`SkillAuditLogger`) only when skills are actually executed** — `Bot.__init__` creates a `SkillAuditLogger` instance at line 214, which opens the audit log directory on every bot startup even if no skills are ever invoked (e.g., a bot that only handles simple chat). Defer creation to first use inside `ToolExecutor.execute()` to avoid unnecessary filesystem I/O during startup. (`src/bot.py:214`)
 
 ### Error Handling & Resilience
 
