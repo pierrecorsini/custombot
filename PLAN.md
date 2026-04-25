@@ -508,7 +508,7 @@ in Phases 1–14.
 
 ### Dead Code
 
-- [ ] **Remove unused `SlidingWindowTracker.check_and_record()` method** — `check_and_record()` (line 189 in `rate_limiter.py`) is the convenience "check + record in one call" API on `SlidingWindowTracker`. Every production caller (`RateLimiter.check_rate_limit()`, `RateLimiter.check_message_rate()`) uses the two-phase `check_only()` + `record()` pattern instead, to avoid consuming slots on denied requests. `check_and_record()` is only exercised in `tests/unit/test_rate_limiter.py`. Remove the method and update the tests to use the two-phase API, reducing the public surface and eliminating confusion about which API to use. (`src/rate_limiter.py:189-228`, `tests/unit/test_rate_limiter.py`)
+- [x] **Remove unused `SlidingWindowTracker.check_and_record()` method** — `check_and_record()` (line 189 in `rate_limiter.py`) is the convenience "check + record in one call" API on `SlidingWindowTracker`. Every production caller (`RateLimiter.check_rate_limit()`, `RateLimiter.check_message_rate()`) uses the two-phase `check_only()` + `record()` pattern instead, to avoid consuming slots on denied requests. `check_and_record()` is only exercised in `tests/unit/test_rate_limiter.py`. Remove the method and update the tests to use the two-phase API, reducing the public surface and eliminating confusion about which API to use. (`src/rate_limiter.py:189-228`, `tests/unit/test_rate_limiter.py`)
 
 ### Refactoring
 

@@ -171,7 +171,6 @@ class SlidingWindowTracker:
     Two-phase API:
     - check_only() + record(): For multi-check flows where denied requests
       must NOT consume a slot (prevents double-counting).
-    - check_and_record(): Convenience shortcut for single-check flows.
     """
 
     def __init__(self, window_size_seconds: float, max_limit: int):
@@ -185,47 +184,6 @@ class SlidingWindowTracker:
         cutoff = now - self._window_size
         while self._timestamps and self._timestamps[0] < cutoff:
             self._timestamps.popleft()
-
-    def check_and_record(self, now: Optional[float] = None) -> Tuple[bool, int, float]:
-        """
-        Check if operation is allowed and record the timestamp if so.
-
-        Args:
-            now: Current timestamp (uses time.time() if not provided)
-
-        Returns:
-            Tuple of (allowed, remaining, retry_after_seconds)
-        """
-        if now is None:
-            now = time.time()
-
-        with self._lock:
-            self._prune_old_entries(now)
-
-            current_count = len(self._timestamps)
-
-            if current_count >= self._max_limit:
-                # Rate limited - find when the oldest entry expires
-                if self._timestamps:
-                    oldest_time = self._timestamps[0]
-                    retry_after = (oldest_time + self._window_size) - now
-                    retry_after = max(0.0, retry_after)
-                else:
-                    retry_after = 0.0
-                return False, 0, retry_after
-
-            # Allowed - record this request
-            self._timestamps.append(now)
-            remaining = self._max_limit - len(self._timestamps)
-
-            # Calculate reset time (when oldest entry expires)
-            if self._timestamps:
-                oldest_time = self._timestamps[0]
-                reset_at = oldest_time + self._window_size
-            else:
-                reset_at = now + self._window_size
-
-            return True, remaining, reset_at
 
     def check_only(self, now: Optional[float] = None) -> Tuple[bool, int, float]:
         """Read-only rate limit check without recording a timestamp.

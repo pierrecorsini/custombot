@@ -2,8 +2,7 @@
 Tests for src/rate_limiter.py — SlidingWindowTracker and RateLimiter.
 
 Covers:
-- check_and_record() allows within limit
-- check_and_record() denies over limit
+- check_only() + record() two-phase API
 - check_only() does NOT record timestamp
 - Sliding window expiry (old entries pruned)
 - RateLimiter per-chat limits
@@ -33,19 +32,23 @@ from src.rate_limiter import (
 
 
 class TestSlidingWindowCheckAndRecord:
-    """Tests for SlidingWindowTracker.check_and_record()."""
+    """Tests for SlidingWindowTracker check_only() + record() two-phase API."""
 
     def test_allows_within_limit(self) -> None:
         tracker = SlidingWindowTracker(window_size_seconds=60.0, max_limit=5)
-        allowed, remaining, reset_at = tracker.check_and_record(now=100.0)
-
+        allowed, remaining, reset_at = tracker.check_only(now=100.0)
         assert allowed is True
-        assert remaining == 4  # 5 - 1 just recorded
+        assert remaining == 5  # No timestamps recorded yet
+
+        tracker.record(now=100.0)
+        assert tracker.get_current_count(now=100.0) == 1
 
     def test_records_timestamp(self) -> None:
         tracker = SlidingWindowTracker(window_size_seconds=60.0, max_limit=5)
-        tracker.check_and_record(now=100.0)
+        allowed, _, _ = tracker.check_only(now=100.0)
+        assert allowed is True
 
+        tracker.record(now=100.0)
         assert tracker.get_current_count(now=100.0) == 1
 
     def test_denies_over_limit(self) -> None:
@@ -53,10 +56,11 @@ class TestSlidingWindowCheckAndRecord:
 
         # Fill up to the limit
         for i in range(3):
-            tracker.check_and_record(now=100.0 + i)
+            tracker.check_only(now=100.0 + i)
+            tracker.record(now=100.0 + i)
 
         # 4th should be denied
-        allowed, remaining, retry_after = tracker.check_and_record(now=100.0 + 3)
+        allowed, remaining, retry_after = tracker.check_only(now=100.0 + 3)
 
         assert allowed is False
         assert remaining == 0
@@ -65,11 +69,14 @@ class TestSlidingWindowCheckAndRecord:
     def test_returns_correct_remaining(self) -> None:
         tracker = SlidingWindowTracker(window_size_seconds=60.0, max_limit=5)
 
-        _, remaining_1, _ = tracker.check_and_record(now=100.0)
-        assert remaining_1 == 4
+        tracker.check_only(now=100.0)
+        tracker.record(now=100.0)
+        _, remaining_2, _ = tracker.check_only(now=100.0)
+        assert remaining_2 == 4  # 5 - 1 recorded
 
-        _, remaining_2, _ = tracker.check_and_record(now=100.0)
-        assert remaining_2 == 3
+        tracker.record(now=100.0)
+        _, remaining_3, _ = tracker.check_only(now=100.0)
+        assert remaining_3 == 3  # 5 - 2 recorded
 
 
 class TestSlidingWindowCheckOnly:
@@ -93,8 +100,10 @@ class TestSlidingWindowCheckOnly:
 
     def test_returns_denied_when_at_limit(self) -> None:
         tracker = SlidingWindowTracker(window_size_seconds=60.0, max_limit=2)
-        tracker.check_and_record(now=100.0)
-        tracker.check_and_record(now=100.1)
+        tracker.check_only(now=100.0)
+        tracker.record(now=100.0)
+        tracker.check_only(now=100.1)
+        tracker.record(now=100.1)
 
         allowed, _, retry_after = tracker.check_only(now=100.2)
 
@@ -118,7 +127,8 @@ class TestSlidingWindowExpiry:
         tracker = SlidingWindowTracker(window_size_seconds=10.0, max_limit=5)
 
         # Record at t=100
-        tracker.check_and_record(now=100.0)
+        tracker.check_only(now=100.0)
+        tracker.record(now=100.0)
         assert tracker.get_current_count(now=100.0) == 1
 
         # At t=111, the entry at t=100 is outside the 10s window
@@ -129,23 +139,25 @@ class TestSlidingWindowExpiry:
         tracker = SlidingWindowTracker(window_size_seconds=60.0, max_limit=3)
 
         # Record 3 at t=100
-        tracker.check_and_record(now=100.0)
-        tracker.check_and_record(now=101.0)
-        tracker.check_and_record(now=102.0)
+        for t in [100.0, 101.0, 102.0]:
+            tracker.check_only(now=t)
+            tracker.record(now=t)
 
         # At t=103, still at limit
-        allowed, _, _ = tracker.check_and_record(now=103.0)
+        allowed, _, _ = tracker.check_only(now=103.0)
         assert allowed is False
 
         # At t=161, the entry at t=100 has expired (100 + 60 = 160)
         # So there's room for one more
-        allowed, _, _ = tracker.check_and_record(now=161.0)
+        allowed, _, _ = tracker.check_only(now=161.0)
         assert allowed is True
 
     def test_get_current_count_prunes(self) -> None:
         tracker = SlidingWindowTracker(window_size_seconds=5.0, max_limit=10)
-        tracker.check_and_record(now=100.0)
-        tracker.check_and_record(now=101.0)
+        tracker.check_only(now=100.0)
+        tracker.record(now=100.0)
+        tracker.check_only(now=101.0)
+        tracker.record(now=101.0)
 
         # At t=106, entry at t=100 has expired
         assert tracker.get_current_count(now=106.0) == 1
