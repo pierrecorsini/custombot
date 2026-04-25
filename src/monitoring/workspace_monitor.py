@@ -35,6 +35,8 @@ from pathlib import Path
 from typing import Optional
 
 from src.constants import (
+    AUDIT_LOG_MAX_AGE_DAYS,
+    AUDIT_LOG_MAX_FILES,
     LLM_LOG_MAX_AGE_DAYS,
     LLM_LOG_MAX_FILES,
     WORKSPACE_ARCHIVE_MAX_AGE_DAYS,
@@ -65,6 +67,7 @@ class WorkspaceStats:
     backups_pruned: int = 0
     temps_cleaned: int = 0
     logs_pruned: int = 0
+    audit_logs_pruned: int = 0
     errors: int = 0
 
     timestamp: float = field(default_factory=time.time)
@@ -94,6 +97,7 @@ class WorkspaceStats:
                 "backups_pruned": self.backups_pruned,
                 "temps_cleaned": self.temps_cleaned,
                 "logs_pruned": self.logs_pruned,
+                "audit_logs_pruned": self.audit_logs_pruned,
                 "errors": self.errors,
             },
             "timestamp": self.timestamp,
@@ -298,6 +302,77 @@ def _prune_llm_logs(
     return pruned
 
 
+def _prune_audit_logs(
+    workspace: Path,
+    max_age_days: int,
+    max_files: int,
+) -> int:
+    """Prune rotated audit log files beyond the configured limits.
+
+    Removes ``audit.{i}.jsonl`` files older than *max_age_days* first, then
+    enforces the *max_files* count limit by removing the oldest files.
+    The active ``audit.jsonl`` file is never removed.
+    """
+    log_dir = workspace / "logs"
+    if not log_dir.exists():
+        return 0
+
+    cutoff = time.time() - (max_age_days * 86400)
+    pruned = 0
+
+    # Collect rotated audit files only (audit.{i}.jsonl, not audit.jsonl)
+    try:
+        files = sorted(
+            (
+                f
+                for f in log_dir.iterdir()
+                if f.is_file()
+                and f.name.startswith("audit.")
+                and f.name.endswith(".jsonl")
+                and f.name != "audit.jsonl"
+            ),
+            key=lambda f: f.stat().st_mtime,
+        )
+    except OSError:
+        return 0
+
+    # Age-based pruning
+    for f in files:
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                pruned += 1
+        except OSError:
+            pass
+
+    # Count-based pruning: remove oldest files exceeding the limit
+    try:
+        remaining = sorted(
+            (
+                f
+                for f in log_dir.iterdir()
+                if f.is_file()
+                and f.name.startswith("audit.")
+                and f.name.endswith(".jsonl")
+                and f.name != "audit.jsonl"
+            ),
+            key=lambda f: f.stat().st_mtime,
+        )
+        while len(remaining) > max_files:
+            oldest = remaining.pop(0)
+            try:
+                oldest.unlink()
+                pruned += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+    if pruned > 0:
+        log.info("Pruned %d audit log file(s)", pruned)
+    return pruned
+
+
 class WorkspaceMonitor:
     """Periodic workspace size monitor and cleanup task.
 
@@ -319,6 +394,8 @@ class WorkspaceMonitor:
         size_warning_mb: float = WORKSPACE_SIZE_WARNING_MB,
         llm_log_max_files: int = LLM_LOG_MAX_FILES,
         llm_log_max_age_days: int = LLM_LOG_MAX_AGE_DAYS,
+        audit_log_max_age_days: int = AUDIT_LOG_MAX_AGE_DAYS,
+        audit_log_max_files: int = AUDIT_LOG_MAX_FILES,
     ) -> None:
         self._workspace = Path(workspace_dir)
         self._cleanup_interval = cleanup_interval
@@ -328,6 +405,8 @@ class WorkspaceMonitor:
         self._size_warning_mb = size_warning_mb
         self._llm_log_max_files = llm_log_max_files
         self._llm_log_max_age_days = llm_log_max_age_days
+        self._audit_log_max_age_days = audit_log_max_age_days
+        self._audit_log_max_files = audit_log_max_files
         self._task: Optional[asyncio.Task[None]] = None
         self._running = False
         self._last_stats: Optional[WorkspaceStats] = None
@@ -413,8 +492,24 @@ class WorkspaceMonitor:
             log.warning("LLM log pruning failed: %s", exc)
             stats.errors += 1
 
+        try:
+            stats.audit_logs_pruned = _prune_audit_logs(
+                workspace=self._workspace,
+                max_age_days=self._audit_log_max_age_days,
+                max_files=self._audit_log_max_files,
+            )
+        except Exception as exc:
+            log.warning("Audit log pruning failed: %s", exc)
+            stats.errors += 1
+
         # Refresh sizes after cleanup
-        if stats.files_archived or stats.backups_pruned or stats.temps_cleaned or stats.logs_pruned:
+        if (
+            stats.files_archived
+            or stats.backups_pruned
+            or stats.temps_cleaned
+            or stats.logs_pruned
+            or stats.audit_logs_pruned
+        ):
             post_stats = self.get_stats()
             stats.workspace_bytes = post_stats.workspace_bytes
             stats.data_bytes = post_stats.data_bytes
@@ -454,14 +549,15 @@ class WorkspaceMonitor:
                         stats.archives_bytes / (1024 * 1024),
                     )
 
-                if stats.files_archived or stats.backups_pruned or stats.temps_cleaned or stats.logs_pruned:
+                if stats.files_archived or stats.backups_pruned or stats.temps_cleaned or stats.logs_pruned or stats.audit_logs_pruned:
                     log.info(
                         "Workspace cleanup: archived=%d, backups_pruned=%d, "
-                        "temps_cleaned=%d, logs_pruned=%d, errors=%d",
+                        "temps_cleaned=%d, logs_pruned=%d, audit_logs_pruned=%d, errors=%d",
                         stats.files_archived,
                         stats.backups_pruned,
                         stats.temps_cleaned,
                         stats.logs_pruned,
+                        stats.audit_logs_pruned,
                         stats.errors,
                     )
 

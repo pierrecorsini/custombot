@@ -398,6 +398,21 @@ MAX_QUEUED_TEXT_LENGTH: int = 10_000
 EVENT_BUS_MAX_HANDLERS_PER_EVENT: int = 50
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Audit Log Rotation
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum age (days) for rotated audit log files (audit.{i}.jsonl).  Files
+# older than this are deleted during WorkspaceMonitor's periodic cleanup cycle,
+# preventing unbounded disk growth from the per-skill JSONL audit trail.
+AUDIT_LOG_MAX_AGE_DAYS: int = 90
+
+# Maximum number of rotated audit log files to retain.  When exceeded, the
+# oldest files are removed during cleanup.  Matches SkillAuditLogger's
+# MAX_ROTATED_FILES (5) by default, but can be raised if operators want to
+# keep more historical audit trail on disk.
+AUDIT_LOG_MAX_FILES: int = 5
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Workspace Cleanup Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
