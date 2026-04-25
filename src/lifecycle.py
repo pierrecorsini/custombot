@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
 
 from src.config import Config
+from src.security.url_sanitizer import sanitize_url_for_logging
 
 if TYPE_CHECKING:
     from src.bot import Bot
@@ -59,7 +60,7 @@ def _log_startup_begin(config: Config) -> float:
         # Verbose mode: full config summary
         config_summary = {
             "llm_model": config.llm.model,
-            "llm_base_url": config.llm.base_url,
+            "llm_base_url": sanitize_url_for_logging(config.llm.base_url),
             "llm_api_key": "***REDACTED***" if config.llm.api_key else "NOT_SET",
             "whatsapp_provider": config.whatsapp.provider,
             "neonize_db_path": config.whatsapp.neonize.db_path,
@@ -326,12 +327,21 @@ async def perform_shutdown(
         except Exception as e:
             log.warning("Error stopping memory monitoring: %s", e)
 
+    def _close_executor():
+        if bot is None:
+            return
+        try:
+            bot.close_executor()
+        except Exception as e:
+            log.warning("Error closing tool executor: %s", e)
+
     await asyncio.gather(
         asyncio.to_thread(_close_project_store),
         asyncio.to_thread(_close_vector_memory),
         _close_message_queue(),
         _close_llm(),
         _stop_memory_monitoring(),
+        asyncio.to_thread(_close_executor),
     )
 
     # 6. Shut down the thread pool executor (after all to_thread calls are done)

@@ -24,6 +24,7 @@ from src.core.event_bus import Event, get_event_bus
 from src.exceptions import SkillError, get_user_friendly_message
 from src.logging import get_correlation_id
 from src.security.audit import SkillAuditLogger
+from src.utils import JSONDecodeError
 from src.utils.timing import skill_timer
 
 MAX_ARGS_DEPTH = 10
@@ -49,13 +50,21 @@ class ToolExecutor:
         rate_limiter: "RateLimiter | None" = None,
         metrics: "PerformanceMetrics | None" = None,
         on_skill_executed: Optional[Callable[[], None]] = None,
-        audit_logger: Optional[SkillAuditLogger] = None,
+        audit_log_dir: Optional[str | Path] = None,
     ) -> None:
         self._skills = skills_registry
         self._rate_limiter = rate_limiter
         self._metrics = metrics
         self._on_skill_executed = on_skill_executed
-        self._audit_logger = audit_logger
+        self._audit_log_dir = Path(audit_log_dir) if audit_log_dir else None
+        self._audit_logger: SkillAuditLogger | None = None
+
+    def close(self) -> None:
+        """Flush and close the audit logger. Safe to call multiple times."""
+        if self._audit_logger is not None:
+            self._audit_logger.close()
+            self._audit_logger = None
+            log.debug("ToolExecutor audit logger closed")
 
     def _audit(
         self,
@@ -66,14 +75,18 @@ class ToolExecutor:
         result_summary: str,
     ) -> None:
         """Record a skill-execution audit entry if the logger is configured."""
-        if self._audit_logger is not None:
-            self._audit_logger.log(
-                chat_id=chat_id,
-                skill_name=skill_name,
-                args_hash=SkillAuditLogger.hash_args(raw_args),
-                allowed=allowed,
-                result_summary=result_summary,
-            )
+        if self._audit_logger is None:
+            if self._audit_log_dir is None:
+                return
+            self._audit_logger = SkillAuditLogger(self._audit_log_dir)
+            self._audit_log_dir = None  # release the path reference
+        self._audit_logger.log(
+            chat_id=chat_id,
+            skill_name=skill_name,
+            args_hash=SkillAuditLogger.hash_args(raw_args),
+            allowed=allowed,
+            result_summary=result_summary,
+        )
 
     async def execute(
         self,
@@ -121,6 +134,8 @@ class ToolExecutor:
                 extra={"chat_id": chat_id, "skill": name},
             )
             self._audit(chat_id, name, raw_args, False, "args_oversized")
+            if self._metrics is not None:
+                self._metrics.track_skill_args_oversized(name, len(raw_args))
             return format_skill_error(
                 skill_name=name,
                 error_type="ArgumentError",
@@ -130,7 +145,7 @@ class ToolExecutor:
         # Parse arguments
         try:
             args = json.loads(raw_args)
-        except json.JSONDecodeError as exc:
+        except JSONDecodeError as exc:
             log.error(
                 "Skill %r argument parse failed: %s",
                 name,
@@ -219,6 +234,9 @@ class ToolExecutor:
                 if self._metrics:
                     self._metrics.track_skill_time(name, timing_result.duration_seconds)
                     self._metrics.track_skill_success(name)
+                    self._metrics.track_skill_timeout_ratio(
+                        name, timing_result.duration_seconds, timeout
+                    )
                 log.info(
                     "Skill %r completed",
                     name,

@@ -95,6 +95,8 @@ class SkillAuditLogger:
         }
         line = json.dumps(entry, default=str)
         with self._lock:
+            if self._path is None:
+                return  # logger has been closed
             try:
                 with open(self._path, "a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
@@ -123,6 +125,21 @@ class SkillAuditLogger:
             if src.exists():
                 src.rename(dst)
         self._path.rename(self._dir / "audit.1.jsonl")
+
+    # ── lifecycle ─────────────────────────────────────────────────────────
+
+    def close(self) -> None:
+        """Flush and release audit-logger resources.
+
+        Safe to call multiple times or when the logger was never used.
+        """
+        # SkillAuditLogger opens/closes files per-write via ``with open(...)``,
+        # so there are no lingering handles.  Release the lock and path
+        # references so subsequent ``log()`` calls become no-ops.
+        with self._lock:
+            self._path = None  # type: ignore[assignment]
+            self._dir = None  # type: ignore[assignment]
+        log.debug("SkillAuditLogger closed")
 
     # ── TTL cleanup ──────────────────────────────────────────────────────
 

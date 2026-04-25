@@ -273,6 +273,10 @@ class Bot:
             self._memory_monitor = None
             log.info("Memory monitoring stopped")
 
+    def close_executor(self) -> None:
+        """Close the tool executor's audit logger during shutdown."""
+        self._tool_executor.close()
+
     # ── wiring validation ────────────────────────────────────────────────────
 
     def validate_wiring(self) -> list[tuple[str, bool, str]]:
