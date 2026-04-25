@@ -33,6 +33,7 @@ from src.memory import (
     _safe_name,
 )
 from src.security import PathSecurityError, is_path_in_workspace
+from src.utils import LRUDict
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -1116,3 +1117,136 @@ class TestMtimeCacheConsistency:
         new_cached = mem._memory_cache._cache.get("chat1")
         assert new_cached[1] == "second"
         assert new_cached[0] != old_cached[0]  # mtime changed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _resolve_chat_path() caching correctness
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestResolveChatPathCaching:
+    """Verify _resolve_chat_path() LRU caching behaviour.
+
+    Covers:
+      (a) Repeated calls with same chat_id return the same cached Path
+      (b) Cache invalidated when ensure_workspace() creates a new chat
+      (c) Invalid chat_id raises PathSecurityError before caching
+      (d) Cache respects the max size bound
+    """
+
+    def test_cache_populated_after_first_call(self, mem: Memory):
+        """After the first call, the path is stored in _path_cache."""
+        assert mem._path_cache.get("chat1") is None
+        mem._resolve_chat_path("chat1")
+        assert mem._path_cache.get("chat1") is not None
+
+    def test_repeated_calls_return_equivalent_path(self, mem: Memory):
+        """Repeated calls with the same chat_id return equivalent Paths."""
+        first = mem._resolve_chat_path("chat1")
+        second = mem._resolve_chat_path("chat1")
+        assert first == second
+
+    def test_repeated_calls_use_cache(self, mem: Memory):
+        """The second call returns the exact same object from the cache."""
+        first = mem._resolve_chat_path("chat1")
+        second = mem._resolve_chat_path("chat1")
+        assert first is second
+
+    def test_different_chat_ids_cached_independently(self, mem: Memory):
+        """Each chat_id gets its own cache entry."""
+        path_a = mem._resolve_chat_path("alice")
+        path_b = mem._resolve_chat_path("bob")
+        assert path_a != path_b
+        assert mem._path_cache.get("alice") is not None
+        assert mem._path_cache.get("bob") is not None
+
+    def test_ensure_workspace_invalidates_and_repoulates(self, mem: Memory):
+        """ensure_workspace() pops the stale cache entry, then re-resolves."""
+        original = mem._resolve_chat_path("chat1")
+        assert not original.exists()
+
+        result = mem.ensure_workspace("chat1")
+        assert result.is_dir()
+        assert result == original
+
+        # Cache should be repopulated with the valid path
+        cached = mem._path_cache.get("chat1")
+        assert cached is not None
+        assert cached.is_dir()
+
+    def test_ensure_workspace_for_existing_chat_keeps_valid_cache(
+        self, mem: Memory
+    ):
+        """For an already-created chat, ensure_workspace still works."""
+        mem.ensure_workspace("chat1")
+        cached_after_first = mem._path_cache.get("chat1")
+        assert cached_after_first is not None
+
+        # Second call invalidates and repopulates
+        mem.ensure_workspace("chat1")
+        cached_after_second = mem._path_cache.get("chat1")
+        assert cached_after_second is not None
+        assert cached_after_second.is_dir()
+
+    def test_invalid_chat_id_raises_before_caching(self, mem: Memory, monkeypatch):
+        """If _validate_path raises, the invalid entry must NOT be cached."""
+        monkeypatch.setattr(
+            "src.memory.sanitize_path_component", lambda x: "../../etc"
+        )
+        with pytest.raises(PathSecurityError):
+            mem._resolve_chat_path("evil")
+
+        assert mem._path_cache.get("evil") is None
+
+    def test_valid_id_cached_even_after_invalid_attempt(
+        self, mem: Memory, monkeypatch
+    ):
+        """A failed validation for one chat_id doesn't affect others."""
+        mem._resolve_chat_path("good-chat")
+        assert mem._path_cache.get("good-chat") is not None
+
+        monkeypatch.setattr(
+            "src.memory.sanitize_path_component", lambda x: "../../etc"
+        )
+        with pytest.raises(PathSecurityError):
+            mem._resolve_chat_path("evil")
+
+        # good-chat should still be cached
+        assert mem._path_cache.get("good-chat") is not None
+
+    def test_cache_respects_max_size_bound(self, mem: Memory):
+        """Cache evicts oldest entries when max_size is exceeded."""
+        max_size = 10
+        mem._path_cache = LRUDict(max_size=max_size)
+
+        for i in range(max_size + 5):
+            mem._resolve_chat_path(f"chat-{i:04d}")
+
+        # Cache must not exceed max_size
+        assert len(mem._path_cache) <= max_size
+
+        # Most recent entries are preserved
+        assert mem._path_cache.get("chat-0014") is not None
+
+        # Oldest entries are evicted
+        assert mem._path_cache.get("chat-0000") is None
+
+    def test_cache_lru_eviction_preserves_recent_entries(self, mem: Memory):
+        """Accessing an entry refreshes it, preventing eviction."""
+        max_size = 5
+        mem._path_cache = LRUDict(max_size=max_size)
+
+        # Fill cache: entries 0-4
+        for i in range(max_size):
+            mem._resolve_chat_path(f"chat-{i:04d}")
+
+        # Touch chat-0000 to make it recently used
+        mem._resolve_chat_path("chat-0000")
+
+        # Add one more to trigger eviction of the now-oldest (chat-0001)
+        mem._resolve_chat_path("chat-0005")
+
+        # chat-0000 was refreshed, so it survives
+        assert mem._path_cache.get("chat-0000") is not None
+        # chat-0001 was the oldest after refresh, so it gets evicted
+        assert mem._path_cache.get("chat-0001") is None
