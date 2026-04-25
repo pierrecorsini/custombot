@@ -6,11 +6,13 @@ can subscribe to application events without modifying core classes (Bot,
 ToolExecutor, Application).
 
 Built-in event names:
-    - ``message_received``  — inbound message accepted for processing
-    - ``skill_executed``    — a skill/tool finished execution
-    - ``response_sent``     — outbound response delivered to the user
-    - ``error_occurred``    — an unhandled error was caught
-    - ``shutdown_started``  — graceful shutdown initiated
+    - ``message_received``        — inbound message accepted for processing
+    - ``skill_executed``          — a skill/tool finished execution
+    - ``response_sent``           — outbound response delivered to the user
+    - ``error_occurred``          — an unhandled error was caught
+    - ``shutdown_started``        — graceful shutdown initiated
+    - ``scheduled_task_started``  — scheduled task began processing
+    - ``scheduled_task_completed`` — scheduled task finished successfully
 
 Usage::
 
@@ -60,6 +62,8 @@ EVENT_SKILL_EXECUTED: str = "skill_executed"
 EVENT_RESPONSE_SENT: str = "response_sent"
 EVENT_ERROR_OCCURRED: str = "error_occurred"
 EVENT_SHUTDOWN_STARTED: str = "shutdown_started"
+EVENT_SCHEDULED_TASK_STARTED: str = "scheduled_task_started"
+EVENT_SCHEDULED_TASK_COMPLETED: str = "scheduled_task_completed"
 
 KNOWN_EVENTS: frozenset[str] = frozenset(
     {
@@ -68,6 +72,8 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         EVENT_RESPONSE_SENT,
         EVENT_ERROR_OCCURRED,
         EVENT_SHUTDOWN_STARTED,
+        EVENT_SCHEDULED_TASK_STARTED,
+        EVENT_SCHEDULED_TASK_COMPLETED,
     }
 )
 
@@ -289,4 +295,6 @@ __all__ = [
     "EVENT_RESPONSE_SENT",
     "EVENT_ERROR_OCCURRED",
     "EVENT_SHUTDOWN_STARTED",
+    "EVENT_SCHEDULED_TASK_STARTED",
+    "EVENT_SCHEDULED_TASK_COMPLETED",
 ]

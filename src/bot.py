@@ -75,7 +75,6 @@ from src.message_queue import MessageQueue
 from src.monitoring import PerformanceMetrics, SessionMetrics, get_metrics_collector
 from src.rate_limiter import RateLimiter
 from src.routing import RoutingEngine
-from src.security.audit import SkillAuditLogger
 from src.security.prompt_injection import detect_injection, filter_response_content, sanitize_user_input
 from src.skills import SkillRegistry
 from src.utils import JSONDecodeError, LRULockCache
@@ -211,7 +210,7 @@ class Bot:
             rate_limiter=self._rate_limiter,
             metrics=self._metrics,
             on_skill_executed=session_metrics.increment_skills if session_metrics else None,
-            audit_logger=SkillAuditLogger(Path(WORKSPACE_DIR) / "logs"),
+            audit_log_dir=Path(WORKSPACE_DIR) / "logs",
         )
         # Instruction file loader (mtime-cached) — prefer injected shared instance
         self._instruction_loader = instruction_loader or InstructionLoader(self._instructions_dir)
@@ -396,6 +395,7 @@ class Bot:
                     sender_name=queued_msg.sender_name or "",
                     text=queued_msg.text,
                     timestamp=queued_msg.created_at or time.time(),
+                    acl_passed=True,  # ACL already verified above
                 )
 
                 # Process the recovered message
@@ -493,6 +493,23 @@ class Bot:
         # Runtime validation for incoming message
         if not isinstance(msg, IncomingMessage):
             log.warning("Invalid incoming message received: %r", msg)
+            return None
+
+        # ACL enforcement: messages must have passed channel-level access
+        # control before reaching this point.  acl_passed is set by the
+        # channel after its allow-list check succeeds (WhatsApp) or by
+        # trusted channels (CLI).  Messages arriving without this flag
+        # indicate a code-path bypass (e.g. direct handle_message() call).
+        if not msg.acl_passed:
+            log.warning(
+                "Rejecting message %s from %s in chat %s — ACL not passed. "
+                "Messages must go through a channel that enforces access control.",
+                msg.message_id,
+                msg.sender_id,
+                msg.chat_id,
+                extra={"chat_id": msg.chat_id, "message_id": msg.message_id},
+            )
+            clear_correlation_id()
             return None
 
         # Set correlation ID for request tracing (use custom ID if provided)
@@ -669,6 +686,17 @@ class Bot:
             extra={"chat_id": chat_id},
         )
 
+        # Emit scheduled_task_started event for plugins/subscribers
+        try:
+            await get_event_bus().emit(Event(
+                name="scheduled_task_started",
+                data={"chat_id": chat_id, "prompt_length": len(prompt)},
+                source="Bot.process_scheduled",
+                correlation_id=get_correlation_id(),
+            ))
+        except Exception:
+            pass  # Event emission must never break scheduled task processing
+
         # Acquire per-chat lock to prevent concurrent execution with handle_message
         # or other scheduled tasks for the same chat (ref-tracked for safe eviction)
         async with self._chat_locks.acquire(chat_id):
@@ -793,6 +821,21 @@ class Bot:
                     chat_id,
                     extra={"chat_id": chat_id},
                 )
+
+                # Emit scheduled_task_completed event for plugins/subscribers
+                try:
+                    await get_event_bus().emit(Event(
+                        name="scheduled_task_completed",
+                        data={
+                            "chat_id": chat_id,
+                            "response_length": len(response_text) if response_text else 0,
+                        },
+                        source="Bot.process_scheduled",
+                        correlation_id=get_correlation_id(),
+                    ))
+                except Exception:
+                    pass  # Event emission must never break scheduled task processing
+
                 return response_text
 
             except Exception as exc:
