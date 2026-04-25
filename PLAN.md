@@ -374,7 +374,7 @@ production readiness gaps not addressed in Phases 1–12.
 
 ### Test Coverage
 
-- [ ] **Add E2E test directory with at least one smoke test** — The `tests/e2e/` directory exists but is empty (no Python files found). The coverage roadmap targets 75% by Phase 14, but E2E tests validate the full integration path. Add at least one smoke test that instantiates the full `Application` lifecycle with a mock channel and verifies that a message flows through the pipeline to a response. (`tests/e2e/`, new file `tests/e2e/test_smoke.py`)
+- [x] **Add E2E test directory with at least one smoke test** — The `tests/e2e/` directory exists but is empty (no Python files found). The coverage roadmap targets 75% by Phase 14, but E2E tests validate the full integration path. Add at least one smoke test that instantiates the full `Application` lifecycle with a mock channel and verifies that a message flows through the pipeline to a response. (`tests/e2e/`, new file `tests/e2e/test_smoke.py`)
 
 - [ ] **Add parametrized test for `_classify_llm_error()` covering all OpenAI exception types** — `_classify_llm_error()` handles 7 exception types (AuthenticationError, PermissionDeniedError, RateLimitError, APITimeoutError, NotFoundError, APIConnectionError, BadRequestError) plus a generic fallback. There's no dedicated test verifying each mapping. Add a parametrized test that passes each exception type and verifies the returned `LLMError.error_code` and `LLMError.suggestion` are correct. (`tests/unit/test_llm.py`)
 
