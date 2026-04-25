@@ -95,9 +95,8 @@ class _IPLimiter:
     def check(self, ip: str) -> tuple[bool, int, float]:
         """Check rate limit for an IP. Returns (allowed, remaining, retry_after)."""
         tracker = self._get_tracker(ip)
-        allowed, remaining, reset_at = tracker.check_only()
+        allowed, remaining, retry_after = tracker.check_only()
         if not allowed:
-            retry_after = max(0.0, reset_at - time.time())
             return False, 0, retry_after
         tracker.record()
         return True, remaining, 0.0
