@@ -866,6 +866,48 @@ def _build_prometheus_output(
             )
         )
 
+    # ── Per-Skill Oversized Argument Rejections ──────────────────────────────
+    for skill_name, count in snapshot.skill_oversized_args.items():
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_skill_args_oversized_total",
+                f"Number of rejected calls for {skill_name} due to oversized arguments",
+                "counter",
+                count,
+                labels={"skill": skill_name},
+            )
+        )
+
+    # ── Per-Skill Oversized Argument Size Distribution ────────────────────────
+    for skill_name, stats in snapshot.skill_oversized_args_sizes.items():
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_skill_args_oversized_min_bytes",
+                f"Smallest oversized argument payload size for {skill_name}",
+                "gauge",
+                stats.min_bytes,
+                labels={"skill": skill_name},
+            )
+        )
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_skill_args_oversized_max_bytes",
+                f"Largest oversized argument payload size for {skill_name}",
+                "gauge",
+                stats.max_bytes,
+                labels={"skill": skill_name},
+            )
+        )
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_skill_args_oversized_total_bytes",
+                f"Cumulative oversized argument payload size for {skill_name}",
+                "counter",
+                stats.total_bytes,
+                labels={"skill": skill_name},
+            )
+        )
+
     # ── Per-Chat Message Counts ──────────────────────────────────────────────
     for chat_metric in snapshot.top_chats:
         lines.append(
@@ -1195,6 +1237,7 @@ class HealthServer:
         llm_log_dir: Optional[str] = None,
         workspace_dir: Optional[str] = None,
         shutdown_mgr: Optional["GracefulShutdown"] = None,
+        startup_durations: Optional[dict[str, float]] = None,
     ) -> None:
         self._db = db
         self._neonize_backend = neonize_backend
@@ -1211,9 +1254,21 @@ class HealthServer:
         self._llm_log_dir = llm_log_dir
         self._workspace_dir = workspace_dir
         self._shutdown_mgr = shutdown_mgr
+        self._startup_durations = startup_durations
+        self._startup_total_seconds: Optional[float] = None
         self._runner: Optional[Any] = None
         self._site: Optional[Any] = None
         self._port: int = 8080
+
+    def update_startup_durations(self, durations: dict[str, float]) -> None:
+        """Replace the startup-durations snapshot with the final, complete data.
+
+        Called once after all startup steps finish so that ``/health`` returns
+        timing for *every* component — not just the steps that happened to run
+        before the Health Server was created.
+        """
+        self._startup_durations = durations
+        self._startup_total_seconds = sum(durations.values())
 
     async def _get_health_report(self) -> HealthReport:
         """Run all health checks and return a report."""
@@ -1368,7 +1423,12 @@ class HealthServer:
         if self._include_token_usage:
             token_usage = get_token_usage_stats(self._token_usage)
 
-        return HealthReport(components=components, token_usage=token_usage)
+        return HealthReport(
+            components=components,
+            token_usage=token_usage,
+            startup_durations=self._startup_durations,
+            startup_total_seconds=self._startup_total_seconds,
+        )
 
     async def _handle_health(self, request: Any) -> Any:
         """Handle GET /health requests.
@@ -1557,9 +1617,15 @@ class HealthServer:
 
     @staticmethod
     async def _add_security_headers(request: Any, response: Any) -> None:
-        """Inject security headers into every response."""
+        """Inject security headers into every response.
+
+        Defense-in-depth headers prevent content-type sniffing, clickjacking,
+        framing, and caching of sensitive metrics data even on internal endpoints.
+        """
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = "default-src 'none'"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Cache-Control"] = "no-store"
 
     async def start(self, port: int = 8080, host: str = "127.0.0.1") -> None:
         """Start the health check HTTP server.
