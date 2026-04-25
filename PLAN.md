@@ -350,7 +350,7 @@ production readiness gaps not addressed in Phases 1–12.
 
 - [x] **Add structured error event for `_execute_tool_call()` path traversal detection** — When the workspace path traversal guard fires in `_execute_tool_call()`, the incident is logged at ERROR level but no event is emitted on the EventBus. Security events like path traversal attempts should emit an `error_occurred` event so monitoring subscribers can trigger alerts (e.g., notify the operator that a potential attack was detected). (`src/bot.py:1340-1358`)
 
-- [ ] **Sanitize correlation ID in `set_correlation_id()` to prevent log injection** — `set_correlation_id()` accepts any string and it eventually appears in log output via structured extra fields. A malicious `IncomingMessage.correlation_id` containing newline characters or ANSI escape sequences could inject fake log lines or manipulate terminal output. Add validation in `set_correlation_id()` to strip control characters and truncate to a reasonable length (e.g., 64 chars). (`src/logging/logging_config.py` — `set_correlation_id` function)
+- [x] **Sanitize correlation ID in `set_correlation_id()` to prevent log injection** — `set_correlation_id()` accepts any string and it eventually appears in log output via structured extra fields. A malicious `IncomingMessage.correlation_id` containing newline characters or ANSI escape sequences could inject fake log lines or manipulate terminal output. Add validation in `set_correlation_id()` to strip control characters and truncate to a reasonable length (e.g., 64 chars). (`src/logging/logging_config.py` — `set_correlation_id` function)
 
 ### Security
 

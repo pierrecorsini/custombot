@@ -72,15 +72,41 @@ def new_correlation_id() -> str:
     return str(uuid.uuid4())[:8]
 
 
+# Maximum length for a correlation ID to prevent unbounded log output.
+_MAX_CORR_ID_LENGTH = 64
+
+# Control characters, newlines, carriage returns, and ANSI escape sequences
+# stripped from correlation IDs to prevent log injection.
+_CORR_ID_SANITIZE_PATTERN = re.compile(
+    r"\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f-\x9f]"
+)
+
+
+def _sanitize_correlation_id(corr_id: str) -> str:
+    """Strip control characters, newlines, and ANSI escapes; truncate to safe length."""
+    cleaned = _CORR_ID_SANITIZE_PATTERN.sub("", corr_id)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return new_correlation_id()
+    if len(cleaned) > _MAX_CORR_ID_LENGTH:
+        cleaned = cleaned[:_MAX_CORR_ID_LENGTH]
+    return cleaned
+
+
 def set_correlation_id(corr_id: str | None = None) -> str:
     """
     Set a correlation ID for the current context.
 
     If no ID is provided, generates a new UUID.
+    The ID is sanitized to strip control characters, newlines, and ANSI
+    escape sequences to prevent log injection. It is truncated to a
+    maximum of 64 characters.
     Returns the correlation ID that was set.
     """
     if corr_id is None:
         corr_id = new_correlation_id()
+    else:
+        corr_id = _sanitize_correlation_id(corr_id)
     _correlation_id.set(corr_id)
     return corr_id
 
@@ -148,6 +174,12 @@ DEFAULT_REDACTION_PATTERNS: list[tuple[str, str, str]] = [
         "jwt_token",
         r"eyJ[a-zA-Z0-9_\-]*\.eyJ[a-zA-Z0-9_\-]*\.[a-zA-Z0-9_\-]*",
         "[REDACTED]",
+    ),
+    # HMAC-SHA256 Authorization header (HMAC-SHA256 <timestamp>:<hex-signature>)
+    (
+        "hmac_auth_header",
+        r"(HMAC-SHA256\s+)[0-9]+(?:\.[0-9]+)?:[a-fA-F0-9]+",
+        r"\1[REDACTED]",
     ),
 ]
 
