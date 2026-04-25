@@ -421,7 +421,7 @@ not addressed in Phases 1–13.
 
 - [x] **Extract `_build_message_record()` inline imports to module-level** — `_build_message_record()` in `db.py` imports `detect_injection` and `sanitize_user_input` from `src.security.prompt_injection` *inside the function body* at lines 1027–1031. This runs on every user-role message write, adding import overhead (module is cached, but the name lookup still occurs). Move to module-level imports behind `TYPE_CHECKING` or lazy-import at module init. (`src/db/db.py:1027-1031`)
 
-- [ ] **Unify `Memory._memory_cache` and `Memory._agents_cache` into a single generic cache helper** — Both caches are `LRUDict` instances with identical mtime-based validation logic (`_stat_and_read` → check mtime → return cached or re-read). The only difference is the file name and cache dict. Extract into a generic `MtimeCache` helper that encapsulates the `(mtime, content)` tuple and hit/miss tracking, reducing `read_memory()` and `read_agents_md()` to one-liners. (`src/memory.py:88-89, 189-215, 408-436`)
+- [x] **Unify `Memory._memory_cache` and `Memory._agents_cache` into a single generic cache helper** — Both caches are `LRUDict` instances with identical mtime-based validation logic (`_stat_and_read` → check mtime → return cached or re-read). The only difference is the file name and cache dict. Extract into a generic `MtimeCache` helper that encapsulates the `(mtime, content)` tuple and hit/miss tracking, reducing `read_memory()` and `read_agents_md()` to one-liners. (`src/memory.py:88-89, 189-215, 408-436`)
 
 ### Performance Optimization
 
