@@ -262,6 +262,23 @@ SendMediaCallback = Callable[[str, Path, str], Awaitable[None]]
 _safe_mode_lock: asyncio.Lock | None = None
 
 
+def _redact_chat_id(chat_id: str) -> str:
+    """Redact ``chat_id`` (potentially a phone number) for terminal display.
+
+    Shows first 4 and last 4 characters for long IDs, preserving any
+    ``@suffix`` portion intact.  Short local parts are truncated to the
+    first 4 characters plus an ellipsis.
+    """
+    if "@" in chat_id:
+        local, _, suffix = chat_id.partition("@")
+        if len(local) <= 8:
+            return f"{local[:4]}...@{suffix}"
+        return f"{local[:4]}...{local[-4:]}@{suffix}"
+    if len(chat_id) <= 8:
+        return chat_id[:4] + "..."
+    return chat_id[:4] + "..." + chat_id[-4:]
+
+
 def _get_safe_mode_lock() -> asyncio.Lock:
     """Lazy-initialised asyncio.Lock for safe-mode serialisation.
 
@@ -369,12 +386,14 @@ class BaseChannel(ABC):
         """
         if self._safe_mode:
             preview = text[:120] + "..." if len(text) > 120 else text
+            display_id = _redact_chat_id(chat_id)
             async with _get_safe_mode_lock():
-                print(f"\n📤 Outgoing to {chat_id}:")
+                print(f"\n📤 Outgoing to {display_id}:")
                 print(f"   {preview}")
-                if not await _confirm_send(chat_id):
+                if not await _confirm_send(chat_id, display_id):
                     log.info("Send cancelled by user (safe mode): %s", chat_id)
                     return
+            log.debug("Full chat_id for safe-mode send: %s", chat_id)
         await self._send_message(chat_id, text, skip_delays=skip_delays)
 
     @abstractmethod
@@ -429,8 +448,12 @@ class BaseChannel(ABC):
         ...
 
 
-async def _confirm_send(chat_id: str) -> bool:
+async def _confirm_send(chat_id: str, display_id: str) -> bool:
     """Prompt Y/N for sending a message. Returns True to send.
+
+    Args:
+        chat_id: Full chat identifier (used for structured logging).
+        display_id: Redacted identifier for terminal display.
 
     After ``SAFE_MODE_MAX_CONFIRM_RETRIES`` invalid inputs the send is
     automatically rejected to prevent an infinite prompt loop from
@@ -446,7 +469,7 @@ async def _confirm_send(chat_id: str) -> bool:
         return False
 
     for attempt in range(1, SAFE_MODE_MAX_CONFIRM_RETRIES + 1):
-        raw = await asyncio.to_thread(input, f"  Send to {chat_id}? [Y/N]: ")
+        raw = await asyncio.to_thread(input, f"  Send to {display_id}? [Y/N]: ")
         choice = raw.strip().lower()
         if choice in ("y", "yes"):
             return True
