@@ -550,7 +550,7 @@ in Phases 1–14.
 
 - [x] **Add test for shared topological sort utility** — Once `topological_sort()` is extracted into `src/utils/dag.py`, add tests for: (a) valid DAG with dependencies resolved in correct order, (b) circular dependency detection with informative error, (c) missing dependency detection, (d) empty input, (e) single node with no deps, (f) diamond dependency (A→B, A→C, B→D, C→D). (`tests/unit/test_dag.py`, new file)
 
-- [ ] **Add test for `ToolExecutor.close()` audit logger cleanup** — Verify that after `close()` is called, the `_audit_logger` is set to `None` and any buffered entries are flushed. Also verify that calling `close()` on a `ToolExecutor` that never executed a skill (audit logger never created) is a no-op. (`tests/unit/test_tool_executor.py`)
+- [x] **Add test for `ToolExecutor.close()` audit logger cleanup** — Verify that after `close()` is called, the `_audit_logger` is set to `None` and any buffered entries are flushed. Also verify that calling `close()` on a `ToolExecutor` that never executed a skill (audit logger never created) is a no-op. (`tests/unit/test_tool_executor.py`)
 
 - [ ] **Add test for `IncomingMessage` `message_id` and `sender_id` validation** — After adding validation to `__post_init__()`, test that: (a) valid IDs are accepted, (b) empty strings are rejected, (c) overly long strings are rejected, (d) strings with path separators or control characters are rejected, (e) the error messages are informative. (`tests/unit/test_incoming_message_validation.py` or extend existing)
 

@@ -23,19 +23,12 @@ import pytest
 from src.core.tool_executor import MAX_ARGS_BYTES, MAX_ARGS_DEPTH, ToolExecutor, _measured_depth, format_skill_error
 from src.exceptions import SkillError
 from src.rate_limiter import RateLimitResult
+from tests.helpers.llm_mocks import make_tool_call
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-def _make_tool_call(name: str = "test_skill", arguments: str = "{}") -> MagicMock:
-    """Create a mock tool call object matching the LLM response shape."""
-    tc = MagicMock()
-    tc.function.name = name
-    tc.function.arguments = arguments
-    return tc
 
 
 def _make_skill_registry(skill_map: dict | None = None) -> MagicMock:
@@ -139,7 +132,7 @@ class TestToolExecutorUnknownSkill:
     async def test_unknown_skill_returns_error(self) -> None:
         registry = _make_skill_registry(skill_map={})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="nonexistent")
+        tc = make_tool_call(name="nonexistent")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -157,7 +150,7 @@ class TestToolExecutorInvalidArgs:
     async def test_invalid_json_args_returns_error(self) -> None:
         registry = _make_skill_registry()
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="any_skill", arguments="{bad json!!")
+        tc = make_tool_call(name="any_skill", arguments="{bad json!!")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -183,7 +176,7 @@ class TestToolExecutorDeeplyNestedArgs:
 
         registry = _make_skill_registry()
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="any_skill", arguments=json.dumps(nested))
+        tc = make_tool_call(name="any_skill", arguments=json.dumps(nested))
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -207,7 +200,7 @@ class TestToolExecutorDeeplyNestedArgs:
         skill.execute = AsyncMock(return_value="ok")
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments=json.dumps(nested))
+        tc = make_tool_call(name="s", arguments=json.dumps(nested))
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -229,7 +222,7 @@ class TestToolExecutorDeeplyNestedArgs:
 
         registry = _make_skill_registry()
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="any_skill", arguments=json.dumps(nested))
+        tc = make_tool_call(name="any_skill", arguments=json.dumps(nested))
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -246,7 +239,7 @@ class TestToolExecutorOversizedArgs:
     async def test_oversized_args_returns_error(self) -> None:
         registry = _make_skill_registry()
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="any_skill", arguments="x" * (MAX_ARGS_BYTES + 1))
+        tc = make_tool_call(name="any_skill", arguments="x" * (MAX_ARGS_BYTES + 1))
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -269,7 +262,7 @@ class TestToolExecutorOversizedArgs:
         args_json = '{"k":"' + "a" * padding_needed + '"}'
         assert len(args_json) == MAX_ARGS_BYTES
 
-        tc = _make_tool_call(name="s", arguments=args_json)
+        tc = make_tool_call(name="s", arguments=args_json)
         result = await executor.execute(
             chat_id="chat_1",
             tool_call=tc,
@@ -277,6 +270,38 @@ class TestToolExecutorOversizedArgs:
         )
 
         assert result == "ok"
+
+    async def test_oversized_args_tracks_metric(self) -> None:
+        """Oversized args rejection calls metrics.track_skill_args_oversized."""
+        metrics = MagicMock()
+        registry = _make_skill_registry()
+        executor = ToolExecutor(skills_registry=registry, metrics=metrics)
+        oversized_args = "x" * (MAX_ARGS_BYTES + 1)
+        tc = make_tool_call(name="my_skill", arguments=oversized_args)
+
+        await executor.execute(
+            chat_id="chat_1",
+            tool_call=tc,
+            workspace_dir=Path("/tmp/ws"),
+        )
+
+        metrics.track_skill_args_oversized.assert_called_once_with(
+            "my_skill", len(oversized_args)
+        )
+
+    async def test_oversized_args_no_metrics_when_none(self) -> None:
+        """No error when metrics is None (default)."""
+        registry = _make_skill_registry()
+        executor = ToolExecutor(skills_registry=registry, metrics=None)
+        tc = make_tool_call(name="any_skill", arguments="x" * (MAX_ARGS_BYTES + 1))
+
+        result = await executor.execute(
+            chat_id="chat_1",
+            tool_call=tc,
+            workspace_dir=Path("/tmp/ws"),
+        )
+
+        assert "too large" in result
 
 
 class TestToolExecutorRateLimit:
@@ -292,7 +317,7 @@ class TestToolExecutorRateLimit:
         # The rate limit message from RateLimitResult
         rate_msg = limiter.check_rate_limit.return_value.message
         executor = ToolExecutor(skills_registry=registry, rate_limiter=limiter)
-        tc = _make_tool_call(name="web_search", arguments='{"q": "test"}')
+        tc = make_tool_call(name="web_search", arguments='{"q": "test"}')
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -310,7 +335,7 @@ class TestToolExecutorRateLimit:
 
         registry = _make_skill_registry(skill_map={"my_skill": skill})
         executor = ToolExecutor(skills_registry=registry, rate_limiter=None)
-        tc = _make_tool_call(name="my_skill", arguments='{"a": 1}')
+        tc = make_tool_call(name="my_skill", arguments='{"a": 1}')
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -330,7 +355,7 @@ class TestToolExecutorSuccess:
 
         registry = _make_skill_registry(skill_map={"calc": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="calc", arguments='{"expr": "6*7"}')
+        tc = make_tool_call(name="calc", arguments='{"expr": "6*7"}')
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -347,7 +372,7 @@ class TestToolExecutorSuccess:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments='{"key": "val"}')
+        tc = make_tool_call(name="s", arguments='{"key": "val"}')
 
         ws = Path("/tmp/my_workspace")
         await executor.execute(chat_id="c", tool_call=tc, workspace_dir=ws)
@@ -363,7 +388,7 @@ class TestToolExecutorSuccess:
 
         registry = _make_skill_registry(skill_map={"audio_skill": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="audio_skill", arguments="{}")
+        tc = make_tool_call(name="audio_skill", arguments="{}")
 
         send_media = AsyncMock()
         await executor.execute(
@@ -391,7 +416,7 @@ class TestToolExecutorTimeout:
 
         registry = _make_skill_registry(skill_map={"slow": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="slow", arguments="{}")
+        tc = make_tool_call(name="slow", arguments="{}")
 
         # Patch DEFAULT_SKILL_TIMEOUT to a very small value so test runs fast
         with patch("src.core.tool_executor.DEFAULT_SKILL_TIMEOUT", 0.1):
@@ -417,7 +442,7 @@ class TestToolExecutorTimeout:
 
         registry = _make_skill_registry(skill_map={"patient_skill": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="patient_skill", arguments="{}")
+        tc = make_tool_call(name="patient_skill", arguments="{}")
 
         with patch("src.core.tool_executor.DEFAULT_SKILL_TIMEOUT", 0.1):
             result = await executor.execute(
@@ -440,7 +465,7 @@ class TestToolExecutorTimeout:
 
         registry = _make_skill_registry(skill_map={"quick_timeout": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="quick_timeout", arguments="{}")
+        tc = make_tool_call(name="quick_timeout", arguments="{}")
 
         with patch("src.core.tool_executor.DEFAULT_SKILL_TIMEOUT", 60.0):
             result = await executor.execute(
@@ -465,7 +490,7 @@ class TestToolExecutorTimeout:
 
         registry = _make_skill_registry(skill_map={"bad_timeout": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="bad_timeout", arguments="{}")
+        tc = make_tool_call(name="bad_timeout", arguments="{}")
 
         with patch("src.core.tool_executor.DEFAULT_SKILL_TIMEOUT", 0.1):
             result = await executor.execute(
@@ -487,7 +512,7 @@ class TestToolExecutorExceptions:
 
         registry = _make_skill_registry(skill_map={"write_file": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="write_file", arguments='{"path": "/x"}')
+        tc = make_tool_call(name="write_file", arguments='{"path": "/x"}')
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -504,7 +529,7 @@ class TestToolExecutorExceptions:
 
         registry = _make_skill_registry(skill_map={"crashy": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="crashy", arguments="{}")
+        tc = make_tool_call(name="crashy", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -524,7 +549,7 @@ class TestToolExecutorExceptions:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry, metrics=metrics)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         await executor.execute(
             chat_id="chat_1",
@@ -541,7 +566,7 @@ class TestToolExecutorExceptions:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -560,7 +585,7 @@ class TestToolExecutorExceptions:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry, metrics=metrics)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         await executor.execute(
             chat_id="chat_1",
@@ -620,7 +645,7 @@ class TestMalformedToolCalls:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments=None)
+        tc = make_tool_call(name="s", arguments=None)
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -655,7 +680,7 @@ class TestMalformedToolCalls:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -682,7 +707,7 @@ class TestNonStringSkillResults:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -701,7 +726,7 @@ class TestNonStringSkillResults:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -719,7 +744,7 @@ class TestNonStringSkillResults:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -739,7 +764,7 @@ class TestNonStringSkillResults:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -757,7 +782,7 @@ class TestNonStringSkillResults:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -774,7 +799,7 @@ class TestNonStringSkillResults:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -791,7 +816,7 @@ class TestNonStringSkillResults:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -810,7 +835,7 @@ class TestNonStringSkillResults:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -834,7 +859,7 @@ class TestNonStringSkillResults:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -851,7 +876,7 @@ class TestNonStringSkillResults:
 
         registry = _make_skill_registry(skill_map={"s": skill})
         executor = ToolExecutor(skills_registry=registry)
-        tc = _make_tool_call(name="s", arguments="{}")
+        tc = make_tool_call(name="s", arguments="{}")
 
         result = await executor.execute(
             chat_id="chat_1",
@@ -860,3 +885,123 @@ class TestNonStringSkillResults:
         )
 
         assert result == "[]"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Test ToolExecutor.close() audit logger cleanup
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestToolExecutorClose:
+    """Verify ToolExecutor.close() flushes and releases the audit logger."""
+
+    async def test_close_sets_audit_logger_to_none(self, tmp_path: Path) -> None:
+        """After close(), _audit_logger is None even if it was created."""
+        registry = _make_skill_registry()
+        executor = ToolExecutor(
+            skills_registry=registry,
+            audit_log_dir=tmp_path / "audit",
+        )
+        # Trigger lazy creation of the audit logger via _audit()
+        executor._audit("chat_1", "skill_a", "{}", True, "success")
+        assert executor._audit_logger is not None
+
+        executor.close()
+        assert executor._audit_logger is None
+
+    async def test_close_calls_skill_audit_logger_close(self, tmp_path: Path) -> None:
+        """close() delegates to SkillAuditLogger.close() for flushing."""
+        registry = _make_skill_registry()
+        executor = ToolExecutor(
+            skills_registry=registry,
+            audit_log_dir=tmp_path / "audit",
+        )
+        # Trigger lazy creation
+        executor._audit("chat_1", "skill_a", "{}", True, "success")
+        logger = executor._audit_logger
+        assert logger is not None
+
+        executor.close()
+        # After close(), SkillAuditLogger._path is set to None
+        assert logger._path is None
+
+    async def test_close_no_op_when_audit_logger_never_created(self) -> None:
+        """close() is a safe no-op when no skills were ever executed."""
+        registry = _make_skill_registry()
+        executor = ToolExecutor(skills_registry=registry)
+        # _audit_logger is never created because _audit() is never called
+        assert executor._audit_logger is None
+
+        # Should not raise
+        executor.close()
+        assert executor._audit_logger is None
+
+    async def test_close_no_op_without_audit_log_dir(self) -> None:
+        """close() is a no-op when audit_log_dir was not configured."""
+        registry = _make_skill_registry()
+        executor = ToolExecutor(skills_registry=registry, audit_log_dir=None)
+        assert executor._audit_logger is None
+
+        executor.close()
+        assert executor._audit_logger is None
+
+    async def test_close_is_idempotent(self, tmp_path: Path) -> None:
+        """Calling close() multiple times is safe."""
+        registry = _make_skill_registry()
+        executor = ToolExecutor(
+            skills_registry=registry,
+            audit_log_dir=tmp_path / "audit",
+        )
+        executor._audit("chat_1", "skill_a", "{}", True, "success")
+        assert executor._audit_logger is not None
+
+        executor.close()
+        assert executor._audit_logger is None
+
+        # Second call should not raise
+        executor.close()
+        assert executor._audit_logger is None
+
+    async def test_close_flushes_buffered_entries(self, tmp_path: Path) -> None:
+        """Entries written before close() are persisted to disk."""
+        audit_dir = tmp_path / "audit"
+        registry = _make_skill_registry()
+        executor = ToolExecutor(
+            skills_registry=registry,
+            audit_log_dir=audit_dir,
+        )
+        executor._audit("chat_1", "skill_a", "{}", True, "success")
+
+        # Verify the audit file has at least one entry before closing
+        audit_file = audit_dir / "audit.jsonl"
+        assert audit_file.exists()
+        content_before = audit_file.read_text(encoding="utf-8")
+        assert "skill_a" in content_before
+
+        executor.close()
+
+        # File content should still be intact after close
+        content_after = audit_file.read_text(encoding="utf-8")
+        assert content_after == content_before
+
+    async def test_audit_after_close_is_no_op(self, tmp_path: Path) -> None:
+        """_audit() after close() is a no-op (logger was set to None)."""
+        audit_dir = tmp_path / "audit"
+        registry = _make_skill_registry()
+        executor = ToolExecutor(
+            skills_registry=registry,
+            audit_log_dir=audit_dir,
+        )
+        executor._audit("chat_1", "skill_a", "{}", True, "success")
+        executor.close()
+
+        # This should not recreate the logger because _audit_log_dir
+        # was set to None during first _audit() call
+        executor._audit("chat_2", "skill_b", "{}", True, "success")
+        assert executor._audit_logger is None
+
+        # Verify only the pre-close entry exists
+        audit_file = audit_dir / "audit.jsonl"
+        lines = audit_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        assert "skill_a" in lines[0]
