@@ -552,7 +552,7 @@ in Phases 1–14.
 
 - [x] **Add test for `ToolExecutor.close()` audit logger cleanup** — Verify that after `close()` is called, the `_audit_logger` is set to `None` and any buffered entries are flushed. Also verify that calling `close()` on a `ToolExecutor` that never executed a skill (audit logger never created) is a no-op. (`tests/unit/test_tool_executor.py`)
 
-- [ ] **Add test for `IncomingMessage` `message_id` and `sender_id` validation** — After adding validation to `__post_init__()`, test that: (a) valid IDs are accepted, (b) empty strings are rejected, (c) overly long strings are rejected, (d) strings with path separators or control characters are rejected, (e) the error messages are informative. (`tests/unit/test_incoming_message_validation.py` or extend existing)
+- [x] **Add test for `IncomingMessage` `message_id` and `sender_id` validation** — After adding validation to `__post_init__()`, test that: (a) valid IDs are accepted, (b) empty strings are rejected, (c) overly long strings are rejected, (d) strings with path separators or control characters are rejected, (e) the error messages are informative. (`tests/unit/test_incoming_message_validation.py` or extend existing)
 
 - [ ] **Add test for `Memory._resolve_chat_path()` caching correctness** — Verify that: (a) repeated calls with the same `chat_id` return the same `Path` object (or equivalent), (b) the cache is invalidated when `ensure_workspace()` creates a new chat, (c) invalid `chat_id` values raise `PathSecurityError` before caching, (d) the cache respects the max size bound. (`tests/unit/test_memory.py`)
 
