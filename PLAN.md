@@ -364,7 +364,7 @@ production readiness gaps not addressed in Phases 1–12.
 
 ### Observability & Monitoring
 
-- [ ] **Add `custombot_db_write_latency` Prometheus metric** — `PerformanceMetrics` tracks `track_db_latency()` but the `/metrics` endpoint doesn't expose a `custombot_db_write_latency_milliseconds` counter or histogram. Operators cannot set alerts on slow database writes. Add a DB latency metric to the Prometheus output alongside the existing LLM latency metric. (`src/monitoring/performance.py`, `src/health/server.py`)
+- [x] **Add `custombot_db_write_latency` Prometheus metric** — `PerformanceMetrics` tracks `track_db_latency()` but the `/metrics` endpoint doesn't expose a `custombot_db_write_latency_milliseconds` counter or histogram. Operators cannot set alerts on slow database writes. Add a DB latency metric to the Prometheus output alongside the existing LLM latency metric. (`src/monitoring/performance.py`, `src/health/server.py`)
 
 - [ ] **Track and expose `EventBus` subscriber counts and emission counts** — The EventBus tracks handler subscriptions but doesn't expose usage metrics. Add counters for total emissions per event name and total handler invocations, and expose them via `/metrics` as `custombot_event_emitted_total{event="..."}` and `custombot_event_handler_invocations_total{event="..."}`. This helps operators verify that plugins are actually receiving events and detect stuck or slow handlers. (`src/core/event_bus.py`, `src/health/server.py`)
 
