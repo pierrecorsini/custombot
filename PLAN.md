@@ -469,7 +469,7 @@ not addressed in Phases 1–13.
 
 - [x] **Add test for `_FileHandlePool` LRU eviction and stale-handle recovery** — `_FileHandlePool` manages a bounded pool of file handles with LRU eviction. No test verifies: (a) that handles are evicted when the pool exceeds `max_size`, (b) that a closed/stale handle is detected and reopened on next `get_or_open()`, (c) that `invalidate()` correctly removes a handle from the pool. (`tests/unit/test_db.py`)
 
-- [ ] **Add test for `CircuitBreaker` state transitions under concurrent HALF_OPEN probes** — When the circuit breaker transitions to HALF_OPEN, multiple concurrent callers may pass `is_open()` before any records a result. Verify that: (a) only one success is needed to close, (b) a failure from any caller re-opens, (c) concurrent `record_success()` and `record_failure()` don't corrupt the state. (`tests/unit/test_llm.py` or new file)
+- [x] **Add test for `CircuitBreaker` state transitions under concurrent HALF_OPEN probes** — When the circuit breaker transitions to HALF_OPEN, multiple concurrent callers may pass `is_open()` before any records a result. Verify that: (a) only one success is needed to close, (b) a failure from any caller re-opens, (c) concurrent `record_success()` and `record_failure()` don't corrupt the state. (`tests/unit/test_circuit_breaker.py`)
 
 - [ ] **Add test for `Memory.write_memory()` cache invalidation** — After `write_memory()` is called, the mtime cache for that chat should be invalidated so the next `read_memory()` re-reads from disk. Verify: (a) `_memory_cache.pop(chat_id)` is called, (b) the next read reflects the new content, (c) the cache miss counter increments. (`tests/unit/test_memory.py`)
 
