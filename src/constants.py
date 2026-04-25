@@ -289,6 +289,21 @@ DB_WRITE_CIRCUIT_FAILURE_THRESHOLD: int = 5
 DB_WRITE_CIRCUIT_COOLDOWN_SECONDS: float = 30.0
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Database Write Retry Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of retry attempts for transient file I/O errors in
+# save_messages_batch().  Protects against the most common transient failure
+# mode (brief disk I/O error, NFS hiccup) without masking persistent issues.
+# 2 retries keeps total worst-case latency manageable (~3× write attempt).
+DB_WRITE_MAX_RETRIES: int = 2
+
+# Initial delay (seconds) before first retry of a transient DB write failure.
+# Uses exponential backoff with jitter (see calculate_delay_with_jitter).
+# Shorter than LLM retry delays because disk I/O issues often resolve quickly.
+DB_WRITE_RETRY_INITIAL_DELAY: float = 0.5
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ReAct Loop Retry Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 

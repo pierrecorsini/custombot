@@ -41,6 +41,8 @@ from src.constants import (
     COMPRESSION_LINE_THRESHOLD,
     DB_WRITE_CIRCUIT_COOLDOWN_SECONDS,
     DB_WRITE_CIRCUIT_FAILURE_THRESHOLD,
+    DB_WRITE_MAX_RETRIES,
+    DB_WRITE_RETRY_INITIAL_DELAY,
     DEFAULT_DB_TIMEOUT,
     MAX_CHAT_GENERATIONS,
     MAX_FILE_HANDLES,
@@ -1108,9 +1110,16 @@ class Database:
         Reduces ``asyncio.to_thread()`` hops and JSONL appends from *N*
         individual calls to a single batched write.
 
+        Transient file I/O errors (``OSError``) are retried up to
+        ``DB_WRITE_MAX_RETRIES`` times with exponential backoff and jitter.
+        Non-transient errors (circuit-breaker rejection, timeout) are raised
+        immediately without retry.
+
         Returns:
             List of message IDs, one per input message.
         """
+        from src.utils.retry import calculate_delay_with_jitter
+
         records: list[dict] = []
         ids: list[str] = []
 
@@ -1135,11 +1144,42 @@ class Database:
             async with lock:
                 await asyncio.to_thread(self._append_to_file, msg_file, lines)
 
-        await self._guarded_write(
-            _write_batch(),
-            timeout=DEFAULT_DB_TIMEOUT,
-            operation="save_messages_batch",
-        )
+        delay = DB_WRITE_RETRY_INITIAL_DELAY
+        last_os_error: OSError | None = None
+
+        for attempt in range(DB_WRITE_MAX_RETRIES + 1):
+            try:
+                await self._guarded_write(
+                    _write_batch(),
+                    timeout=DEFAULT_DB_TIMEOUT,
+                    operation="save_messages_batch",
+                )
+                break  # success — exit retry loop
+            except DatabaseError:
+                raise  # circuit-breaker / timeout — never retry
+            except OSError as exc:
+                last_os_error = exc
+                if attempt >= DB_WRITE_MAX_RETRIES:
+                    log.warning(
+                        "DB write retry exhausted after %d attempts for %s: %s",
+                        DB_WRITE_MAX_RETRIES + 1,
+                        chat_id,
+                        exc,
+                        extra=_db_log_extra(chat_id),
+                    )
+                    raise
+                actual_delay = calculate_delay_with_jitter(delay)
+                log.info(
+                    "Transient DB write error for %s, retrying attempt %d/%d after %.2fs: %s",
+                    chat_id,
+                    attempt + 1,
+                    DB_WRITE_MAX_RETRIES,
+                    actual_delay,
+                    exc,
+                    extra=_db_log_extra(chat_id),
+                )
+                await asyncio.sleep(actual_delay)
+                delay *= 2
 
         await self._update_index(ids)
 
