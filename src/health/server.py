@@ -140,6 +140,37 @@ def _create_rate_limit_middleware(limiter: _IPLimiter) -> Any:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _create_method_validation_middleware() -> Any:
+    """Create an aiohttp middleware that rejects non-GET/HEAD/OPTIONS requests.
+
+    Health endpoints are read-only.  Rejecting write methods (POST, PUT,
+    DELETE, PATCH) before they reach HMAC verification or handler logic
+    reduces the attack surface.
+    """
+    from aiohttp import web
+
+    _ALLOWED = frozenset({"GET", "HEAD", "OPTIONS"})
+
+    @web.middleware
+    async def method_validation_middleware(
+        request: web.Request, handler: Any
+    ) -> Any:
+        if request.method not in _ALLOWED:
+            log.warning(
+                "Health server rejected %s request to %s",
+                request.method,
+                request.path,
+            )
+            return web.Response(
+                text="Method Not Allowed",
+                status=405,
+                content_type="text/plain",
+            )
+        return await handler(request)
+
+    return method_validation_middleware
+
+
 def _load_request_size_config() -> tuple[int, int]:
     """Load health HTTP request size limits from env or defaults."""
     from src.constants import HEALTH_MAX_REQUEST_BODY_BYTES, HEALTH_MAX_URL_LENGTH
@@ -1641,7 +1672,10 @@ class HealthServer:
         # Build middleware stack
         middlewares: list[Any] = []
 
-        # Request size limits (applied first — cheapest check)
+        # Method validation (applied first — cheapest check)
+        middlewares.append(_create_method_validation_middleware())
+
+        # Request size limits
         max_body, max_url = _load_request_size_config()
         middlewares.append(
             _create_request_size_limit_middleware(max_body, max_url)
