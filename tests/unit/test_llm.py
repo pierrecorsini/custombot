@@ -28,6 +28,17 @@ from src.llm import (
 )
 from src.llm_error_classifier import classify_llm_error
 
+# OpenAI SDK exception types — used by parametrized classifier tests
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    NotFoundError,
+    PermissionDeniedError,
+    RateLimitError,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1263,6 +1274,127 @@ class TestClassifyLLMError:
             result = classify_llm_error(err)
             assert isinstance(result, LLMError), f"Expected LLMError for {type(err).__name__}"
             assert result.suggestion, f"Missing suggestion for {type(err).__name__}"
+
+    # ── Parametrized table covering every exception → ErrorCode mapping ──
+
+    _CLASSIFY_CASES = [
+        pytest.param(
+            "authentication_error",
+            lambda: AuthenticationError(
+                message="Bad key",
+                response=MagicMock(status_code=401),
+                body=None,
+            ),
+            ErrorCode.LLM_API_KEY_INVALID,
+            "authentication",
+            id="authentication_error",
+        ),
+        pytest.param(
+            "permission_denied",
+            lambda: PermissionDeniedError(
+                message="No access",
+                response=MagicMock(status_code=403),
+                body=None,
+            ),
+            ErrorCode.LLM_API_KEY_INVALID,
+            "permission",
+            id="permission_denied",
+        ),
+        pytest.param(
+            "rate_limit",
+            lambda: RateLimitError(
+                message="Slow down",
+                response=MagicMock(status_code=429),
+                body=None,
+            ),
+            ErrorCode.LLM_RATE_LIMITED,
+            "rate limit",
+            id="rate_limit",
+        ),
+        pytest.param(
+            "timeout",
+            lambda: APITimeoutError(request=MagicMock()),
+            ErrorCode.LLM_TIMEOUT,
+            "timed out",
+            id="timeout",
+        ),
+        pytest.param(
+            "not_found",
+            lambda: NotFoundError(
+                message="Model gpt-5 not found",
+                response=MagicMock(status_code=404),
+                body=None,
+            ),
+            ErrorCode.LLM_MODEL_UNAVAILABLE,
+            "not found",
+            id="not_found",
+        ),
+        pytest.param(
+            "connection",
+            lambda: APIConnectionError(request=MagicMock()),
+            ErrorCode.LLM_CONNECTION_FAILED,
+            "connect",
+            id="connection",
+        ),
+        pytest.param(
+            "bad_request_generic",
+            lambda: BadRequestError(
+                message="Something went wrong",
+                response=MagicMock(status_code=400),
+                body=None,
+            ),
+            ErrorCode.LLM_INVALID_REQUEST,
+            "bad request",
+            id="bad_request_generic",
+        ),
+        pytest.param(
+            "bad_request_context_length",
+            lambda: BadRequestError(
+                message="This model's maximum context length is 4096 tokens",
+                response=MagicMock(status_code=400),
+                body=None,
+            ),
+            ErrorCode.LLM_CONTEXT_LENGTH_EXCEEDED,
+            "context length",
+            id="bad_request_context_length",
+        ),
+        pytest.param(
+            "bad_request_max_tokens",
+            lambda: BadRequestError(
+                message="Too many tokens in request",
+                response=MagicMock(status_code=400),
+                body=None,
+            ),
+            ErrorCode.LLM_CONTEXT_LENGTH_EXCEEDED,
+            "context length",
+            id="bad_request_max_tokens",
+        ),
+        pytest.param(
+            "generic_fallback",
+            lambda: RuntimeError("something broke"),
+            ErrorCode.UNKNOWN,
+            "something broke",
+            id="generic_fallback",
+        ),
+    ]
+
+    @pytest.mark.parametrize(
+        "label,make_error,expected_code,msg_includes",
+        _CLASSIFY_CASES,
+    )
+    def test_classify_all_mappings_parametrized(
+        self, label, make_error, expected_code, msg_includes
+    ):
+        """Data-driven check that every OpenAI exception maps to the correct ErrorCode."""
+        result = classify_llm_error(make_error())
+        assert isinstance(result, LLMError), f"{label}: expected LLMError instance"
+        assert result.error_code == expected_code, (
+            f"{label}: expected {expected_code}, got {result.error_code}"
+        )
+        assert result.suggestion, f"{label}: missing suggestion"
+        assert msg_includes in result.message.lower(), (
+            f"{label}: '{msg_includes}' not in '{result.message}'"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
