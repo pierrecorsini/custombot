@@ -378,7 +378,7 @@ production readiness gaps not addressed in Phases 1–12.
 
 - [x] **Add parametrized test for `_classify_llm_error()` covering all OpenAI exception types** — `_classify_llm_error()` handles 7 exception types (AuthenticationError, PermissionDeniedError, RateLimitError, APITimeoutError, NotFoundError, APIConnectionError, BadRequestError) plus a generic fallback. There's no dedicated test verifying each mapping. Add a parametrized test that passes each exception type and verifies the returned `LLMError.error_code` and `LLMError.suggestion` are correct. (`tests/unit/test_llm.py`)
 
-- [ ] **Add test for `chat_stream()` missing `usage_data` edge case** — Verify that when a streaming provider doesn't return `usage` data in the stream events, `chat_stream()` doesn't raise `NameError` or `UnboundLocalError` and token tracking is skipped gracefully. (`tests/unit/test_llm.py`)
+- [x] **Add test for `chat_stream()` missing `usage_data` edge case** — Verify that when a streaming provider doesn't return `usage` data in the stream events, `chat_stream()` doesn't raise `NameError` or `UnboundLocalError` and token tracking is skipped gracefully. (`tests/unit/test_llm.py`)
 
 - [ ] **Add test for `process_scheduled()` injection detection with confidence thresholds** — Verify that a scheduled prompt with injection patterns (e.g., "Ignore all previous instructions") is flagged by `detect_injection()` and that the sanitized version is used. Test both high-confidence (blocked) and low-confidence (logged but allowed) scenarios. (`tests/unit/test_bot.py`)
 

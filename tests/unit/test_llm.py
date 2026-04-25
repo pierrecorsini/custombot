@@ -1590,3 +1590,135 @@ class TestChatStreamEarlyException:
                 )
 
         on_chunk.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# chat_stream() missing usage_data edge case (PLAN Phase 13)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestChatStreamMissingUsageData:
+    """Verify chat_stream handles streams that never deliver usage data."""
+
+    async def test_no_unbound_local_error_when_usage_missing(self, valid_cfg):
+        """When no stream event carries usage, no NameError/UnboundLocalError."""
+        client = LLMClient(valid_cfg)
+
+        # Build mock events without usage — event.usage is None (falsy)
+        ev = MagicMock()
+        ev.choices = [MagicMock()]
+        ev.choices[0].delta.content = "Hello world"
+        ev.choices[0].delta.tool_calls = None
+        ev.choices[0].delta.role = None
+        ev.choices[0].finish_reason = "stop"
+        ev.usage = None
+
+        async def _stream():
+            yield ev
+
+        with patch.object(
+            client._client.chat.completions,
+            "create",
+            AsyncMock(return_value=_stream()),
+        ):
+            # Must not raise NameError or UnboundLocalError
+            result = await client.chat_stream(
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result is not None
+        assert result.usage is None
+
+    async def test_token_tracking_skipped_when_usage_missing(self, valid_cfg):
+        """TokenUsage should not be updated when the stream has no usage data."""
+        client = LLMClient(valid_cfg)
+
+        ev = MagicMock()
+        ev.choices = [MagicMock()]
+        ev.choices[0].delta.content = "response text"
+        ev.choices[0].delta.tool_calls = None
+        ev.choices[0].delta.role = None
+        ev.choices[0].finish_reason = "stop"
+        ev.usage = None
+
+        async def _stream():
+            yield ev
+
+        with patch.object(
+            client._client.chat.completions,
+            "create",
+            AsyncMock(return_value=_stream()),
+        ):
+            await client.chat_stream(
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        session = client.token_usage
+        assert session.request_count == 0
+        assert session.total_tokens == 0
+
+    async def test_response_content_valid_without_usage(self, valid_cfg):
+        """Response content and finish_reason should be valid even without usage."""
+        client = LLMClient(valid_cfg)
+
+        ev1 = MagicMock()
+        ev1.choices = [MagicMock()]
+        ev1.choices[0].delta.content = "Hello "
+        ev1.choices[0].delta.tool_calls = None
+        ev1.choices[0].delta.role = None
+        ev1.choices[0].finish_reason = None
+        ev1.usage = None
+
+        ev2 = MagicMock()
+        ev2.choices = [MagicMock()]
+        ev2.choices[0].delta.content = "world!"
+        ev2.choices[0].delta.tool_calls = None
+        ev2.choices[0].delta.role = None
+        ev2.choices[0].finish_reason = "stop"
+        ev2.usage = None
+
+        async def _stream():
+            yield ev1
+            yield ev2
+
+        with patch.object(
+            client._client.chat.completions,
+            "create",
+            AsyncMock(return_value=_stream()),
+        ):
+            result = await client.chat_stream(
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result.choices[0].message.content == "Hello world!"
+        assert result.choices[0].finish_reason == "stop"
+
+    async def test_per_chat_tracking_skipped_without_usage(self, valid_cfg):
+        """Per-chat token tracking should also be skipped when usage is missing."""
+        client = LLMClient(valid_cfg)
+
+        ev = MagicMock()
+        ev.choices = [MagicMock()]
+        ev.choices[0].delta.content = "hi"
+        ev.choices[0].delta.tool_calls = None
+        ev.choices[0].delta.role = None
+        ev.choices[0].finish_reason = "stop"
+        ev.usage = None
+
+        async def _stream():
+            yield ev
+
+        with patch.object(
+            client._client.chat.completions,
+            "create",
+            AsyncMock(return_value=_stream()),
+        ):
+            result = await client.chat_stream(
+                messages=[{"role": "user", "content": "hi"}],
+                chat_id="test-chat-123",
+            )
+
+        assert result.usage is None
+        # No per-chat entry should exist
+        top_chats = client.token_usage.get_top_chats()
+        assert len(top_chats) == 0
