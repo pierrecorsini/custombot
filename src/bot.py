@@ -1124,6 +1124,21 @@ class Bot:
         use_streaming = self._cfg.stream_response
 
         for iteration in range(max_iter):
+            log.debug(
+                "ReAct loop iteration %d/%d, tool_calls_so_far=%d for chat %s",
+                iteration + 1,
+                max_iter,
+                len(tool_log),
+                chat_id,
+                extra={
+                    "chat_id": chat_id,
+                    "correlation_id": get_correlation_id(),
+                    "react_iteration": iteration + 1,
+                    "react_max_iterations": max_iter,
+                    "react_tool_count": len(tool_log),
+                },
+            )
+
             # Track LLM latency
             llm_start = time.perf_counter()
 
