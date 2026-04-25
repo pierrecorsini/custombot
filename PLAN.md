@@ -435,7 +435,7 @@ not addressed in Phases 1–13.
 
 ### Error Handling & Resilience
 
-- [ ] **Add `OSError` recovery in `_FileHandlePool.get_or_open()`** — `get_or_open()` calls `path.open("a", ...)` without catching `OSError`. If the OS file descriptor limit is reached (`EMFILE`) or permissions are denied, the exception propagates to `_append_to_file()` and ultimately crashes the DB write with an opaque error. Add a try/except around `path.open()` that invalidates stale handles, retries once after evicting all pooled handles, and raises a descriptive `DatabaseError` on persistent failure. (`src/db/db.py:236-260`)
+- [x] **Add `OSError` recovery in `_FileHandlePool.get_or_open()`** — `get_or_open()` calls `path.open("a", ...)` without catching `OSError`. If the OS file descriptor limit is reached (`EMFILE`) or permissions are denied, the exception propagates to `_append_to_file()` and ultimately crashes the DB write with an opaque error. Add a try/except around `path.open()` that invalidates stale handles, retries once after evicting all pooled handles, and raises a descriptive `DatabaseError` on persistent failure. (`src/db/db.py:236-260`)
 
 - [ ] **Add `EventBus` emission to `Bot.process_scheduled()` for observability parity** — `_process()` emits `message_received` and `response_sent` events, but `process_scheduled()` emits no events at all. This means scheduled tasks are invisible to EventBus subscribers (monitoring, plugins). Add `scheduled_task_started` and `scheduled_task_completed` events so that monitoring dashboards can track scheduled task execution alongside user messages. (`src/bot.py:659-826`)
 

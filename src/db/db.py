@@ -66,7 +66,7 @@ from src.db.db_integrity import (
     validate_all_sync,
     validate_checksum,
 )
-from src.exceptions import DatabaseError, DiskSpaceError
+from src.exceptions import DatabaseError, DiskSpaceError, ErrorCode
 from src.logging import get_correlation_id
 from src.security.prompt_injection import (
     detect_injection,
@@ -242,6 +242,10 @@ class _FileHandlePool:
 
         LRU-evicts the least-recently-used handle when the pool exceeds
         *max_size*, closing the evicted handle.
+
+        Raises:
+            DatabaseError: If the file cannot be opened after invalidating
+                stale handles and retrying (e.g. EMFILE, permission denied).
         """
         key = str(path)
         with self._lock:
@@ -253,7 +257,30 @@ class _FileHandlePool:
                 # Stale handle — remove and reopen
                 del self._handles[key]
 
-            handle = path.open("a", encoding="utf-8", buffering=1)
+            try:
+                handle = path.open("a", encoding="utf-8", buffering=1)
+            except OSError as exc:
+                # First attempt failed — close all pooled handles to free file
+                # descriptors, then retry once.
+                log.warning(
+                    "FileHandlePool: OSError opening %s (%s), "
+                    "evicting all %d pooled handles and retrying",
+                    path, exc, len(self._handles),
+                )
+                self._evict_all_locked()
+                try:
+                    handle = path.open("a", encoding="utf-8", buffering=1)
+                except OSError as retry_exc:
+                    raise DatabaseError(
+                        f"Failed to open message file after handle eviction: "
+                        f"{retry_exc}",
+                        suggestion="Check file descriptor limits (ulimit -n) "
+                        "and filesystem permissions.",
+                        error_code=ErrorCode.DB_WRITE_FAILED,
+                        path=str(path),
+                        os_error=str(retry_exc),
+                    ) from retry_exc
+
             self._handles[key] = handle
 
             # Evict LRU entries over capacity
@@ -262,6 +289,12 @@ class _FileHandlePool:
                 self._close_handle(evicted)
 
             return handle
+
+    def _evict_all_locked(self) -> None:
+        """Close and remove all pooled handles.  Caller must hold ``_lock``."""
+        for handle in self._handles.values():
+            self._close_handle(handle)
+        self._handles.clear()
 
     def invalidate(self, path: Path) -> None:
         """Close and remove the handle for *path* (e.g. after file repair)."""
