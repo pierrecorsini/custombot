@@ -36,6 +36,7 @@ from src.constants import (
     WORKSPACE_CLEANUP_INTERVAL_SECONDS,
     WORKSPACE_DIR,
 )
+from src.utils.dag import topological_sort
 from src.lifecycle import (
     _log_component_init,
     _log_component_ready,
@@ -405,29 +406,12 @@ class StartupOrchestrator:
         When no ``depends_on`` is declared the original list order is
         preserved.  Raises ``ValueError`` on circular or missing deps.
         """
-        by_name = {s.name: s for s in self._steps}
-        resolved: list[ComponentSpec] = []
-        visited: set[str] = set()
-        visiting: set[str] = set()
-
-        def _visit(name: str) -> None:
-            if name in visited:
-                return
-            if name in visiting:
-                raise ValueError(f"Circular startup dependency: {name}")
-            visiting.add(name)
-            spec = by_name.get(name)
-            if spec is None:
-                raise ValueError(f"Unknown startup dependency: {name}")
-            for dep in spec.depends_on:
-                _visit(dep)
-            resolved.append(spec)
-            visiting.discard(name)
-            visited.add(name)
-
-        for spec in self._steps:
-            _visit(spec.name)
-        return resolved
+        return topological_sort(
+            self._steps,
+            key=lambda s: s.name,
+            depends_on=lambda s: s.depends_on,
+            context_label="startup dependency",
+        )
 
     async def run_all(self) -> float:
         """Run all startup steps and return the ``_log_startup_begin`` timestamp.
