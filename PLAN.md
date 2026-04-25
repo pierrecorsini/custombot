@@ -455,7 +455,7 @@ not addressed in Phases 1–13.
 
 ### Observability & Monitoring
 
-- [ ] **Expose `Memory` cache hit/miss ratio as Prometheus metrics** — `Memory._cache_hits` and `_cache_misses` counters exist (lines 91–92) but are not exposed via the `/metrics` endpoint. For production operators, a low cache hit ratio indicates excessive filesystem reads that should be investigated. Add `custombot_memory_cache_hits_total` and `custombot_memory_cache_misses_total` counters to the Prometheus output. (`src/memory.py:91-92`, `src/monitoring/performance.py`, `src/health/server.py`)
+- [x] **Expose `Memory` cache hit/miss ratio as Prometheus metrics** — `Memory._cache_hits` and `_cache_misses` counters exist (lines 91–92) but are not exposed via the `/metrics` endpoint. For production operators, a low cache hit ratio indicates excessive filesystem reads that should be investigated. Add `custombot_memory_cache_hits_total` and `custombot_memory_cache_misses_total` counters to the Prometheus output. (`src/memory.py:91-92`, `src/monitoring/performance.py`, `src/health/server.py`)
 
 - [ ] **Add ReAct loop iteration progress logging** — The ReAct loop (`_react_loop`) is silent between iterations — only the final result is logged. For debugging complex multi-step tool-call chains, operators have no visibility into which iteration the loop is on or what tool calls are being executed in real-time. Add a structured DEBUG log at the top of each iteration with `iteration=N, max_iterations=M, tool_count=K` so operators can trace stuck loops without modifying code. (`src/bot.py:1101-1166`)
 
