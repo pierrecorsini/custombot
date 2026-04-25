@@ -394,6 +394,6 @@ production readiness gaps not addressed in Phases 1–12.
 
 - [x] **Add `pytest-xdist` for parallel test execution in CI** — The test suite has 38 unit tests and 5 integration tests. Running them sequentially on a single core is acceptable now but won't scale. Add `pytest-xdist` to dev dependencies and run `pytest -n auto` in CI to utilize all available cores, reducing CI feedback time by 2-3x. (`requirements-dev.txt`, `.github/workflows/ci.yml`)
 
-- [ ] **Add Docker health check with configurable timeout via build arg** — The Dockerfile's `HEALTHCHECK` has hardcoded `--timeout=5s` and `--interval=30s`. In production, operators may need different intervals (e.g., longer timeout for slow networks). Add `ARG HEALTH_INTERVAL=30s` and `ARG HEALTH_TIMEOUT=5s` to the Dockerfile so they can be overridden at build time. (`Dockerfile:75-76`)
+- [x] **Add Docker health check with configurable timeout via build arg** — The Dockerfile's `HEALTHCHECK` has hardcoded `--timeout=5s` and `--interval=30s`. In production, operators may need different intervals (e.g., longer timeout for slow networks). Add `ARG HEALTH_INTERVAL=30s` and `ARG HEALTH_TIMEOUT=5s` to the Dockerfile so they can be overridden at build time. (`Dockerfile:75-76`)
 
 - [ ] **Bump `--cov-fail-under` from 65 to 70 in CI** — Phase 13 adds 7 new tests (above). If coverage exceeds 70% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 12. (`.github/workflows/ci.yml:89`)

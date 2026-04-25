@@ -71,8 +71,14 @@ USER custombot
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# Configurable health check parameters (override at build time)
+ARG HEALTH_INTERVAL=30s
+ARG HEALTH_TIMEOUT=5s
+ARG HEALTH_START_PERIOD=30s
+ARG HEALTH_RETRIES=3
+
 # Health check — requires --health-port to be passed at runtime
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=${HEALTH_INTERVAL} --timeout=${HEALTH_TIMEOUT} --start-period=${HEALTH_START_PERIOD} --retries=${HEALTH_RETRIES} \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')" || exit 1
 
 # Default port for the health endpoint
