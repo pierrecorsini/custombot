@@ -103,6 +103,7 @@ jobs:
       - name: Run tests with coverage
         run: |
           pytest \
+            -n auto \
             --cov=src \
             --cov=main \
             --cov-report=term-missing \

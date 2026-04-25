@@ -392,7 +392,7 @@ production readiness gaps not addressed in Phases 1–12.
 
 - [x] **Add `mypy --strict` opt-in CI job for progressive type safety** — The current mypy config has `disallow_untyped_defs = false` and `ignore_missing_imports = true`. While appropriate for the current codebase, adding a separate CI job that runs `mypy --strict` on a curated subset of files (e.g., `src/core/*.py`, `src/bot.py`) would catch regressions in the most critical modules without blocking the main build. Mark as `continue-on-error: true` initially. (`.github/workflows/ci.yml`)
 
-- [ ] **Add `pytest-xdist` for parallel test execution in CI** — The test suite has 38 unit tests and 5 integration tests. Running them sequentially on a single core is acceptable now but won't scale. Add `pytest-xdist` to dev dependencies and run `pytest -n auto` in CI to utilize all available cores, reducing CI feedback time by 2-3x. (`requirements-dev.txt`, `.github/workflows/ci.yml`)
+- [x] **Add `pytest-xdist` for parallel test execution in CI** — The test suite has 38 unit tests and 5 integration tests. Running them sequentially on a single core is acceptable now but won't scale. Add `pytest-xdist` to dev dependencies and run `pytest -n auto` in CI to utilize all available cores, reducing CI feedback time by 2-3x. (`requirements-dev.txt`, `.github/workflows/ci.yml`)
 
 - [ ] **Add Docker health check with configurable timeout via build arg** — The Dockerfile's `HEALTHCHECK` has hardcoded `--timeout=5s` and `--interval=30s`. In production, operators may need different intervals (e.g., longer timeout for slow networks). Add `ARG HEALTH_INTERVAL=30s` and `ARG HEALTH_TIMEOUT=5s` to the Dockerfile so they can be overridden at build time. (`Dockerfile:75-76`)
 
