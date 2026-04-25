@@ -78,10 +78,13 @@ class ContextAssembler:
         source: str,
         chat_id: str,
         default: str | None,
+        *,
+        log_level: int = logging.WARNING,
     ) -> str | None:
         """Return *result* if it is a value, or *default* if it is an exception."""
         if isinstance(result, BaseException):
-            log.warning(
+            log.log(
+                log_level,
                 "Context read '%s' failed for chat %s: %s",
                 source,
                 chat_id,
@@ -137,6 +140,7 @@ class ContextAssembler:
         )
         agents_content = self._handle_gather_result(
             agents_content, "read_agents_md", chat_id, default=DEFAULT_AGENTS_MD,
+            log_level=logging.DEBUG,
         )
         project_context = self._handle_gather_result(
             project_context, "get_project_context", chat_id, default=None,

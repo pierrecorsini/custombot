@@ -443,7 +443,7 @@ not addressed in Phases 1–13.
 
 - [x] **Add graceful handling for `_confirm_send()` when stdin is `/dev/null`** — When the bot runs as a systemd service, `stdin` may be `/dev/null`. `input()` immediately returns an empty string, which doesn't match `"y"` or `"n"` and burns through all `SAFE_MODE_MAX_CONFIRM_RETRIES` attempts before auto-rejecting. The user gets no feedback about why sends are being rejected. Detect `sys.stdin.isatty()` at the top of `_confirm_send()` and log a clear warning: "Safe mode requires an interactive terminal — send auto-rejected." (`src/channels/base.py:347-373`)
 
-- [ ] **Downgrade `Memory.read_agents_md()` `FileNotFoundError` log level from ERROR to DEBUG** — When `ensure_workspace()` hasn't been called yet for a new scheduled task, `read_agents_md()` raises `FileNotFoundError`. The `ContextAssembler` handles this by substituting `DEFAULT_AGENTS_MD`, but the `read_agents_md()` exception handler at line 418 logs at ERROR level. For new chats this is expected behavior — downgrade to DEBUG to avoid false-positive alert fatigue. (`src/memory.py:418-421`)
+- [x] **Downgrade `Memory.read_agents_md()` `FileNotFoundError` log level from ERROR to DEBUG** — When `ensure_workspace()` hasn't been called yet for a new scheduled task, `read_agents_md()` raises `FileNotFoundError`. The `ContextAssembler` handles this by substituting `DEFAULT_AGENTS_MD`, but the `read_agents_md()` exception handler at line 418 logs at ERROR level. For new chats this is expected behavior — downgrade to DEBUG to avoid false-positive alert fatigue. (`src/memory.py:418-421`)
 
 ### Security
 
