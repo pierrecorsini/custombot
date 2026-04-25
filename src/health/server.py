@@ -395,6 +395,16 @@ def _create_hmac_middleware(secret: str) -> Any:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PII Redaction
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _redact_chat_id(chat_id: str) -> str:
+    """Hash a chat_id for Prometheus labels to avoid exposing PII (phone numbers)."""
+    return hashlib.sha256(chat_id.encode()).hexdigest()[:8]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Prometheus Text Format Renderer
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -552,7 +562,7 @@ def _build_prometheus_output(
     # ── Per-Chat Token Usage ────────────────────────────────────────────────
     if per_chat_tokens:
         for entry in per_chat_tokens:
-            chat_id = entry.get("chat_id", "unknown")
+            chat_id = _redact_chat_id(entry.get("chat_id", "unknown"))
             lines.append(
                 _format_prometheus_metric(
                     "custombot_chat_prompt_tokens",
@@ -986,7 +996,7 @@ def _build_prometheus_output(
                 "Per-chat message count (top chats)",
                 "counter",
                 chat_metric.message_count,
-                labels={"chat_id": chat_metric.chat_id},
+                labels={"chat_id": _redact_chat_id(chat_metric.chat_id)},
             )
         )
 
@@ -998,7 +1008,7 @@ def _build_prometheus_output(
                 "Last ReAct iteration count per chat (top chats by depth)",
                 "gauge",
                 depth_entry.depth,
-                labels={"chat_id": depth_entry.chat_id},
+                labels={"chat_id": _redact_chat_id(depth_entry.chat_id)},
             )
         )
 
