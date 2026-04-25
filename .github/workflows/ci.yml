@@ -48,6 +48,27 @@ jobs:
       - name: mypy
         run: mypy src main.py
 
+  # Progressive type-safety gate — runs mypy --strict on critical modules.
+  # Non-blocking (continue-on-error) until the subset is fully annotated.
+  typecheck-strict:
+    name: Strict Type Check (opt-in)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install mypy>=1.13.0
+
+      - name: mypy --strict on critical modules
+        run: mypy --strict src/core src/bot.py
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

@@ -386,11 +386,11 @@ production readiness gaps not addressed in Phases 1–12.
 
 - [x] **Add test for `StartupOrchestrator._resolve_order()` circular dependency detection** — `_resolve_order()` raises `ValueError` on circular dependencies but this is untested. Add a test with a cycle (A depends on B, B depends on A) and verify the error message is informative. Also test missing dependency detection. (`tests/unit/test_startup.py`)
 
-- [ ] **Add regression test for `TokenUsage` LRU eviction correctness** — `TokenUsage._per_chat` evicts the oldest half when `_per_chat_max` is reached. Verify that: (a) eviction happens exactly when the cap is exceeded, (b) the evicted entries are the oldest (first-inserted), (c) recent entries are preserved, (d) total token counts are not affected by eviction (they're tracked globally). (`tests/unit/test_llm.py`)
+- [x] **Add regression test for `TokenUsage` LRU eviction correctness** — `TokenUsage._per_chat` evicts the oldest half when `_per_chat_max` is reached. Verify that: (a) eviction happens exactly when the cap is exceeded, (b) the evicted entries are the oldest (first-inserted), (c) recent entries are preserved, (d) total token counts are not affected by eviction (they're tracked globally). (`tests/unit/test_llm.py`)
 
 ### DevOps / Infrastructure
 
-- [ ] **Add `mypy --strict` opt-in CI job for progressive type safety** — The current mypy config has `disallow_untyped_defs = false` and `ignore_missing_imports = true`. While appropriate for the current codebase, adding a separate CI job that runs `mypy --strict` on a curated subset of files (e.g., `src/core/*.py`, `src/bot.py`) would catch regressions in the most critical modules without blocking the main build. Mark as `continue-on-error: true` initially. (`.github/workflows/ci.yml`)
+- [x] **Add `mypy --strict` opt-in CI job for progressive type safety** — The current mypy config has `disallow_untyped_defs = false` and `ignore_missing_imports = true`. While appropriate for the current codebase, adding a separate CI job that runs `mypy --strict` on a curated subset of files (e.g., `src/core/*.py`, `src/bot.py`) would catch regressions in the most critical modules without blocking the main build. Mark as `continue-on-error: true` initially. (`.github/workflows/ci.yml`)
 
 - [ ] **Add `pytest-xdist` for parallel test execution in CI** — The test suite has 38 unit tests and 5 integration tests. Running them sequentially on a single core is acceptable now but won't scale. Add `pytest-xdist` to dev dependencies and run `pytest -n auto` in CI to utilize all available cores, reducing CI feedback time by 2-3x. (`requirements-dev.txt`, `.github/workflows/ci.yml`)
 
