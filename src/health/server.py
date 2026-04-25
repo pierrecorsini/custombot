@@ -726,6 +726,39 @@ def _build_prometheus_output(
         )
     )
 
+    # ── Database Write Latency Metrics ──────────────────────────────────────
+    dbw_lat = snapshot.db_write_latency
+    lines.append(
+        _format_prometheus_summary(
+            "custombot_db_write_latency_milliseconds",
+            "Database write operation latency in milliseconds",
+            count=dbw_lat.count,
+            sum_ms=round(dbw_lat.mean_ms * dbw_lat.count, 2) if dbw_lat.count else 0,
+            quantiles={
+                "0.5": round(dbw_lat.median_ms, 2),
+                "0.95": round(dbw_lat.p95_ms, 2),
+                "0.99": round(dbw_lat.p99_ms, 2),
+            }
+            if dbw_lat.count
+            else None,
+        )
+    )
+    lines.append(
+        _format_prometheus_histogram(
+            "custombot_db_write_latency",
+            "Database write operation latency histogram in milliseconds (fixed buckets)",
+            snapshot.db_write_latency_histogram,
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_db_write_operations_total",
+            "Total database write operations executed",
+            "counter",
+            snapshot.db_write_op_count,
+        )
+    )
+
     # ── Queue Metrics ────────────────────────────────────────────────────────
     lines.append(
         _format_prometheus_metric(
@@ -1248,6 +1281,39 @@ def _build_dedup_prometheus_output(dedup_stats: Any) -> str:
     return "".join(lines)
 
 
+def _build_event_bus_prometheus_output(event_bus: Any) -> str:
+    """Build Prometheus metrics for EventBus emission and handler counts."""
+    if event_bus is None:
+        return ""
+
+    metrics = event_bus.get_metrics()
+    lines: list[str] = []
+
+    for event_name, count in sorted(metrics["emissions"].items()):
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_event_emitted_total",
+                "Total number of EventBus emissions per event name",
+                "counter",
+                count,
+                labels={"event": event_name},
+            )
+        )
+
+    for event_name, count in sorted(metrics["invocations"].items()):
+        lines.append(
+            _format_prometheus_metric(
+                "custombot_event_handler_invocations_total",
+                "Total number of handler invocations per event name",
+                "counter",
+                count,
+                labels={"event": event_name},
+            )
+        )
+
+    return "".join(lines)
+
+
 class HealthServer:
     """HTTP health check server using aiohttp."""
 
@@ -1632,6 +1698,12 @@ class HealthServer:
             # Dedup service metrics (via public Bot accessor)
             dedup_stats = self._bot.get_dedup_stats() if self._bot is not None else None
             output += _build_dedup_prometheus_output(dedup_stats)
+            # EventBus emission and handler metrics
+            try:
+                from src.core.event_bus import get_event_bus
+                output += _build_event_bus_prometheus_output(get_event_bus())
+            except Exception:
+                pass
             return web.Response(
                 text=output,
                 content_type="text/plain",

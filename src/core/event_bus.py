@@ -114,6 +114,8 @@ class EventBus:
         "_max_handlers_per_event",
         "_closed",
         "_lock",
+        "_emission_counts",
+        "_handler_invocation_counts",
     )
 
     def __init__(self, max_handlers_per_event: int = 50) -> None:
@@ -121,6 +123,8 @@ class EventBus:
         self._max_handlers_per_event = max_handlers_per_event
         self._closed = False
         self._lock: asyncio.Lock | None = None  # lazy-initialized
+        self._emission_counts: dict[str, int] = {}
+        self._handler_invocation_counts: dict[str, int] = {}
 
     def _get_lock(self) -> asyncio.Lock:
         """Lazy-initialize the asyncio lock on first use."""
@@ -178,9 +182,17 @@ class EventBus:
             log.warning("Event emitted after bus closed: %s", event.name)
             return
 
+        self._emission_counts[event.name] = (
+            self._emission_counts.get(event.name, 0) + 1
+        )
+
         handlers = self._handlers.get(event.name)
         if not handlers:
             return
+
+        self._handler_invocation_counts[event.name] = (
+            self._handler_invocation_counts.get(event.name, 0) + len(handlers)
+        )
 
         if event.name not in KNOWN_EVENTS:
             log.debug(
@@ -219,6 +231,17 @@ class EventBus:
     def event_names(self) -> list[str]:
         """Return names of events that have at least one handler."""
         return [name for name, hs in self._handlers.items() if hs]
+
+    def get_metrics(self) -> dict[str, dict[str, int]]:
+        """Return emission and handler-invocation counts per event name.
+
+        Returns:
+            ``{"emissions": {event: count, ...}, "invocations": {event: count, ...}}``
+        """
+        return {
+            "emissions": dict(self._emission_counts),
+            "invocations": dict(self._handler_invocation_counts),
+        }
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────
