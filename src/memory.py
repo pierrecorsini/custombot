@@ -79,39 +79,125 @@ You can discover and install new skills using:
 DEFAULT_AGENTS_MD: str = _DEFAULT_AGENTS_MD
 
 
+# ── module-level helpers (shared by MtimeCache) ────────────────────────────
+
+
+def _stat_and_read(path: Path, cached_mtime: Optional[float]) -> tuple:
+    """Stat + conditionally read a file in a single thread hop.
+
+    Returns ``(None, None)`` if the file does not exist, keeping the
+    existence check off the event loop.
+    """
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None, None
+    mtime = st.st_mtime
+    if cached_mtime is not None and mtime == cached_mtime:
+        return mtime, None
+    return mtime, path.read_text(encoding="utf-8")
+
+
+def _track_cache_event(hit: bool) -> None:
+    """Report a cache hit or miss to the performance metrics collector."""
+    try:
+        from src.monitoring.performance import get_metrics_collector
+
+        if hit:
+            get_metrics_collector().track_memory_cache_hit()
+        else:
+            get_metrics_collector().track_memory_cache_miss()
+    except Exception:
+        pass
+
+
+# ── MtimeCache ─────────────────────────────────────────────────────────────
+
+
+class MtimeCache:
+    """mtime-based file content cache with automatic hit/miss tracking.
+
+    Encapsulates the ``(mtime, content)`` tuple and LRU eviction so
+    callers don't repeat the stat → compare → read → store dance for
+    every file they want to cache.
+    """
+
+    __slots__ = ("_cache", "_hits", "_misses")
+
+    def __init__(self, max_size: int = MAX_LRU_CACHE_SIZE) -> None:
+        self._cache: LRUDict = LRUDict(max_size=max_size)
+        self._hits: int = 0
+        self._misses: int = 0
+
+    async def read(self, key: str, path: Path) -> Optional[str]:
+        """Read *path* with mtime-based caching under *key*.
+
+        Returns the file content (from cache on hit, from disk on miss),
+        or ``None`` if the file does not exist.
+        Raises :class:`OSError` on I/O failures.
+        """
+        cached = self._cache.get(key)
+        cached_mtime = cached[0] if cached else None
+        try:
+            mtime, content = await asyncio.to_thread(
+                _stat_and_read, path, cached_mtime,
+            )
+        except Exception as exc:
+            raise OSError(f"Read failed for {path}: {exc}") from exc
+        if mtime is None:
+            return None
+        if content is None:
+            # Cache hit — mtime unchanged, reuse cached content
+            self._hits += 1
+            _track_cache_event(hit=True)
+            return cached[1]
+        # Cache miss — file changed or not yet cached
+        self._misses += 1
+        _track_cache_event(hit=False)
+        self._cache[key] = (mtime, content)
+        return content
+
+    def invalidate(self, key: str) -> None:
+        """Remove *key* from the cache (e.g. after a write)."""
+        self._cache.pop(key, None)
+
+    @property
+    def hits(self) -> int:
+        return self._hits
+
+    @property
+    def misses(self) -> int:
+        return self._misses
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._cache
+
+
+# ── Memory ─────────────────────────────────────────────────────────────────
+
+
 class Memory:
     """File-based per-chat memory manager."""
 
     def __init__(self, workspace_root: str) -> None:
         self._root = Path(workspace_root)
-        # LRU-bounded caches to prevent unbounded memory growth with many chats
-        self._memory_cache: LRUDict = LRUDict(max_size=MAX_LRU_CACHE_SIZE)
-        self._agents_cache: LRUDict = LRUDict(max_size=MAX_LRU_CACHE_SIZE)
-        # Cache effectiveness counters (exposed via PerformanceMetrics)
-        self._cache_hits: int = 0
-        self._cache_misses: int = 0
-
-    # ── cache tracking helpers ─────────────────────────────────────────────
-
-    @staticmethod
-    def _track_cache_event(hit: bool) -> None:
-        """Report a cache hit or miss to the performance metrics collector."""
-        try:
-            from src.monitoring.performance import get_metrics_collector
-
-            if hit:
-                get_metrics_collector().track_memory_cache_hit()
-            else:
-                get_metrics_collector().track_memory_cache_miss()
-        except Exception:
-            pass
+        self._memory_cache = MtimeCache(max_size=MAX_LRU_CACHE_SIZE)
+        self._agents_cache = MtimeCache(max_size=MAX_LRU_CACHE_SIZE)
+        self._path_cache: LRUDict = LRUDict(max_size=MAX_LRU_CACHE_SIZE)
 
     # ── internal ───────────────────────────────────────────────────────────
 
     def _resolve_chat_path(self, chat_id: str) -> Path:
-        """Build and validate the chat directory path."""
+        """Build and validate the chat directory path (cached)."""
+        cached = self._path_cache.get(chat_id)
+        if cached is not None:
+            return cached
         d = self._root / "whatsapp_data" / sanitize_path_component(chat_id)
         self._validate_path(d, chat_id)
+        self._path_cache[chat_id] = d
         return d
 
     def _chat_dir(self, chat_id: str) -> Path:
@@ -135,22 +221,6 @@ class Memory:
                 reason="path_traversal",
             )
 
-    @staticmethod
-    def _stat_and_read(path: Path, cached_mtime: Optional[float]) -> tuple:
-        """Stat + conditionally read a file in a single thread hop.
-
-        Returns (None, None) if the file does not exist, keeping the
-        existence check off the event loop.
-        """
-        try:
-            st = path.stat()
-        except FileNotFoundError:
-            return None, None
-        mtime = st.st_mtime
-        if cached_mtime is not None and mtime == cached_mtime:
-            return mtime, None
-        return mtime, path.read_text(encoding="utf-8")
-
     # ── public API ─────────────────────────────────────────────────────────
 
     ORIGIN_ID_FILENAME = ".chat_id"
@@ -161,6 +231,9 @@ class Memory:
         (AGENTS.md, .chat_id) if they don't exist yet.
         Returns the workspace Path.
         """
+        # Invalidate path cache so ensure_workspace forces a fresh resolve
+        # with full validation before creating directories on disk.
+        self._path_cache.pop(chat_id, None)
         d = self._ensure_chat_dir(chat_id)
         agents_path = d / AGENTS_FILENAME
         if not agents_path.exists():
@@ -173,7 +246,7 @@ class Memory:
             except FileExistsError:
                 # Another coroutine won the race — that's fine
                 pass
-            self._agents_cache.pop(chat_id, None)
+            self._agents_cache.invalidate(chat_id)
             log.debug("Seeded %s", agents_path)
         # Store original chat_id for reverse lookup (JID reconstruction)
         origin_path = d / self.ORIGIN_ID_FILENAME
@@ -188,37 +261,18 @@ class Memory:
 
     async def read_memory(self, chat_id: str) -> Optional[str]:
         """Return the contents of MEMORY.md, or None if it doesn't exist."""
-        path = self._chat_dir(chat_id) / MEMORY_FILENAME
-        cached = self._memory_cache.get(chat_id)
-        cached_mtime = cached[0] if cached else None
-        try:
-            mtime, content = await asyncio.to_thread(
-                self._stat_and_read, path, cached_mtime,
-            )
-        except Exception as exc:
-            log.error("Failed to read MEMORY.md for chat %s: %s", chat_id, exc)
-            raise OSError(
-                f"Memory read failed for chat {chat_id}: {exc}"
-            ) from exc
-        if mtime is None:
-            return None
+        content = await self._memory_cache.read(
+            chat_id, self._chat_dir(chat_id) / MEMORY_FILENAME,
+        )
         if content is None:
-            # Cache hit — mtime unchanged, reuse cached content
-            self._cache_hits += 1
-            self._track_cache_event(hit=True)
-            return cached[1] or None
-        # Cache miss — file changed or not yet cached
-        self._cache_misses += 1
-        self._track_cache_event(hit=False)
-        content = content.strip()
-        self._memory_cache[chat_id] = (mtime, content)
-        return content or None
+            return None
+        return content.strip() or None
 
     async def write_memory(self, chat_id: str, content: str) -> None:
         """Overwrite MEMORY.md with new content."""
         path = self._ensure_chat_dir(chat_id) / MEMORY_FILENAME
         await asyncio.to_thread(path.write_text, content.strip() + "\n", encoding="utf-8")
-        self._memory_cache.pop(chat_id, None)
+        self._memory_cache.invalidate(chat_id)
         log.debug("Memory updated for chat %s", chat_id)
 
     # ── corruption detection ────────────────────────────────────────────────
@@ -407,32 +461,14 @@ class Memory:
 
     async def read_agents_md(self, chat_id: str) -> str:
         """Return AGENTS.md content (system persona / extra instructions)."""
-        path = self._chat_dir(chat_id) / AGENTS_FILENAME
-        cached = self._agents_cache.get(chat_id)
-        cached_mtime = cached[0] if cached else None
-        try:
-            mtime, content = await asyncio.to_thread(
-                self._stat_and_read, path, cached_mtime,
-            )
-        except Exception as exc:
-            log.error("Failed to read AGENTS.md for chat %s: %s", chat_id, exc)
-            raise OSError(
-                f"Agents read failed for chat {chat_id}: {exc}"
-            ) from exc
-        if mtime is None:
+        content = await self._agents_cache.read(
+            chat_id, self._chat_dir(chat_id) / AGENTS_FILENAME,
+        )
+        if content is None:
             raise FileNotFoundError(
-                f"AGENTS.md not found for chat {chat_id} at {path}. "
+                f"AGENTS.md not found for chat {chat_id}. "
                 f"Run ensure_workspace() first or check workspace integrity."
             )
-        if content is None:
-            # Cache hit — mtime unchanged
-            self._cache_hits += 1
-            self._track_cache_event(hit=True)
-            return cached[1]
-        # Cache miss — file changed or not yet cached
-        self._cache_misses += 1
-        self._track_cache_event(hit=False)
-        self._agents_cache[chat_id] = (mtime, content)
         return content
 
     def workspace_path(self, chat_id: str) -> Path:
@@ -442,12 +478,12 @@ class Memory:
     @property
     def cache_hits(self) -> int:
         """Total number of cache hits across memory and agents caches."""
-        return self._cache_hits
+        return self._memory_cache.hits + self._agents_cache.hits
 
     @property
     def cache_misses(self) -> int:
         """Total number of cache misses across memory and agents caches."""
-        return self._cache_misses
+        return self._memory_cache.misses + self._agents_cache.misses
 
     def log_recovery_event(
         self,
