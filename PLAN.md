@@ -488,3 +488,76 @@ not addressed in Phases 1–13.
 - [x] **Add `dependabot.yml` for automated dependency update PRs** — Dependencies are pinned with `~=` version specifiers but there's no automated process to create PRs when new versions are published. Add a `.github/dependabot.yml` configured for pip and GitHub Actions with weekly review cadence and auto-assign to maintainers. (`.github/dependabot.yml`, new file)
 
 - [x] **Bump `--cov-fail-under` from 70 to 75 in CI** — Phase 14 adds 7+ new tests (above). If coverage exceeds 75% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 13 targeting 75% by 2026-06-15. (`.github/workflows/ci.yml:111`)
+
+---
+
+## Phase 15 — Senior Review (2026-04-25)
+
+Generated from a fifteenth-pass codebase audit focusing on critical
+correctness bugs, dead code elimination, resource leaks, architectural
+decomposition, security hardening, and observability gaps not addressed
+in Phases 1–14.
+
+---
+
+### Critical Bugs
+
+- [x] **Fix `TokenUsage` global counter double-counting in `LLMClient._raw_chat()` and `chat_stream()`** — Both methods call `self._token_usage.add(prompt_tokens, completion_tokens)` (line 263 / line 493) then immediately call `self._token_usage.add_for_chat(chat_id, ...)` (line 265 / line 495) when `chat_id` is provided. `add_for_chat()` already increments `prompt_tokens`, `completion_tokens`, `total_tokens`, and `request_count` globally (lines 91–94), identical to what `add()` does (lines 82–86). When `chat_id` is present (the normal case), every LLM call double-counts all four global counters, making the session totals reported in `/metrics` and shutdown logs 2× the actual usage. Fix by removing the standalone `add()` call when `chat_id` is provided, or restructuring so `add_for_chat()` only handles per-chat tracking without re-incrementing globals. (`src/llm.py:263-265, 493-495, 80-107`)
+
+- [ ] **Fix `process_scheduled()` persisting raw unsanitized `prompt` instead of `safe_prompt`** — `process_scheduled()` sanitizes the prompt at line 727 (`safe_prompt = sanitize_user_input(prompt)`) and injects the sanitized version into the LLM context at line 742. However, the `save_messages_batch()` call at line 810 persists `{"role": "user", "content": prompt}` using the *raw* unsanitized `prompt` parameter, not `safe_prompt`. This inconsistency means: (a) if the prompt contained injection patterns, the persisted conversation history retains them, potentially re-injecting on future context builds; (b) the persisted content doesn't match what the LLM actually saw. Fix by replacing `content: prompt` with `content: safe_prompt` in the batch write. (`src/bot.py:806-817`)
+
+### Dead Code
+
+- [ ] **Remove unused `SlidingWindowTracker.check_and_record()` method** — `check_and_record()` (line 189 in `rate_limiter.py`) is the convenience "check + record in one call" API on `SlidingWindowTracker`. Every production caller (`RateLimiter.check_rate_limit()`, `RateLimiter.check_message_rate()`) uses the two-phase `check_only()` + `record()` pattern instead, to avoid consuming slots on denied requests. `check_and_record()` is only exercised in `tests/unit/test_rate_limiter.py`. Remove the method and update the tests to use the two-phase API, reducing the public surface and eliminating confusion about which API to use. (`src/rate_limiter.py:189-228`, `tests/unit/test_rate_limiter.py`)
+
+### Refactoring
+
+- [ ] **Extract shared topological sort from `BuilderOrchestrator._resolve_order()` and `StartupOrchestrator._resolve_order()` into a generic utility** — Both orchestrators implement identical topological-sort logic: build a name→spec map, recursive DFS with cycle detection via a `visiting` set, append to `resolved` list on completion. The only difference is the spec type (`BuilderComponentSpec` vs `ComponentSpec`). Extract into `src/utils/dag.py` as a generic `topological_sort(specs, key, depends_on_key)` function that both orchestrators call, eliminating the duplicated 20-line algorithm. (`src/builder.py:416-444`, `src/core/startup.py`)
+
+- [ ] **Decompose `Database` class into focused modules** — `db.py` currently handles 7 distinct responsibilities: JSONL message persistence, message indexing, generation tracking, conversation-history compression, file-handle pooling, write circuit breaking, and checksum calculations. At ~1800 lines it's the largest file in the codebase. Extract into: `MessageStore` (JSONL read/write, indexing), `CompressionService` (compression threshold detection, summary generation), `FileHandlePool` (pooled append handles with LRU eviction), keeping `Database` as a thin facade that delegates to these modules. Each module becomes independently testable and the overall architecture becomes clearer. (`src/db/db.py`, new files `src/db/message_store.py`, `src/db/compression.py`, `src/db/file_pool.py`)
+
+- [ ] **Consolidate `build_context()` parameter list into a typed `ContextBuildOptions` dataclass** — `build_context()` in `src/core/context_builder.py` accepts 10+ parameters (`db`, `config`, `chat_id`, `memory_content`, `agents_md`, `instruction`, `channel_prompt`, `project_context`, `topic_summary`, `compressed_summary`). Group the content-level parameters into a `ContextBuildOptions` dataclass so the function signature is `(db, config, chat_id, opts: ContextBuildOptions)` — making it easier to add new context sources without changing the call signature in every caller. (`src/core/context_builder.py`, `src/core/context_assembler.py`)
+
+### Performance Optimization
+
+- [ ] **Cache `Memory._resolve_chat_path()` results to avoid repeated path validation on hot reads** — `read_memory()` and `read_agents_md()` both call `_chat_dir()` → `_resolve_chat_path()` on every invocation, which runs `sanitize_path_component()` + `Path` construction + `_validate_path()` (a `resolve()` + `is_relative_to()` check). For a high-volume bot processing dozens of messages per second across active chats, this redundant path resolution adds measurable overhead. Add an LRU cache on `_resolve_chat_path()` keyed by `chat_id` (bounded by `MAX_LRU_CACHE_SIZE`), invalidated when `ensure_workspace()` creates a new chat. (`src/memory.py:192-196, 254-261, 454-458`)
+
+- [ ] **Avoid redundant `asyncio.to_thread()` hop in `MtimeCache.read()` when the file doesn't exist** — `_stat_and_read()` is always dispatched to a thread pool via `asyncio.to_thread()`, even when the previous call already returned `None` (file doesn't exist). For a new chat without `MEMORY.md`, every context assembly pays the thread-hop cost (~0.1ms) to rediscover the file doesn't exist. Track "known missing" files in the cache and skip the thread hop, rechecking on a TTL (e.g., every 30 seconds) to detect when the file is created. (`src/memory.py:132-158`)
+
+### Error Handling & Resilience
+
+- [ ] **Close `ToolExecutor._audit_logger` during bot shutdown** — `ToolExecutor._audit()` lazily creates a `SkillAuditLogger` instance at line 74 and stores it in `self._audit_logger`, but `ToolExecutor` has no `close()` method and `Bot`'s shutdown sequence doesn't close it. The `SkillAuditLogger` may hold open file handles that are never flushed or released during graceful shutdown. Add a `close()` method to `ToolExecutor` that flushes and closes the audit logger, and call it from `perform_shutdown()` alongside the other cleanup steps. (`src/core/tool_executor.py:60-75`, `src/lifecycle.py`)
+
+- [ ] **Guard `process_scheduled()` against `None` return from `_context_assembler.assemble()`** — `assemble()` returns a `ContextResult` object, but if all 5 concurrent reads fail AND `build_context()` also fails, the method could raise an unhandled exception that propagates to the caller. While individual read failures are handled via `return_exceptions=True`, the `build_context()` call at line 159 is outside the gather and could raise. Wrap in a try/except to log the failure and return `None` gracefully, consistent with other error paths in `process_scheduled()`. (`src/core/context_assembler.py:159-170`, `src/bot.py:720-724`)
+
+### Security
+
+- [ ] **Add `message_id` and `sender_id` validation in `IncomingMessage.__post_init__()`** — `__post_init__()` validates `chat_id` (length, character set) and `channel_type`, but `message_id` and `sender_id` are accepted as arbitrary strings. A malicious `message_id` (e.g., containing path separators, extremely long, or with control characters) could corrupt dedup indexes, appear unsanitized in logs, or cause unexpected behavior in crash recovery. Add length validation (e.g., max 200 chars) and character-set validation (alphanumeric + limited punctuation) to both fields, mirroring the `chat_id` validation pattern. (`src/channels/base.py:146-161`)
+
+- [ ] **Redact `chat_id` (phone numbers) in safe-mode terminal output** — `BaseChannel.send_message()` displays `f"\n📤 Outgoing to {chat_id}:"` (line 289) in safe mode. WhatsApp chat IDs are phone numbers (PII). When the bot runs on a shared terminal or is screen-shared, phone numbers are exposed. Truncate or hash the chat_id in the safe-mode preview (e.g., first 4 + last 4 digits), with the full ID only available in structured logs at DEBUG level. (`src/channels/base.py:287-293`)
+
+### Observability & Monitoring
+
+- [ ] **Add `custombot_scheduled_task_latency_seconds` Prometheus metric** — `_handle_message_inner()` tracks message processing latency via `track_message_latency()`, but `process_scheduled()` has no equivalent latency tracking. Operators cannot compare scheduled vs. interactive message performance, or detect when scheduled tasks are consistently slow. Add a `track_scheduled_task_latency()` method to `PerformanceMetrics` and expose it as a Prometheus histogram. (`src/bot.py:655-851`, `src/monitoring/performance.py`, `src/health/server.py`)
+
+- [ ] **Introduce typed event-name constants for `EventBus` emission** — Events are emitted with raw string literals: `"message_received"`, `"response_sent"`, `"skill_executed"`, `"scheduled_task_started"`, `"scheduled_task_completed"`, `"error_occurred"`. A typo in any of these would silently create a new event that no subscriber receives, breaking the plugin/monitoring contract without any error. Define an `EventName` constants class (or a `StrEnum`) in `src/core/event_bus.py` and use it in all `Event(name=...)` calls. This makes event names auditable via IDE find-references and catches typos at lint time. (`src/core/event_bus.py`, `src/bot.py`, `src/core/tool_executor.py`, `src/app.py`)
+
+### Test Coverage
+
+- [ ] **Add test for `TokenUsage` double-counting regression** — Create a test that calls `_raw_chat()` (or simulates its token-tracking logic) with `chat_id` provided. Verify that `prompt_tokens`, `completion_tokens`, `total_tokens`, and `request_count` are incremented exactly once, not doubled. This guards against the Phase 15 fix being reverted or the pattern being reintroduced in future refactoring. (`tests/unit/test_llm.py`)
+
+- [ ] **Add test for `process_scheduled()` persisting sanitized prompt** — After the fix to use `safe_prompt` in `save_messages_batch()`, add a test that creates a scheduled task with a prompt containing special characters or injection patterns. Verify that the persisted JSONL entry contains the sanitized version, not the raw input. (`tests/unit/test_bot.py`)
+
+- [ ] **Add test for shared topological sort utility** — Once `topological_sort()` is extracted into `src/utils/dag.py`, add tests for: (a) valid DAG with dependencies resolved in correct order, (b) circular dependency detection with informative error, (c) missing dependency detection, (d) empty input, (e) single node with no deps, (f) diamond dependency (A→B, A→C, B→D, C→D). (`tests/unit/test_dag.py`, new file)
+
+- [ ] **Add test for `ToolExecutor.close()` audit logger cleanup** — Verify that after `close()` is called, the `_audit_logger` is set to `None` and any buffered entries are flushed. Also verify that calling `close()` on a `ToolExecutor` that never executed a skill (audit logger never created) is a no-op. (`tests/unit/test_tool_executor.py`)
+
+- [ ] **Add test for `IncomingMessage` `message_id` and `sender_id` validation** — After adding validation to `__post_init__()`, test that: (a) valid IDs are accepted, (b) empty strings are rejected, (c) overly long strings are rejected, (d) strings with path separators or control characters are rejected, (e) the error messages are informative. (`tests/unit/test_incoming_message_validation.py` or extend existing)
+
+- [ ] **Add test for `Memory._resolve_chat_path()` caching correctness** — Verify that: (a) repeated calls with the same `chat_id` return the same `Path` object (or equivalent), (b) the cache is invalidated when `ensure_workspace()` creates a new chat, (c) invalid `chat_id` values raise `PathSecurityError` before caching, (d) the cache respects the max size bound. (`tests/unit/test_memory.py`)
+
+### DevOps / Infrastructure
+
+- [ ] **Bump `--cov-fail-under` from 75 to 80 in CI** — Phase 15 adds 5+ new tests (above). If coverage exceeds 80% after these additions, update the threshold to lock in the improvement. Target: 80% by 2026-07-01. (`.github/workflows/ci.yml`)
+
+- [ ] **Add `ruff` preview-mode check to CI for upcoming rule adoption** — `ruff` regularly adds new lint rules in preview mode before promoting them to stable. Add a non-blocking CI step (`ruff check --preview --exit-zero`) that logs preview-mode violations without failing the build, so the team can proactively adopt new rules before they become mandatory. (`.github/workflows/ci.yml`)

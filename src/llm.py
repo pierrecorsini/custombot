@@ -260,9 +260,10 @@ class LLMClient:
                 completion_tokens = usage.completion_tokens or 0
                 total_tokens = usage.total_tokens or (prompt_tokens + completion_tokens)
 
-            self._token_usage.add(prompt_tokens, completion_tokens)
             if chat_id:
                 self._token_usage.add_for_chat(chat_id, prompt_tokens, completion_tokens)
+            else:
+                self._token_usage.add(prompt_tokens, completion_tokens)
 
             corr_id = get_correlation_id()
             log.debug(
@@ -328,7 +329,7 @@ class LLMClient:
             chat_id: Optional chat ID for per-chat token tracking.
         """
         # Circuit breaker: reject immediately when provider is down
-        if await self._circuit_breaker.is_open():
+        if self._circuit_breaker.is_open():
             raise LLMError(
                 message="LLM provider is temporarily unavailable (circuit breaker open)",
                 suggestion="Please try again in a minute",
@@ -337,13 +338,13 @@ class LLMClient:
 
         try:
             result = await self._raw_chat(messages, tools=tools, timeout=timeout, chat_id=chat_id)
-            await self._circuit_breaker.record_success()
+            self._circuit_breaker.record_success()
             return result
         except LLMError:
-            await self._circuit_breaker.record_failure()
+            self._circuit_breaker.record_failure()
             raise
         except Exception as exc:
-            await self._circuit_breaker.record_failure()
+            self._circuit_breaker.record_failure()
             classified = classify_llm_error(exc)
             log.error(
                 "LLM error classified: %s → %s (code=%s)",
@@ -351,6 +352,10 @@ class LLMClient:
                 classified.message,
                 classified.error_code.value,
                 exc_info=True,
+            )
+            from src.monitoring.performance import get_metrics_collector
+            get_metrics_collector().track_llm_error(
+                classified.error_code.value if classified.error_code else "ERR_9000"
             )
             raise classified from exc
 
@@ -387,7 +392,7 @@ class LLMClient:
             the non-streaming :meth:`chat` return value).
         """
         # Circuit breaker: reject immediately when provider is down
-        if await self._circuit_breaker.is_open():
+        if self._circuit_breaker.is_open():
             raise LLMError(
                 message="LLM provider is temporarily unavailable (circuit breaker open)",
                 suggestion="Please try again in a minute",
@@ -486,9 +491,10 @@ class LLMClient:
                 else:
                     prompt_tokens = usage_data.prompt_tokens or 0
                     completion_tokens = usage_data.completion_tokens or 0
-                self._token_usage.add(prompt_tokens, completion_tokens)
                 if chat_id:
                     self._token_usage.add_for_chat(chat_id, prompt_tokens, completion_tokens)
+                else:
+                    self._token_usage.add(prompt_tokens, completion_tokens)
 
             # Reconstruct a ChatCompletion object from accumulated data
             from openai.types.chat import ChatCompletion as _CC
@@ -545,6 +551,10 @@ class LLMClient:
                 classified.message,
                 classified.error_code.value,
                 exc_info=True,
+            )
+            from src.monitoring.performance import get_metrics_collector
+            get_metrics_collector().track_llm_error(
+                classified.error_code.value if classified.error_code else "ERR_9000"
             )
             raise classified from exc
         finally:
