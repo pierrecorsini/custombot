@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.channels.base import IncomingMessage
+from src.channels.base import ChannelType, IncomingMessage
 from src.routing import (
     MatchingContext,
     RoutingEngine,
@@ -43,7 +43,7 @@ def make_msg(
     sender_name: str = "Alice",
     text: str = "Hello",
     timestamp: float = 1700000000.0,
-    channel_type: str = "whatsapp",
+    channel_type: ChannelType | str = ChannelType.WHATSAPP,
     fromMe: bool = False,
     toMe: bool = False,
     is_historical: bool = False,
@@ -112,14 +112,14 @@ class TestMatchingContext:
         ctx = MatchingContext(
             sender_id="5511999990000",
             chat_id="chat-001",
-            channel_type="whatsapp",
+            channel_type=ChannelType.WHATSAPP,
             text="Hello world",
             fromMe=True,
             toMe=False,
         )
         assert ctx.sender_id == "5511999990000"
         assert ctx.chat_id == "chat-001"
-        assert ctx.channel_type == "whatsapp"
+        assert ctx.channel_type == ChannelType.WHATSAPP
         assert ctx.text == "Hello world"
         assert ctx.fromMe is True
         assert ctx.toMe is False
@@ -161,7 +161,7 @@ class TestMatchingContext:
 
         assert ctx.sender_id == "5511988880000"
         assert ctx.chat_id == "group-123"
-        assert ctx.channel_type == "telegram"
+        assert ctx.channel_type == "telegram"  # third-party string preserved
         assert ctx.text == "Hi from Telegram"
         assert ctx.fromMe is True
         assert ctx.toMe is True
@@ -792,13 +792,13 @@ class TestRoutingEngineMatch:
     def test_specific_channel_matches(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(channel="whatsapp")]
-        msg = make_msg(channel_type="whatsapp")
+        msg = make_msg(channel_type=ChannelType.WHATSAPP)
         assert engine.match(msg) == "chat.agent.md"
 
     def test_specific_channel_no_match(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(channel="telegram")]
-        msg = make_msg(channel_type="whatsapp")
+        msg = make_msg(channel_type=ChannelType.WHATSAPP)
         assert engine.match(msg) is None
 
     def test_channel_regex_pattern(self):
@@ -1341,16 +1341,18 @@ class TestRoutingMatchCache:
         assert len(engine._match_cache) == 1
 
         # Manually age the cache entry to simulate TTL expiry
-        key = list(engine._match_cache.keys())[0]
-        old_ts = engine._match_cache[key][0]
-        engine._match_cache[key] = (old_ts - 100.0, engine._match_cache[key][1])
+        # Access BoundedOrderedDict internal storage to backdate the timestamp
+        key = list(engine._match_cache._cache.keys())[0]
+        value, _ = engine._match_cache._cache[key]
+        engine._match_cache._cache[key] = (value, engine._match_cache._now() - 100.0)
 
         # Next match should re-evaluate (cache miss)
         result = engine.match(msg)
         assert result == "exp.md"
         # The expired entry was removed and a fresh one inserted
         assert len(engine._match_cache) == 1
-        assert engine._match_cache[key][0] != old_ts
+        _, new_ts = engine._match_cache._cache[key]
+        assert new_ts != engine._match_cache._now() - 100.0
 
     def test_cache_cleared_on_load_rules(self, tmp_path: Path):
         """load_rules() clears the match cache."""
@@ -2110,7 +2112,7 @@ class TestCacheInvalidationOnFileModification:
         # Cache was rebuilt (cleared by load_rules, then repopulated)
         assert len(engine._match_cache) == 1
         # The old rule object should NOT be in the cache anymore
-        cached_result = list(engine._match_cache.values())[0][1]
+        cached_result = list(engine._match_cache.values())[0]
         assert cached_result[0].id == "modified"
 
     def test_new_rule_appears_after_file_creation(self, tmp_path: Path):
@@ -2140,7 +2142,7 @@ class TestCacheInvalidationOnFileModification:
 
         # Cache was rebuilt with new result
         assert len(engine._match_cache) == 1
-        cached_result = list(engine._match_cache.values())[0][1]
+        cached_result = list(engine._match_cache.values())[0]
         assert cached_result[0].id == "new-rule"
 
     def test_removed_rule_disappears_after_file_deletion(self, tmp_path: Path):
@@ -2175,7 +2177,7 @@ class TestCacheInvalidationOnFileModification:
 
         # Cache was rebuilt
         assert len(engine._match_cache) == 1
-        cached_result = list(engine._match_cache.values())[0][1]
+        cached_result = list(engine._match_cache.values())[0]
         assert cached_result == (None, None)
 
     def test_debounce_prevents_excessive_reloads(self, tmp_path: Path):
@@ -2250,7 +2252,7 @@ class TestCacheInvalidationOnFileModification:
         assert rule is None
         assert inst is None
         assert len(engine._match_cache) == 1
-        cached_result = list(engine._match_cache.values())[0][1]
+        cached_result = list(engine._match_cache.values())[0]
         assert cached_result == (None, None)
 
         # Step 5: Recreate file — cache invalidated, new result cached
@@ -2328,3 +2330,206 @@ class TestCacheInvalidationOnFileModification:
         assert rule is not None
         assert rule.id == "first-updated"  # Still matches the catch-all first rule
         assert len(engine._match_cache) == 2  # Now both are cached again
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tests for _is_stale() debounce behavior
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from src.constants import ROUTING_WATCH_DEBOUNCE_SECONDS
+
+
+class TestIsStaleDebounce:
+    """Verify the time-based debounce inside RoutingEngine._is_stale().
+
+    _is_stale() short-circuits when the elapsed time since the last check is
+    less than ROUTING_WATCH_DEBOUNCE_SECONDS (1.0 s).  Only when the debounce
+    window has elapsed does it update _last_stale_check and compare mtimes.
+    """
+
+    # -- (a) Two calls within debounce window → _scan_file_mtimes called once --
+
+    def test_scan_called_once_within_debounce_window(self, tmp_path: Path):
+        """_scan_file_mtimes() is NOT called on the second _is_stale() within the debounce window."""
+        (tmp_path / "a.md").write_text(
+            "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        # Force the first call to pass the debounce gate.
+        engine._last_stale_check = 0.0
+        assert engine._is_stale() is False
+
+        with patch.object(engine, "_scan_file_mtimes", wraps=engine._scan_file_mtimes) as mock_scan:
+            # Second call — still within the debounce window → should NOT scan.
+            result = engine._is_stale()
+            assert result is False
+            mock_scan.assert_not_called()
+
+    # -- (b) Call after debounce interval triggers fresh scan --
+
+    def test_fresh_scan_after_debounce_interval(self, tmp_path: Path):
+        """After ROUTING_WATCH_DEBOUNCE_SECONDS, _is_stale() scans mtimes again."""
+        (tmp_path / "a.md").write_text(
+            "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        # First call — passes debounce gate.
+        engine._last_stale_check = 0.0
+        assert engine._is_stale() is False
+        first_check_time = engine._last_stale_check
+        assert first_check_time > 0.0
+
+        # Advance time past the debounce window.
+        with patch("src.routing.time.monotonic", return_value=first_check_time + ROUTING_WATCH_DEBOUNCE_SECONDS + 0.1):
+            with patch.object(engine, "_scan_file_mtimes", wraps=engine._scan_file_mtimes) as mock_scan:
+                result = engine._is_stale()
+                # mtimes haven't changed → False
+                assert result is False
+                mock_scan.assert_called_once()
+
+    def test_multiple_debounce_windows_scan_each_time(self, tmp_path: Path):
+        """Each debounce-window boundary triggers exactly one scan."""
+        (tmp_path / "a.md").write_text(
+            "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        base_time = 1000.0
+
+        with patch("src.routing.time.monotonic") as mock_clock:
+            # Window 1: first call at t=1000
+            mock_clock.return_value = base_time
+            engine._last_stale_check = 0.0
+            assert engine._is_stale() is False
+            assert engine._last_stale_check == base_time
+
+            # Window 1: second call at t=1000.5 — still debounced
+            mock_clock.return_value = base_time + 0.5
+            assert engine._is_stale() is False
+            assert engine._last_stale_check == base_time  # unchanged
+
+            # Window 2: call at t=1001.1 — debounce expired
+            mock_clock.return_value = base_time + ROUTING_WATCH_DEBOUNCE_SECONDS + 0.1
+            assert engine._is_stale() is False
+            assert engine._last_stale_check == base_time + ROUTING_WATCH_DEBOUNCE_SECONDS + 0.1
+
+            # Window 2: another debounced call
+            mock_clock.return_value = base_time + ROUTING_WATCH_DEBOUNCE_SECONDS + 0.5
+            assert engine._is_stale() is False
+            assert engine._last_stale_check == base_time + ROUTING_WATCH_DEBOUNCE_SECONDS + 0.1  # unchanged
+
+    # -- (c) Rules reloaded when instruction file modified after debounce --
+
+    def test_stale_returns_true_when_file_modified_after_debounce(self, tmp_path: Path):
+        """_is_stale() returns True after a file is modified and debounce has elapsed."""
+        (tmp_path / "a.md").write_text(
+            "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+        original_mtimes = dict(engine._file_mtimes)
+
+        # First check — no changes.
+        engine._last_stale_check = 0.0
+        assert engine._is_stale() is False
+        first_check_time = engine._last_stale_check
+
+        # Modify the file AFTER the first check so mtimes differ.
+        (tmp_path / "a.md").write_text(
+            "---\nrouting:\n  id: a-rule-v2\n  priority: 1\n---\n\n# Updated\n"
+        )
+
+        # Advance time past debounce and verify stale is detected.
+        with patch("src.routing.time.monotonic", return_value=first_check_time + ROUTING_WATCH_DEBOUNCE_SECONDS + 0.1):
+            assert engine._is_stale() is True
+
+    def test_stale_detects_new_file_after_debounce(self, tmp_path: Path):
+        """A new .md file appearing after debounce triggers a stale detection."""
+        (tmp_path / "existing.md").write_text(
+            "---\nrouting:\n  id: existing\n  priority: 1\n---\n\n# Existing\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        # First check — no changes.
+        engine._last_stale_check = 0.0
+        assert engine._is_stale() is False
+        first_check_time = engine._last_stale_check
+
+        # Add a new file.
+        (tmp_path / "new.md").write_text(
+            "---\nrouting:\n  id: new-rule\n  priority: 2\n---\n\n# New\n"
+        )
+
+        # After debounce window, stale should be True.
+        with patch("src.routing.time.monotonic", return_value=first_check_time + ROUTING_WATCH_DEBOUNCE_SECONDS + 0.1):
+            assert engine._is_stale() is True
+
+    def test_stale_detects_deleted_file_after_debounce(self, tmp_path: Path):
+        """Deleting a .md file after debounce triggers a stale detection."""
+        (tmp_path / "a.md").write_text(
+            "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
+        )
+        (tmp_path / "b.md").write_text(
+            "---\nrouting:\n  id: b-rule\n  priority: 2\n---\n\n# B\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+        assert len(engine._file_mtimes) == 2
+
+        # First check — no changes.
+        engine._last_stale_check = 0.0
+        assert engine._is_stale() is False
+        first_check_time = engine._last_stale_check
+
+        # Delete a file.
+        (tmp_path / "b.md").unlink()
+
+        # After debounce, stale should be True.
+        with patch("src.routing.time.monotonic", return_value=first_check_time + ROUTING_WATCH_DEBOUNCE_SECONDS + 0.1):
+            assert engine._is_stale() is True
+
+    # -- Boundary: exactly at debounce threshold --
+
+    def test_exactly_at_debounce_threshold_triggers_scan(self, tmp_path: Path):
+        """At exactly ROUTING_WATCH_DEBOUNCE_SECONDS, the debounce should NOT short-circuit."""
+        (tmp_path / "a.md").write_text(
+            "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        base_time = 500.0
+        engine._last_stale_check = base_time
+
+        # At exactly debounce threshold: now - last == ROUTING_WATCH_DEBOUNCE_SECONDS
+        # The condition is `now - last < DEBOUNCE` (strict less-than),
+        # so equal means the condition is False → scan proceeds.
+        with patch("src.routing.time.monotonic", return_value=base_time + ROUTING_WATCH_DEBOUNCE_SECONDS):
+            with patch.object(engine, "_scan_file_mtimes", return_value=engine._file_mtimes) as mock_scan:
+                result = engine._is_stale()
+                assert result is False
+                mock_scan.assert_called_once()
+
+    # -- Initial state: fresh engine always scans first time --
+
+    def test_fresh_engine_first_call_always_scans(self, tmp_path: Path):
+        """With _last_stale_check=0.0 (default), the first _is_stale() always passes the debounce gate."""
+        (tmp_path / "a.md").write_text(
+            "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+
+        assert engine._last_stale_check == 0.0
+
+        with patch.object(engine, "_scan_file_mtimes", return_value=engine._file_mtimes) as mock_scan:
+            result = engine._is_stale()
+            assert result is False
+            mock_scan.assert_called_once()
+        assert engine._last_stale_check > 0.0

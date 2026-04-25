@@ -473,7 +473,7 @@ not addressed in Phases 1–13.
 
 - [x] **Add test for `Memory.write_memory()` cache invalidation** — After `write_memory()` is called, the mtime cache for that chat should be invalidated so the next `read_memory()` re-reads from disk. Verify: (a) `_memory_cache.pop(chat_id)` is called, (b) the next read reflects the new content, (c) the cache miss counter increments. (`tests/unit/test_memory.py`)
 
-- [ ] **Add test for `RoutingEngine._is_stale()` debounce behavior** — `_is_stale()` debounces mtime checks to avoid scanning on every match. Add a test verifying: (a) two calls within `ROUTING_WATCH_DEBOUNCE_SECONDS` only scan once, (b) a call after the debounce interval triggers a fresh scan, (c) rules are reloaded when an instruction file is modified. (`tests/unit/test_routing.py`)
+- [x] **Add test for `RoutingEngine._is_stale()` debounce behavior** — `_is_stale()` debounces mtime checks to avoid scanning on every match. Add a test verifying: (a) two calls within `ROUTING_WATCH_DEBOUNCE_SECONDS` only scan once, (b) a call after the debounce interval triggers a fresh scan, (c) rules are reloaded when an instruction file is modified. (`tests/unit/test_routing.py`)
 
 - [ ] **Add integration test for `process_scheduled()` end-to-end with event emission** — Once event emission is added to `process_scheduled()`, verify: (a) `scheduled_task_started` event is emitted with correct `chat_id`, (b) `scheduled_task_completed` event is emitted after the response is persisted, (c) event data includes the response length. Subscribe a mock handler to verify emission. (`tests/integration/test_scheduled_pipeline.py`)
 
