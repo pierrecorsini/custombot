@@ -483,7 +483,7 @@ not addressed in Phases 1–13.
 
 ### DevOps / Infrastructure
 
-- [ ] **Add pip dependency caching to CI for faster builds** — The CI pipeline installs dependencies from scratch on every run (`pip install -r requirements.txt`). Add `actions/cache` with `~/.cache/pip` keyed on `requirements*.txt` hash to reduce install time from ~30s to ~5s on cache hit. (`.github/workflows/ci.yml`)
+- [x] **Add pip dependency caching to CI for faster builds** — The CI pipeline installs dependencies from scratch on every run (`pip install -r requirements.txt`). Add `actions/cache` with `~/.cache/pip` keyed on `requirements*.txt` hash to reduce install time from ~30s to ~5s on cache hit. (`.github/workflows/ci.yml`)
 
 - [ ] **Add `dependabot.yml` for automated dependency update PRs** — Dependencies are pinned with `~=` version specifiers but there's no automated process to create PRs when new versions are published. Add a `.github/dependabot.yml` configured for pip and GitHub Actions with weekly review cadence and auto-assign to maintainers. (`.github/dependabot.yml`, new file)
 
