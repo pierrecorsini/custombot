@@ -397,3 +397,94 @@ production readiness gaps not addressed in Phases 1–12.
 - [x] **Add Docker health check with configurable timeout via build arg** — The Dockerfile's `HEALTHCHECK` has hardcoded `--timeout=5s` and `--interval=30s`. In production, operators may need different intervals (e.g., longer timeout for slow networks). Add `ARG HEALTH_INTERVAL=30s` and `ARG HEALTH_TIMEOUT=5s` to the Dockerfile so they can be overridden at build time. (`Dockerfile:75-76`)
 
 - [x] **Bump `--cov-fail-under` from 65 to 70 in CI** — Phase 13 adds 7 new tests (above). If coverage exceeds 70% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 12. (`.github/workflows/ci.yml:89`)
+
+---
+
+## Phase 14 — Senior Review (2026-04-25)
+
+Generated from a fourteenth-pass codebase audit focusing on architectural
+consolidation, runtime correctness, lock-model mismatches, observability
+gaps, PII exposure, test-coverage expansion, and CI pipeline efficiency
+not addressed in Phases 1–13.
+
+---
+
+### Refactoring
+
+- [x] **Extract `_build_bot()` component initialization into a declarative registry mirroring `StartupOrchestrator`** — `_build_bot()` in `builder.py` is ~235 lines with 10 sequential initialization blocks following the same pattern (log init → create component → time → log ready → progress.advance). `Application._startup()` was refactored into `StartupOrchestrator` in Phase 11 but the builder wasn't. Extract into a `BuilderOrchestrator` accepting `ComponentSpec` steps so component initialization is data-driven, testable, and extensible without modifying `_build_bot()` directly. (`src/builder.py:54-290`)
+
+- [ ] **Consolidate `VectorMemory._embed_cache` eviction into `BoundedOrderedDict`** — Phase 12 consolidated `LRUDict` / `LRULockCache` / `TokenUsage._per_chat` into `BoundedOrderedDict`, but `VectorMemory._embed_cache` (an `OrderedDict` at line 81 with manual `popitem(last=False)` eviction at lines 347–348 and 443–444) still duplicates this pattern. Replace with `BoundedOrderedDict(max_size=256, eviction="half")` to eliminate the third independent eviction implementation. (`src/vector_memory.py:81, 347-348, 443-444`)
+
+- [ ] **Consolidate `RoutingEngine._match_cache` TTL+LRU logic into `BoundedOrderedDict`** — `_match_cache` (an `OrderedDict` at line 246) implements its own TTL expiry (`_cache_get` lines 369–380) and LRU eviction (`_cache_put` lines 382–388) identical to what `BoundedOrderedDict` already provides. Replace with `BoundedOrderedDict(max_size=ROUTING_MATCH_CACHE_MAX_SIZE, eviction="half", ttl=ROUTING_MATCH_CACHE_TTL_SECONDS)` to eliminate the fourth independent cache implementation. (`src/routing.py:246, 368-388`)
+
+- [ ] **Consolidate `_IPLimiter._trackers` half-eviction into `BoundedOrderedDict`** — `_IPLimiter` in `health/server.py` (lines 76–97) implements yet another LRU-ordered dict with half-eviction (`popitem(last=False)` in a loop at lines 93–94). Replace with `BoundedOrderedDict(max_size=max_ips, eviction="half")` for consistency. (`src/health/server.py:76-97`)
+
+- [ ] **Extract `_build_message_record()` inline imports to module-level** — `_build_message_record()` in `db.py` imports `detect_injection` and `sanitize_user_input` from `src.security.prompt_injection` *inside the function body* at lines 1027–1031. This runs on every user-role message write, adding import overhead (module is cached, but the name lookup still occurs). Move to module-level imports behind `TYPE_CHECKING` or lazy-import at module init. (`src/db/db.py:1027-1031`)
+
+- [ ] **Unify `Memory._memory_cache` and `Memory._agents_cache` into a single generic cache helper** — Both caches are `LRUDict` instances with identical mtime-based validation logic (`_stat_and_read` → check mtime → return cached or re-read). The only difference is the file name and cache dict. Extract into a generic `MtimeCache` helper that encapsulates the `(mtime, content)` tuple and hit/miss tracking, reducing `read_memory()` and `read_agents_md()` to one-liners. (`src/memory.py:88-89, 189-215, 408-436`)
+
+### Performance Optimization
+
+- [ ] **Eliminate double file-open in `_read_file_lines()` for large files** — `_read_file_lines()` opens the file twice for files ≥64KB: once in binary mode for the mmap reverse-seek (line 1710), then again in text mode to read the final region (line 1746). For large files, this creates two file handles and two seek operations. Refactor to decode the mmap region directly using `mm[pos:].decode("utf-8")` instead of re-opening in text mode, eliminating the second `open()` syscall and the associated OS overhead. (`src/db/db.py:1710-1753`)
+
+- [ ] **Replace `RoutingEngine._scan_file_mtimes()` glob with `os.scandir()`** — `_scan_file_mtimes()` calls `self._instructions_dir.glob("*.md")` on every stale check (debounced to once per `ROUTING_WATCH_DEBOUNCE_SECONDS`). `glob()` internally lists all entries and filters by pattern. `os.scandir()` is faster because it returns `DirEntry` objects with cached `stat()` results and avoids the pattern-matching overhead. For directories with many instruction files, this reduces the stale-check cost by ~2x. (`src/routing.py:269-279`)
+
+- [ ] **Add connection-pool warmup for `VectorMemory` SQLite reads** — `VectorMemory._get_read_connection()` creates a new SQLite connection on first access per thread. During startup, the first search query pays the sqlite-vec extension loading cost (~5ms). Pre-warm one read connection during `_step_bot_components()` by calling `_get_read_connection()` once after `connect()`, so the first user-facing query doesn't pay this latency. (`src/vector_memory.py:172-196`, `src/core/startup.py:168-184`)
+
+- [ ] **Lazy-init `Bot._audit_logger` (`SkillAuditLogger`) only when skills are actually executed** — `Bot.__init__` creates a `SkillAuditLogger` instance at line 214, which opens the audit log directory on every bot startup even if no skills are ever invoked (e.g., a bot that only handles simple chat). Defer creation to first use inside `ToolExecutor.execute()` to avoid unnecessary filesystem I/O during startup. (`src/bot.py:214`)
+
+### Error Handling & Resilience
+
+- [ ] **Add `OSError` recovery in `_FileHandlePool.get_or_open()`** — `get_or_open()` calls `path.open("a", ...)` without catching `OSError`. If the OS file descriptor limit is reached (`EMFILE`) or permissions are denied, the exception propagates to `_append_to_file()` and ultimately crashes the DB write with an opaque error. Add a try/except around `path.open()` that invalidates stale handles, retries once after evicting all pooled handles, and raises a descriptive `DatabaseError` on persistent failure. (`src/db/db.py:236-260`)
+
+- [ ] **Add `EventBus` emission to `Bot.process_scheduled()` for observability parity** — `_process()` emits `message_received` and `response_sent` events, but `process_scheduled()` emits no events at all. This means scheduled tasks are invisible to EventBus subscribers (monitoring, plugins). Add `scheduled_task_started` and `scheduled_task_completed` events so that monitoring dashboards can track scheduled task execution alongside user messages. (`src/bot.py:659-826`)
+
+- [ ] **Handle `CircuitBreaker` lock-model mismatch for database writes** — `CircuitBreaker` uses `asyncio.Lock` (line 64) but `Database._guarded_write()` calls it from `asyncio.to_thread()` contexts via `_insert_entry`, `_append_to_file`, etc. When `_write_breaker.is_open()` is called from a thread, the `asyncio.Lock` raises `RuntimeError` because there's no running event loop in the thread. Audit all call sites where the DB write breaker is used from thread contexts and either switch to `threading.Lock` or wrap the calls with `asyncio.run_coroutine_threadsafe()`. (`src/utils/circuit_breaker.py:64`, `src/db/db.py:424-452`)
+
+- [ ] **Add graceful handling for `_confirm_send()` when stdin is `/dev/null`** — When the bot runs as a systemd service, `stdin` may be `/dev/null`. `input()` immediately returns an empty string, which doesn't match `"y"` or `"n"` and burns through all `SAFE_MODE_MAX_CONFIRM_RETRIES` attempts before auto-rejecting. The user gets no feedback about why sends are being rejected. Detect `sys.stdin.isatty()` at the top of `_confirm_send()` and log a clear warning: "Safe mode requires an interactive terminal — send auto-rejected." (`src/channels/base.py:347-373`)
+
+- [ ] **Downgrade `Memory.read_agents_md()` `FileNotFoundError` log level from ERROR to DEBUG** — When `ensure_workspace()` hasn't been called yet for a new scheduled task, `read_agents_md()` raises `FileNotFoundError`. The `ContextAssembler` handles this by substituting `DEFAULT_AGENTS_MD`, but the `read_agents_md()` exception handler at line 418 logs at ERROR level. For new chats this is expected behavior — downgrade to DEBUG to avoid false-positive alert fatigue. (`src/memory.py:418-421`)
+
+### Security
+
+- [ ] **Redact `chat_id` values (phone numbers) in `/metrics` per-chat token output** — `TokenUsage.get_top_chats()` returns raw `chat_id` values in the Prometheus metrics output. WhatsApp chat IDs are phone numbers (e.g., `1234567890@s.whatsapp.net`), which are PII. Exposing them in metrics endpoints (even HMAC-protected) violates data-minimization principles. Hash or truncate chat IDs in the Prometheus output (e.g., first 8 chars of SHA-256) while keeping the full mapping internal for operator queries. (`src/llm.py:109-120`, `src/health/server.py`)
+
+- [ ] **Add `chat_id` validation in `TaskScheduler.add_task()` before path construction** — `add_task()` passes `chat_id` directly to `_prepare_task()` and `_persist()` without any validation. While `_resolve_tasks_path()` calls `sanitize_path_component()`, the in-memory `self._tasks[chat_id]` dict is keyed by the raw `chat_id`. A malformed `chat_id` (e.g., with path separators) would create an inconsistent state where the dict key doesn't match the sanitized filesystem path. Add `_validate_chat_id()` from `db.py` at the top of `add_task()`. (`src/scheduler.py:198-208`, `src/db/db.py:165-181`)
+
+- [ ] **Add `prompt` length validation in `TaskScheduler._validate_task()`** — `_validate_task()` checks that `prompt` is a non-empty string but doesn't cap its length. A malicious or buggy skill could create a scheduled task with a multi-MB prompt that, when injected into the LLM context, exceeds token limits and wastes API credits. Add a `MAX_SCHEDULED_PROMPT_LENGTH` constant (e.g., 10_000 chars) and enforce it in `_validate_task()`. (`src/scheduler.py:150-165`, `src/constants.py`)
+
+### Observability & Monitoring
+
+- [ ] **Expose `Memory` cache hit/miss ratio as Prometheus metrics** — `Memory._cache_hits` and `_cache_misses` counters exist (lines 91–92) but are not exposed via the `/metrics` endpoint. For production operators, a low cache hit ratio indicates excessive filesystem reads that should be investigated. Add `custombot_memory_cache_hits_total` and `custombot_memory_cache_misses_total` counters to the Prometheus output. (`src/memory.py:91-92`, `src/monitoring/performance.py`, `src/health/server.py`)
+
+- [ ] **Add ReAct loop iteration progress logging** — The ReAct loop (`_react_loop`) is silent between iterations — only the final result is logged. For debugging complex multi-step tool-call chains, operators have no visibility into which iteration the loop is on or what tool calls are being executed in real-time. Add a structured DEBUG log at the top of each iteration with `iteration=N, max_iterations=M, tool_count=K` so operators can trace stuck loops without modifying code. (`src/bot.py:1101-1166`)
+
+- [ ] **Add `custombot_compression_summary_used_total` metric** — `_async_compressed_summary()` is called on every context assembly (line 131) but the result is only sometimes non-None (only when compression has occurred). Add a counter that increments when a compressed summary is actually used in context building, so operators can track compression effectiveness and identify chats that are hitting the compression threshold frequently. (`src/core/context_assembler.py:131`, `src/monitoring/performance.py`)
+
+- [ ] **Track and expose `VectorMemory` embedding cache hit ratio** — `VectorMemory._embed_cache` has a max size of 256 but no hit/miss counters. When the cache is too small for the workload, repeated embedding API calls waste latency and credits. Add counters (`custombot_embed_cache_hits_total`, `custombot_embed_cache_misses_total`) and expose via `/metrics`. (`src/vector_memory.py:81-82`)
+
+### Test Coverage
+
+- [ ] **Add test for `VectorMemory._embed_batch()` deduplication and cache resolution** — `_embed_batch()` has complex logic: LRU cache check → in-flight dedup → API call → future resolution. There's no test covering: (a) a batch where some texts are cached and some aren't, (b) duplicate texts within the same batch, (c) the count validation when API returns fewer embeddings than requested. (`tests/unit/test_vector_memory.py`)
+
+- [ ] **Add test for `_FileHandlePool` LRU eviction and stale-handle recovery** — `_FileHandlePool` manages a bounded pool of file handles with LRU eviction. No test verifies: (a) that handles are evicted when the pool exceeds `max_size`, (b) that a closed/stale handle is detected and reopened on next `get_or_open()`, (c) that `invalidate()` correctly removes a handle from the pool. (`tests/unit/test_db.py`)
+
+- [ ] **Add test for `CircuitBreaker` state transitions under concurrent HALF_OPEN probes** — When the circuit breaker transitions to HALF_OPEN, multiple concurrent callers may pass `is_open()` before any records a result. Verify that: (a) only one success is needed to close, (b) a failure from any caller re-opens, (c) concurrent `record_success()` and `record_failure()` don't corrupt the state. (`tests/unit/test_llm.py` or new file)
+
+- [ ] **Add test for `Memory.write_memory()` cache invalidation** — After `write_memory()` is called, the mtime cache for that chat should be invalidated so the next `read_memory()` re-reads from disk. Verify: (a) `_memory_cache.pop(chat_id)` is called, (b) the next read reflects the new content, (c) the cache miss counter increments. (`tests/unit/test_memory.py`)
+
+- [ ] **Add test for `RoutingEngine._is_stale()` debounce behavior** — `_is_stale()` debounces mtime checks to avoid scanning on every match. Add a test verifying: (a) two calls within `ROUTING_WATCH_DEBOUNCE_SECONDS` only scan once, (b) a call after the debounce interval triggers a fresh scan, (c) rules are reloaded when an instruction file is modified. (`tests/unit/test_routing.py`)
+
+- [ ] **Add integration test for `process_scheduled()` end-to-end with event emission** — Once event emission is added to `process_scheduled()`, verify: (a) `scheduled_task_started` event is emitted with correct `chat_id`, (b) `scheduled_task_completed` event is emitted after the response is persisted, (c) event data includes the response length. Subscribe a mock handler to verify emission. (`tests/integration/test_scheduled_pipeline.py`)
+
+- [ ] **Add test for `_read_file_lines()` double-open elimination** — After consolidating the mmap path to avoid re-opening the file, verify: (a) the returned lines are identical to the previous implementation, (b) files at exactly the 64KB boundary are handled correctly, (c) an empty file returns an empty list, (d) a file with only a header line returns an empty list. (`tests/unit/test_db.py`)
+
+- [ ] **Add test for `_IPLimiter` rate limiting with burst and cooldown** — Verify that: (a) requests within the limit are allowed, (b) requests exceeding the limit within the window are rejected with a `retry_after` value, (c) after the window expires, requests are allowed again, (d) LRU eviction works when `max_ips` is exceeded. (`tests/unit/test_health_security_headers.py` or new file)
+
+### DevOps / Infrastructure
+
+- [ ] **Add pip dependency caching to CI for faster builds** — The CI pipeline installs dependencies from scratch on every run (`pip install -r requirements.txt`). Add `actions/cache` with `~/.cache/pip` keyed on `requirements*.txt` hash to reduce install time from ~30s to ~5s on cache hit. (`.github/workflows/ci.yml`)
+
+- [ ] **Add `dependabot.yml` for automated dependency update PRs** — Dependencies are pinned with `~=` version specifiers but there's no automated process to create PRs when new versions are published. Add a `.github/dependabot.yml` configured for pip and GitHub Actions with weekly review cadence and auto-assign to maintainers. (`.github/dependabot.yml`, new file)
+
+- [ ] **Bump `--cov-fail-under` from 70 to 75 in CI** — Phase 14 adds 7+ new tests (above). If coverage exceeds 75% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 13 targeting 75% by 2026-06-15. (`.github/workflows/ci.yml:111`)
