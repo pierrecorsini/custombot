@@ -61,6 +61,16 @@ _CHANNEL_TYPE_RE = re.compile(r"^[a-z0-9_]+$")
 # log lines, or metric labels.
 _CHAT_ID_RE = re.compile(r"^[a-zA-Z0-9_\-.@]+$")
 
+# Pattern for valid message_id at the message boundary.
+# Mirrors _CHAT_ID_RE: alphanumeric, dash, underscore, dot, @.
+# Real-world values: WhatsApp "3EB0XXXXXX", CLI UUID "12345678-1234-1234-1234-123456789012".
+_MESSAGE_ID_RE = _CHAT_ID_RE
+
+# Pattern for valid sender_id at the message boundary.
+# Mirrors _CHAT_ID_RE: alphanumeric, dash, underscore, dot, @.
+# Real-world values: WhatsApp phone numbers "1234567890", CLI chat IDs "cli-abc123".
+_SENDER_ID_RE = _CHAT_ID_RE
+
 
 def _validate_chat_id(chat_id: object, *, max_length: int = 200) -> None:
     """Validate ``chat_id`` at the IncomingMessage boundary.
@@ -95,6 +105,78 @@ def _validate_chat_id(chat_id: object, *, max_length: int = 200) -> None:
     if not _CHAT_ID_RE.match(chat_id):
         raise ValueError(
             f"IncomingMessage.chat_id contains invalid characters: {chat_id!r}. "
+            "Only alphanumeric characters, dash, underscore, dot, and @ are allowed."
+        )
+
+
+def _validate_message_id(message_id: object, *, max_length: int = 200) -> None:
+    """Validate ``message_id`` at the IncomingMessage boundary.
+
+    Defense-in-depth check that catches malicious or malformed message IDs
+    *before* they reach dedup indexes, log lines, or crash-recovery paths.
+
+    Args:
+        message_id: Value to validate.
+        max_length: Maximum allowed length (default matches MAX_MESSAGE_ID_LENGTH).
+
+    Raises:
+        TypeError: If ``message_id`` is not a string.
+        ValueError: If ``message_id`` is empty, too long, or contains unsafe
+            characters.
+    """
+    from src.constants import MAX_MESSAGE_ID_LENGTH
+
+    if not isinstance(message_id, str):
+        raise TypeError(
+            f"IncomingMessage.message_id must be a str, got {type(message_id).__name__}"
+        )
+    if not message_id:
+        raise ValueError("IncomingMessage.message_id must not be empty")
+    effective_max = max_length or MAX_MESSAGE_ID_LENGTH
+    if len(message_id) > effective_max:
+        raise ValueError(
+            f"IncomingMessage.message_id exceeds maximum length "
+            f"({len(message_id)} > {effective_max}): {message_id[:40]!r}..."
+        )
+    if not _MESSAGE_ID_RE.match(message_id):
+        raise ValueError(
+            f"IncomingMessage.message_id contains invalid characters: {message_id!r}. "
+            "Only alphanumeric characters, dash, underscore, dot, and @ are allowed."
+        )
+
+
+def _validate_sender_id(sender_id: object, *, max_length: int = 200) -> None:
+    """Validate ``sender_id`` at the IncomingMessage boundary.
+
+    Defense-in-depth check that catches malicious or malformed sender IDs
+    *before* they reach logs, audit trails, or metric labels.
+
+    Args:
+        sender_id: Value to validate.
+        max_length: Maximum allowed length (default matches MAX_SENDER_ID_LENGTH).
+
+    Raises:
+        TypeError: If ``sender_id`` is not a string.
+        ValueError: If ``sender_id`` is empty, too long, or contains unsafe
+            characters.
+    """
+    from src.constants import MAX_SENDER_ID_LENGTH
+
+    if not isinstance(sender_id, str):
+        raise TypeError(
+            f"IncomingMessage.sender_id must be a str, got {type(sender_id).__name__}"
+        )
+    if not sender_id:
+        raise ValueError("IncomingMessage.sender_id must not be empty")
+    effective_max = max_length or MAX_SENDER_ID_LENGTH
+    if len(sender_id) > effective_max:
+        raise ValueError(
+            f"IncomingMessage.sender_id exceeds maximum length "
+            f"({len(sender_id)} > {effective_max}): {sender_id[:40]!r}..."
+        )
+    if not _SENDER_ID_RE.match(sender_id):
+        raise ValueError(
+            f"IncomingMessage.sender_id contains invalid characters: {sender_id!r}. "
             "Only alphanumeric characters, dash, underscore, dot, and @ are allowed."
         )
 
@@ -144,8 +226,10 @@ class IncomingMessage:
     raw: Optional[dict] = None
 
     def __post_init__(self) -> None:
-        # Defense-in-depth: validate chat_id before it reaches any filesystem op.
+        # Defense-in-depth: validate identifiers before they reach any filesystem op.
         _validate_chat_id(self.chat_id)
+        _validate_message_id(self.message_id)
+        _validate_sender_id(self.sender_id)
 
         if self.channel_type in VALID_CHANNEL_TYPES:
             return

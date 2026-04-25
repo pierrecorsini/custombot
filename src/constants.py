@@ -379,6 +379,18 @@ MAX_MESSAGE_LENGTH: int = 50_000
 # within filesystem name limits (255 bytes).
 MAX_CHAT_ID_LENGTH: int = 200
 
+# Maximum allowed length for message_id in characters.
+# Enforced at the IncomingMessage boundary to prevent excessively long IDs
+# from corrupting dedup indexes, logs, or metric labels.  200 chars is well
+# above any real message ID (~70 chars for WhatsApp, ~36 for UUIDs).
+MAX_MESSAGE_ID_LENGTH: int = 200
+
+# Maximum allowed length for sender_id in characters.
+# Enforced at the IncomingMessage boundary to prevent malicious sender IDs
+# from corrupting logs or filesystem paths.  200 chars matches
+# MAX_CHAT_ID_LENGTH and is well above any real sender ID.
+MAX_SENDER_ID_LENGTH: int = 200
+
 # Maximum allowed length for a scheduled task prompt in characters.
 # Enforced in TaskScheduler._validate_task() to prevent oversized prompts
 # from wasting LLM API credits and exceeding token budgets.
