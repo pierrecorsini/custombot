@@ -544,7 +544,7 @@ in Phases 1–14.
 
 ### Test Coverage
 
-- [ ] **Add test for `TokenUsage` double-counting regression** — Create a test that calls `_raw_chat()` (or simulates its token-tracking logic) with `chat_id` provided. Verify that `prompt_tokens`, `completion_tokens`, `total_tokens`, and `request_count` are incremented exactly once, not doubled. This guards against the Phase 15 fix being reverted or the pattern being reintroduced in future refactoring. (`tests/unit/test_llm.py`)
+- [x] **Add test for `TokenUsage` double-counting regression** — Create a test that calls `_raw_chat()` (or simulates its token-tracking logic) with `chat_id` provided. Verify that `prompt_tokens`, `completion_tokens`, `total_tokens`, and `request_count` are incremented exactly once, not doubled. This guards against the Phase 15 fix being reverted or the pattern being reintroduced in future refactoring. (`tests/unit/test_llm.py`)
 
 - [ ] **Add test for `process_scheduled()` persisting sanitized prompt** — After the fix to use `safe_prompt` in `save_messages_batch()`, add a test that creates a scheduled task with a prompt containing special characters or injection patterns. Verify that the persisted JSONL entry contains the sanitized version, not the raw input. (`tests/unit/test_bot.py`)
 

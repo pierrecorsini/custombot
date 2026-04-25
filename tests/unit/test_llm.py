@@ -1722,3 +1722,257 @@ class TestChatStreamMissingUsageData:
         # No per-chat entry should exist
         top_chats = client.token_usage.get_top_chats()
         assert len(top_chats) == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TokenUsage LRU eviction correctness (PLAN Phase 13)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTokenUsageLRUEviction:
+    """Regression tests for TokenUsage._per_chat LRU eviction correctness.
+
+    TokenUsage uses BoundedOrderedDict(max_size=1000, eviction="half").
+    When the 1001st unique chat_id is added, the oldest 500 entries are
+    evicted, keeping the most-recently-used 501.
+    """
+
+    _MAX_SIZE = 1000
+
+    def test_eviction_triggers_at_cap(self):
+        """Eviction should fire exactly when max_size is exceeded."""
+        usage = TokenUsage()
+        # Fill to capacity — no eviction yet.
+        for i in range(self._MAX_SIZE):
+            usage.add_for_chat(f"chat_{i:04d}", prompt=1, completion=1)
+        assert len(usage._per_chat) == self._MAX_SIZE
+
+        # One more triggers half-eviction: (1001) // 2 = 500 evicted → 501 remain.
+        usage.add_for_chat("chat_overflow", prompt=1, completion=1)
+        assert len(usage._per_chat) == 501
+
+    def test_evicted_entries_are_oldest(self):
+        """The first-inserted (oldest) entries should be evicted."""
+        usage = TokenUsage()
+        for i in range(self._MAX_SIZE + 1):
+            usage.add_for_chat(f"chat_{i:04d}", prompt=1, completion=1)
+
+        # First 500 entries should be gone.
+        for i in range(500):
+            assert f"chat_{i:04d}" not in usage._per_chat, (
+                f"chat_{i:04d} should have been evicted"
+            )
+
+        # Entries 500–1000 should survive.
+        for i in range(500, self._MAX_SIZE + 1):
+            assert f"chat_{i:04d}" in usage._per_chat, (
+                f"chat_{i:04d} should have been preserved"
+            )
+
+    def test_recent_entries_preserved(self):
+        """Entries inserted most recently should survive eviction."""
+        usage = TokenUsage()
+
+        # Fill with "old" entries.
+        for i in range(self._MAX_SIZE):
+            usage.add_for_chat(f"old_{i:04d}", prompt=1, completion=1)
+
+        # Add 10 fresh entries — each triggers a half-eviction cycle.
+        for i in range(10):
+            usage.add_for_chat(f"fresh_{i:04d}", prompt=1, completion=1)
+
+        # All 10 fresh entries must be present.
+        for i in range(10):
+            assert f"fresh_{i:04d}" in usage._per_chat
+
+    def test_global_totals_unaffected_by_eviction(self):
+        """Total token counts must remain accurate regardless of per-chat eviction."""
+        usage = TokenUsage()
+        count = self._MAX_SIZE + 1  # 1001 unique chats
+
+        for i in range(count):
+            usage.add_for_chat(f"chat_{i:04d}", prompt=10, completion=20)
+
+        # Global totals reflect ALL calls, not just the surviving per-chat entries.
+        assert usage.prompt_tokens == count * 10
+        assert usage.completion_tokens == count * 20
+        assert usage.total_tokens == count * 30
+        assert usage.request_count == count
+
+    def test_repeated_chat_id_moves_to_end(self):
+        """Updating an existing chat_id moves it to most-recent, surviving eviction."""
+        usage = TokenUsage()
+
+        # Insert "early_chat" first, then fill to capacity with others.
+        usage.add_for_chat("early_chat", prompt=5, completion=5)
+        for i in range(self._MAX_SIZE - 1):
+            usage.add_for_chat(f"chat_{i:04d}", prompt=1, completion=1)
+
+        # "early_chat" is the oldest — overflow should evict it.
+        usage.add_for_chat("chat_overflow", prompt=1, completion=1)
+        assert "early_chat" not in usage._per_chat
+
+        # Now retry, but touch "early_chat" just before overflow.
+        usage2 = TokenUsage()
+        usage2.add_for_chat("early_chat", prompt=5, completion=5)
+        for i in range(self._MAX_SIZE - 1):
+            usage2.add_for_chat(f"chat_{i:04d}", prompt=1, completion=1)
+
+        # Touch "early_chat" again — moves it to end (most recent).
+        usage2.add_for_chat("early_chat", prompt=5, completion=5)
+        usage2.add_for_chat("chat_overflow", prompt=1, completion=1)
+
+        # "early_chat" survives because it was recently accessed.
+        assert "early_chat" in usage2._per_chat
+        assert usage2._per_chat["early_chat"]["prompt"] == 10  # 5 + 5
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TokenUsage double-counting regression (PLAN Phase 15)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTokenUsageDoubleCountingRegression:
+    """Guard against global token counters being incremented twice per call.
+
+    Before the Phase 15 fix, both ``_raw_chat()`` and ``chat_stream()``
+    called ``add()`` *and* ``add_for_chat()`` when a ``chat_id`` was
+    provided.  ``add_for_chat()`` already increments all four global
+    counters, so the extra ``add()`` doubled every value.
+
+    Each test verifies that global counters are incremented **exactly once**
+    when ``chat_id`` is supplied, and that per-chat tracking is correct.
+    """
+
+    @pytest.mark.asyncio
+    @patch("src.llm.AsyncOpenAI")
+    @patch("src.llm.get_correlation_id", return_value="corr-dc-1")
+    async def test_chat_with_chat_id_no_double_count(self, mock_corr, mock_openai, valid_cfg):
+        """``chat(chat_id=...)`` should increment globals exactly once."""
+        usage_obj = _make_mock_usage(prompt_tokens=50, completion_tokens=100, total_tokens=150)
+        mock_response = _make_mock_chat_completion(usage=usage_obj)
+        mock_client_instance = MagicMock()
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
+        mock_openai.return_value = mock_client_instance
+
+        client = LLMClient(valid_cfg)
+        await client.chat(
+            [{"role": "user", "content": "hi"}],
+            chat_id="chat_regression_test",
+        )
+
+        tu = client.token_usage
+        assert tu.prompt_tokens == 50, f"Expected 50, got {tu.prompt_tokens} (possible double-count)"
+        assert tu.completion_tokens == 100, f"Expected 100, got {tu.completion_tokens}"
+        assert tu.total_tokens == 150, f"Expected 150, got {tu.total_tokens}"
+        assert tu.request_count == 1, f"Expected 1, got {tu.request_count}"
+
+    @pytest.mark.asyncio
+    @patch("src.llm.AsyncOpenAI")
+    @patch("src.llm.get_correlation_id", return_value="corr-dc-2")
+    async def test_chat_accumulates_correctly_across_calls_with_chat_id(
+        self, mock_corr, mock_openai, valid_cfg
+    ):
+        """Multiple ``chat(chat_id=...)`` calls accumulate without double-counting."""
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+
+        client = LLMClient(valid_cfg)
+
+        # First call: 10 prompt + 20 completion
+        resp1 = _make_mock_chat_completion(usage=_make_mock_usage(10, 20, 30))
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=resp1)
+        await client.chat([{"role": "user", "content": "a"}], chat_id="c1")
+
+        # Second call: 30 prompt + 40 completion
+        resp2 = _make_mock_chat_completion(usage=_make_mock_usage(30, 40, 70))
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=resp2)
+        await client.chat([{"role": "user", "content": "b"}], chat_id="c2")
+
+        tu = client.token_usage
+        assert tu.prompt_tokens == 40, f"Expected 40 (10+30), got {tu.prompt_tokens}"
+        assert tu.completion_tokens == 60, f"Expected 60 (20+40), got {tu.completion_tokens}"
+        assert tu.total_tokens == 100, f"Expected 100, got {tu.total_tokens}"
+        assert tu.request_count == 2
+
+    def test_add_for_chat_increments_globals_exactly_once(self):
+        """``add_for_chat()`` must increment each global counter once, not twice.
+
+        The original double-counting bug occurred because callers invoked both
+        ``add()`` and ``add_for_chat()`` when ``chat_id`` was present.  This
+        test verifies at the ``TokenUsage`` level that ``add_for_chat()``
+        alone is sufficient to update all four global counters.
+        """
+        usage = TokenUsage()
+        usage.add_for_chat("chat_a", prompt=10, completion=20)
+
+        assert usage.prompt_tokens == 10
+        assert usage.completion_tokens == 20
+        assert usage.total_tokens == 30
+        assert usage.request_count == 1
+
+        # Second call for a different chat — globals should accumulate, not double.
+        usage.add_for_chat("chat_b", prompt=5, completion=15)
+
+        assert usage.prompt_tokens == 15  # 10 + 5
+        assert usage.completion_tokens == 35  # 20 + 15
+        assert usage.total_tokens == 50  # 30 + 20
+        assert usage.request_count == 2
+
+    @pytest.mark.asyncio
+    @patch("src.llm.AsyncOpenAI")
+    @patch("src.llm.get_correlation_id", return_value="corr-dc-4")
+    async def test_chat_without_chat_id_uses_add_only(self, mock_corr, mock_openai, valid_cfg):
+        """``chat()`` without chat_id should still track tokens correctly via ``add()``."""
+        usage_obj = _make_mock_usage(prompt_tokens=15, completion_tokens=35, total_tokens=50)
+        mock_response = _make_mock_chat_completion(usage=usage_obj)
+        mock_client_instance = MagicMock()
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_response)
+        mock_openai.return_value = mock_client_instance
+
+        client = LLMClient(valid_cfg)
+        await client.chat([{"role": "user", "content": "hi"}])
+
+        tu = client.token_usage
+        assert tu.prompt_tokens == 15
+        assert tu.completion_tokens == 35
+        assert tu.total_tokens == 50
+        assert tu.request_count == 1
+        # No per-chat entry should exist
+        assert len(tu.get_top_chats()) == 0
+
+    @pytest.mark.asyncio
+    @patch("src.llm.AsyncOpenAI")
+    @patch("src.llm.get_correlation_id", return_value="corr-dc-5")
+    async def test_per_chat_tracking_correct_when_chat_id_provided(
+        self, mock_corr, mock_openai, valid_cfg
+    ):
+        """Per-chat tracking should be accurate without affecting global totals."""
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+
+        client = LLMClient(valid_cfg)
+
+        # Two calls for the same chat
+        resp1 = _make_mock_chat_completion(usage=_make_mock_usage(10, 20, 30))
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=resp1)
+        await client.chat([{"role": "user", "content": "a"}], chat_id="shared_chat")
+
+        resp2 = _make_mock_chat_completion(usage=_make_mock_usage(5, 10, 15))
+        mock_client_instance.chat.completions.create = AsyncMock(return_value=resp2)
+        await client.chat([{"role": "user", "content": "b"}], chat_id="shared_chat")
+
+        # Global totals
+        tu = client.token_usage
+        assert tu.prompt_tokens == 15
+        assert tu.completion_tokens == 30
+        assert tu.total_tokens == 45
+        assert tu.request_count == 2
+
+        # Per-chat totals
+        top = tu.get_top_chats(1)
+        assert len(top) == 1
+        assert top[0]["chat_id"] == "shared_chat"
+        assert top[0]["prompt"] == 15
+        assert top[0]["completion"] == 30
+        assert top[0]["total"] == 45
