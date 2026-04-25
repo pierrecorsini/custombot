@@ -10,13 +10,13 @@ from LLM responses.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections import OrderedDict
 from pathlib import Path
 
 from src.constants import MAX_LRU_CACHE_SIZE
+from src.utils import JSONDecodeError, json_loads
 from src.utils.path import sanitize_path_component
 
 log = logging.getLogger(__name__)
@@ -113,8 +113,8 @@ def parse_meta(response: str) -> tuple[str, dict | None]:
 
     clean = response[: match.start()].rstrip()
     try:
-        meta = json.loads(match.group(1))
+        meta = json_loads(match.group(1))
         return clean, meta
-    except json.JSONDecodeError:
+    except JSONDecodeError:
         log.warning("Failed to parse META JSON from LLM response")
         return response, None

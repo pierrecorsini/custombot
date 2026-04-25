@@ -342,7 +342,7 @@ production readiness gaps not addressed in Phases 1–12.
 
 ### Error Handling & Resilience
 
-- [ ] **Handle `orjson.JSONDecodeError` alongside `json.JSONDecodeError` in `_read_file_lines()`** — If the migration to `orjson` is implemented, `safe_json_parse()` will throw `orjson.JSONDecodeError` instead of `json.JSONDecodeError`. The current error handlers in `db.py` catch `json.JSONDecodeError` explicitly. Audit all JSON parse error handlers to catch both exception types (or use a common base class) to prevent `orjson` decode errors from crashing the DB layer. (`src/db/db.py` — all `except json.JSONDecodeError` blocks)
+- [x] **Handle `orjson.JSONDecodeError` alongside `json.JSONDecodeError` in `_read_file_lines()`** — If the migration to `orjson` is implemented, `safe_json_parse()` will throw `orjson.JSONDecodeError` instead of `json.JSONDecodeError`. The current error handlers in `db.py` catch `json.JSONDecodeError` explicitly. Audit all JSON parse error handlers to catch both exception types (or use a common base class) to prevent `orjson` decode errors from crashing the DB layer. (`src/db/db.py` — all `except json.JSONDecodeError` blocks)
 
 - [ ] **Add retry-with-backoff for database file write failures in `save_messages_batch()`** — `save_messages_batch()` writes to the JSONL file once. If the write fails (transient disk I/O error, NFS hiccup), the entire message batch is lost and the user sees an error. Add a lightweight retry (1-2 attempts with short backoff) for write failures in `save_messages_batch`, similar to how `_react_loop` retries transient LLM errors. This protects against the most common transient failure mode. (`src/db/db.py` — `save_messages_batch` method)
 

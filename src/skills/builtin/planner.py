@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from src.skills.base import BaseSkill, validate_input
+from src.utils import JSONDecodeError, json_loads
 
 log = logging.getLogger(__name__)
 
@@ -83,8 +84,8 @@ class PlannerSkill(BaseSkill):
         if not path.exists():
             return {}
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
+            return json_loads(path.read_text(encoding="utf-8"))
+        except (JSONDecodeError, OSError) as exc:
             log.error("Failed to load plan %s: %s", name, exc)
             return {}
 
@@ -149,12 +150,12 @@ class PlannerSkill(BaseSkill):
         lines = ["## Plans\n"]
         for p in plans:
             try:
-                data = json.loads(p.read_text(encoding="utf-8"))
+                data = json_loads(p.read_text(encoding="utf-8"))
                 tasks = data.get("tasks", [])
                 done = sum(1 for t in tasks if t.get("status") == "done")
                 total = len(tasks)
                 lines.append(f"- **{data['name']}** ({done}/{total} done)")
-            except (json.JSONDecodeError, KeyError) as exc:
+            except (JSONDecodeError, KeyError) as exc:
                 log.warning("Skipping corrupt plan file %s: %s", p.name, exc)
 
         return "\n".join(lines)
