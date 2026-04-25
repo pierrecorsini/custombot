@@ -42,6 +42,19 @@ log = logging.getLogger(__name__)
 
 # Bump this when the schema changes.  Migrations in _MIGRATIONS below will
 # bring older databases up to this version incrementally.
+
+
+def _track_embed_cache_event(hit: bool) -> None:
+    """Report an embedding cache hit or miss to the performance metrics collector."""
+    try:
+        from src.monitoring.performance import get_metrics_collector
+
+        if hit:
+            get_metrics_collector().track_embed_cache_hit()
+        else:
+            get_metrics_collector().track_embed_cache_miss()
+    except Exception:
+        pass
 _SCHEMA_VERSION = 1
 
 # Ordered list of migrations: (target_version, [sql, ...]).
@@ -331,9 +344,11 @@ class VectorMemory(SqliteHelper):
         # 1. Check LRU cache (fast path)
         with self._cache_lock:
             if cache_key in self._embed_cache:
+                _track_embed_cache_event(hit=True)
                 return self._embed_cache[cache_key]
 
         # 2. Check in-flight requests (dedup concurrent calls)
+        _track_embed_cache_event(hit=False)
         loop = asyncio.get_running_loop()
         if cache_key in self._inflight:
             return await self._inflight[cache_key]
@@ -394,6 +409,7 @@ class VectorMemory(SqliteHelper):
             with self._cache_lock:
                 if cache_key in self._embed_cache:
                     results[i] = self._embed_cache[cache_key]
+                    _track_embed_cache_event(hit=True)
                     continue
 
             # 2. Check in-flight dedup
@@ -402,6 +418,7 @@ class VectorMemory(SqliteHelper):
                 continue
 
             # 3. Needs API call — track by cache key
+            _track_embed_cache_event(hit=False)
             pending[i] = cache_key
             key_to_indices.setdefault(cache_key, []).append(i)
 

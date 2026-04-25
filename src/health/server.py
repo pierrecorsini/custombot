@@ -821,6 +821,24 @@ def _build_prometheus_output(
         )
     )
 
+    # ── Embedding Cache Metrics ──────────────────────────────────────────────
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_embed_cache_hits_total",
+            "Total embedding cache hits (text already cached, API call avoided)",
+            "counter",
+            snapshot.embed_cache_hits,
+        )
+    )
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_embed_cache_misses_total",
+            "Total embedding cache misses (text not in cache, API call required)",
+            "counter",
+            snapshot.embed_cache_misses,
+        )
+    )
+
     # ── Compression Summary Metrics ──────────────────────────────────────────
     lines.append(
         _format_prometheus_metric(

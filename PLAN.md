@@ -461,7 +461,7 @@ not addressed in Phases 1–13.
 
 - [x] **Add `custombot_compression_summary_used_total` metric** — `_async_compressed_summary()` is called on every context assembly (line 131) but the result is only sometimes non-None (only when compression has occurred). Add a counter that increments when a compressed summary is actually used in context building, so operators can track compression effectiveness and identify chats that are hitting the compression threshold frequently. (`src/core/context_assembler.py:131`, `src/monitoring/performance.py`)
 
-- [ ] **Track and expose `VectorMemory` embedding cache hit ratio** — `VectorMemory._embed_cache` has a max size of 256 but no hit/miss counters. When the cache is too small for the workload, repeated embedding API calls waste latency and credits. Add counters (`custombot_embed_cache_hits_total`, `custombot_embed_cache_misses_total`) and expose via `/metrics`. (`src/vector_memory.py:81-82`)
+- [x] **Track and expose `VectorMemory` embedding cache hit ratio** — `VectorMemory._embed_cache` has a max size of 256 but no hit/miss counters. When the cache is too small for the workload, repeated embedding API calls waste latency and credits. Add counters (`custombot_embed_cache_hits_total`, `custombot_embed_cache_misses_total`) and expose via `/metrics`. (`src/vector_memory.py:81-82`)
 
 ### Test Coverage
 

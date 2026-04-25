@@ -327,6 +327,10 @@ class PerformanceSnapshot:
     # Compression summary usage
     compression_summary_used_total: int = 0
 
+    # Embedding cache effectiveness
+    embed_cache_hits: int = 0
+    embed_cache_misses: int = 0
+
     # Per-skill oversized argument rejection counts
     skill_oversized_args: dict[str, int] = field(default_factory=dict)
 
@@ -410,6 +414,13 @@ class PerformanceSnapshot:
                 else 0.0,
             },
             "compression_summary_used_total": self.compression_summary_used_total,
+            "embed_cache": {
+                "hits": self.embed_cache_hits,
+                "misses": self.embed_cache_misses,
+                "hit_ratio": round(
+                    self.embed_cache_hits / (self.embed_cache_hits + self.embed_cache_misses), 4
+                ) if (self.embed_cache_hits + self.embed_cache_misses) > 0 else 0.0,
+            },
             "skill_oversized_args": dict(self.skill_oversized_args),
             "skill_oversized_args_sizes": {
                 k: v.to_dict() for k, v in self.skill_oversized_args_sizes.items()
@@ -646,6 +657,10 @@ class PerformanceMetrics:
 
         # Compression summary usage counter
         self._compression_summary_used_total: int = 0
+
+        # Embedding cache effectiveness counters
+        self._embed_cache_hits: int = 0
+        self._embed_cache_misses: int = 0
 
         # Sliding-window error tracking (deque of timestamps per window)
         self._total_error_count: int = 0
@@ -902,6 +917,14 @@ class PerformanceMetrics:
         """
         self._compression_summary_used_total += 1
 
+    def track_embed_cache_hit(self) -> None:
+        """Record an embedding cache hit (text already cached, API call avoided)."""
+        self._embed_cache_hits += 1
+
+    def track_embed_cache_miss(self) -> None:
+        """Record an embedding cache miss (text not in cache, API call required)."""
+        self._embed_cache_misses += 1
+
     def track_error(self) -> None:
         """Record an error with timestamp for sliding-window rate tracking."""
         self._total_error_count += 1
@@ -1042,6 +1065,8 @@ class PerformanceMetrics:
             outbound_dedup_hits=self._outbound_dedup_hits,
             outbound_dedup_misses=self._outbound_dedup_misses,
             compression_summary_used_total=self._compression_summary_used_total,
+            embed_cache_hits=self._embed_cache_hits,
+            embed_cache_misses=self._embed_cache_misses,
             skill_oversized_args=dict(self._skill_oversized_args),
             skill_oversized_args_sizes={
                 name: OversizedArgsSizeStats(
