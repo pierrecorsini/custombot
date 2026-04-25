@@ -78,7 +78,7 @@ from src.routing import RoutingEngine
 from src.security.audit import SkillAuditLogger
 from src.security.prompt_injection import detect_injection, filter_response_content, sanitize_user_input
 from src.skills import SkillRegistry
-from src.utils import LRULockCache
+from src.utils import JSONDecodeError, LRULockCache
 from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.protocols import (
     LockProvider,
@@ -1347,6 +1347,18 @@ class Bot:
                     chat_id,
                     extra={"chat_id": chat_id},
                 )
+                await get_event_bus().emit(Event(
+                    name="error_occurred",
+                    data={
+                        "error_type": "path_traversal",
+                        "chat_id": chat_id,
+                        "workspace_dir": str(ws_resolved),
+                        "root_dir": str(root_resolved),
+                        "tool_name": tool_call.function.name,
+                    },
+                    source="Bot._execute_tool_call",
+                    correlation_id=get_correlation_id(),
+                ))
                 return (
                     tc_id,
                     "⚠️ Workspace path validation failed. This incident has been logged.",
@@ -1365,7 +1377,7 @@ class Bot:
             )
             try:
                 args = json.loads(tool_call.function.arguments or "{}")
-            except json.JSONDecodeError:
+            except JSONDecodeError:
                 args = {}
             return (
                 tc_id,
