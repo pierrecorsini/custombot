@@ -13,6 +13,8 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from src.core.dedup import DedupStats, DeduplicationService, outbound_key
 from src.exceptions import DatabaseError
@@ -270,3 +272,49 @@ class TestDedupPrometheusOutput:
                     metric_name in line and not line.startswith("#")
                 ):
                     assert "0" in line
+
+
+# ===========================================================================
+# Property-based tests for outbound_key() hash collision resistance
+# ===========================================================================
+
+
+class TestOutboundKeyPropertyBased:
+    """Hypothesis-driven tests validating outbound_key hash properties."""
+
+    @given(
+        chat_id_a=st.text(min_size=1, max_size=200),
+        text_a=st.text(min_size=0, max_size=500),
+        chat_id_b=st.text(min_size=1, max_size=200),
+        text_b=st.text(min_size=0, max_size=500),
+    )
+    @settings(max_examples=500)
+    def test_distinct_inputs_produce_distinct_keys(
+        self, chat_id_a: str, text_a: str, chat_id_b: str, text_b: str
+    ) -> None:
+        """Different (chat_id, text) pairs must produce different keys."""
+        from hypothesis import assume
+
+        assume((chat_id_a, text_a) != (chat_id_b, text_b))
+        assert outbound_key(chat_id_a, text_a) != outbound_key(chat_id_b, text_b)
+
+    def test_null_byte_separator_prevents_prefix_collision(self) -> None:
+        """The \\x00 separator prevents ("a","bc") vs ("ab","c") collisions.
+
+        Without the separator, concatenating "a"+"bc" and "ab"+"c" would
+        produce the same string "abc" and thus the same hash.  The null
+        byte ensures these tuples map to distinct byte sequences.
+        """
+        assert outbound_key("a", "bc") != outbound_key("ab", "c")
+        assert outbound_key("", "abc") != outbound_key("abc", "")
+
+    @given(
+        chat_id=st.text(min_size=1, max_size=200),
+        text=st.text(min_size=0, max_size=500),
+    )
+    @settings(max_examples=200)
+    def test_always_returns_64_char_hex(self, chat_id: str, text: str) -> None:
+        """outbound_key always returns a valid 64-character hex string."""
+        key = outbound_key(chat_id, text)
+        assert len(key) == 64
+        assert all(c in "0123456789abcdef" for c in key)
