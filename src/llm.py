@@ -486,9 +486,9 @@ class LLMClient:
                 else:
                     prompt_tokens = usage_data.prompt_tokens or 0
                     completion_tokens = usage_data.completion_tokens or 0
-            self._token_usage.add(prompt_tokens, completion_tokens)
-            if chat_id:
-                self._token_usage.add_for_chat(chat_id, prompt_tokens, completion_tokens)
+                self._token_usage.add(prompt_tokens, completion_tokens)
+                if chat_id:
+                    self._token_usage.add_for_chat(chat_id, prompt_tokens, completion_tokens)
 
             # Reconstruct a ChatCompletion object from accumulated data
             from openai.types.chat import ChatCompletion as _CC
