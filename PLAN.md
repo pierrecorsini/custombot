@@ -451,7 +451,7 @@ not addressed in Phases 1–13.
 
 - [x] **Add `chat_id` validation in `TaskScheduler.add_task()` before path construction** — `add_task()` passes `chat_id` directly to `_prepare_task()` and `_persist()` without any validation. While `_resolve_tasks_path()` calls `sanitize_path_component()`, the in-memory `self._tasks[chat_id]` dict is keyed by the raw `chat_id`. A malformed `chat_id` (e.g., with path separators) would create an inconsistent state where the dict key doesn't match the sanitized filesystem path. Add `_validate_chat_id()` from `db.py` at the top of `add_task()`. (`src/scheduler.py:198-208`, `src/db/db.py:165-181`)
 
-- [ ] **Add `prompt` length validation in `TaskScheduler._validate_task()`** — `_validate_task()` checks that `prompt` is a non-empty string but doesn't cap its length. A malicious or buggy skill could create a scheduled task with a multi-MB prompt that, when injected into the LLM context, exceeds token limits and wastes API credits. Add a `MAX_SCHEDULED_PROMPT_LENGTH` constant (e.g., 10_000 chars) and enforce it in `_validate_task()`. (`src/scheduler.py:150-165`, `src/constants.py`)
+- [x] **Add `prompt` length validation in `TaskScheduler._validate_task()`** — `_validate_task()` checks that `prompt` is a non-empty string but doesn't cap its length. A malicious or buggy skill could create a scheduled task with a multi-MB prompt that, when injected into the LLM context, exceeds token limits and wastes API credits. Add a `MAX_SCHEDULED_PROMPT_LENGTH` constant (e.g., 10_000 chars) and enforce it in `_validate_task()`. (`src/scheduler.py:150-165`, `src/constants.py`)
 
 ### Observability & Monitoring
 

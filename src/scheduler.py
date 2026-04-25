@@ -27,6 +27,7 @@ from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from src.constants import (
     DEFAULT_SCHEDULER_TASK_TIMEOUT,
+    MAX_SCHEDULED_PROMPT_LENGTH,
     SCHEDULER_MAX_RETRIES,
     SCHEDULER_RETRY_INITIAL_DELAY,
 )
@@ -153,6 +154,13 @@ class TaskScheduler:
         prompt = task.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("Task 'prompt' must be a non-empty string")
+
+        if len(prompt) > MAX_SCHEDULED_PROMPT_LENGTH:
+            raise ValueError(
+                f"Task 'prompt' exceeds maximum length of "
+                f"{MAX_SCHEDULED_PROMPT_LENGTH} characters "
+                f"({len(prompt)} chars)"
+            )
 
         schedule = task.get("schedule")
         if not isinstance(schedule, dict):

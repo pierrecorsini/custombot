@@ -379,6 +379,11 @@ MAX_MESSAGE_LENGTH: int = 50_000
 # within filesystem name limits (255 bytes).
 MAX_CHAT_ID_LENGTH: int = 200
 
+# Maximum allowed length for a scheduled task prompt in characters.
+# Enforced in TaskScheduler._validate_task() to prevent oversized prompts
+# from wasting LLM API credits and exceeding token budgets.
+MAX_SCHEDULED_PROMPT_LENGTH: int = 10_000
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Message Queue Limits
 # ─────────────────────────────────────────────────────────────────────────────

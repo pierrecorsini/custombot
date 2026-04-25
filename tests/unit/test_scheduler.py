@@ -1915,6 +1915,36 @@ class TestValidateTask:
         with pytest.raises(ValueError, match="seconds"):
             scheduler._validate_task({"prompt": "test", "schedule": {"type": "interval", "seconds": "60"}})
 
+    def test_prompt_at_max_length_passes(self, scheduler: TaskScheduler):
+        """Prompt exactly at MAX_SCHEDULED_PROMPT_LENGTH should be accepted."""
+        prompt = "x" * 10_000
+        scheduler._validate_task(
+            {"prompt": prompt, "schedule": {"type": "interval", "seconds": 60}}
+        )
+
+    def test_prompt_one_below_max_length_passes(self, scheduler: TaskScheduler):
+        """Prompt one char below MAX_SCHEDULED_PROMPT_LENGTH should be accepted."""
+        prompt = "x" * 9_999
+        scheduler._validate_task(
+            {"prompt": prompt, "schedule": {"type": "interval", "seconds": 60}}
+        )
+
+    def test_prompt_exceeds_max_length_raises(self, scheduler: TaskScheduler):
+        """Prompt exceeding MAX_SCHEDULED_PROMPT_LENGTH should be rejected."""
+        prompt = "x" * 10_001
+        with pytest.raises(ValueError, match="exceeds maximum length"):
+            scheduler._validate_task(
+                {"prompt": prompt, "schedule": {"type": "interval", "seconds": 60}}
+            )
+
+    def test_prompt_oversized_error_includes_actual_length(self, scheduler: TaskScheduler):
+        """Error message should include the actual prompt length for debugging."""
+        prompt = "a" * 15_000
+        with pytest.raises(ValueError, match=r"15.?000 chars"):
+            scheduler._validate_task(
+                {"prompt": prompt, "schedule": {"type": "interval", "seconds": 60}}
+            )
+
     def test_cron_missing_hour_raises(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="hour.*minute"):
             scheduler._validate_task({"prompt": "test", "schedule": {"type": "cron", "minute": 0}})
@@ -1959,6 +1989,17 @@ class TestValidateTask:
     async def test_add_task_does_not_mutate_on_failure(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError):
             await scheduler.add_task("chat1", {"prompt": "test", "schedule": {"type": "bad"}})
+        assert scheduler.list_tasks("chat1") == []
+
+    @pytest.mark.asyncio
+    async def test_add_task_rejects_oversized_prompt(self, scheduler: TaskScheduler):
+        """add_task should reject a prompt exceeding MAX_SCHEDULED_PROMPT_LENGTH."""
+        prompt = "x" * 10_001
+        with pytest.raises(ValueError, match="exceeds maximum length"):
+            await scheduler.add_task(
+                "chat1",
+                {"prompt": prompt, "schedule": {"type": "interval", "seconds": 60}},
+            )
         assert scheduler.list_tasks("chat1") == []
 
     # ── integration: valid tasks accepted and persisted correctly ──
