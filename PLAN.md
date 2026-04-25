@@ -384,7 +384,7 @@ production readiness gaps not addressed in Phases 1–12.
 
 - [x] **Add property-based test for `outbound_key()` hash collision resistance** — Use `hypothesis` to generate pairs of distinct `(chat_id, text)` inputs and verify that `outbound_key()` produces different SHA-256 hashes. While collisions are astronomically unlikely for SHA-256, the test also validates that the null-byte separator prevents prefix collisions (e.g., `("a", "bc")` vs `("ab", "c")`). (`tests/unit/test_dedup.py`)
 
-- [ ] **Add test for `StartupOrchestrator._resolve_order()` circular dependency detection** — `_resolve_order()` raises `ValueError` on circular dependencies but this is untested. Add a test with a cycle (A depends on B, B depends on A) and verify the error message is informative. Also test missing dependency detection. (`tests/unit/test_startup.py`)
+- [x] **Add test for `StartupOrchestrator._resolve_order()` circular dependency detection** — `_resolve_order()` raises `ValueError` on circular dependencies but this is untested. Add a test with a cycle (A depends on B, B depends on A) and verify the error message is informative. Also test missing dependency detection. (`tests/unit/test_startup.py`)
 
 - [ ] **Add regression test for `TokenUsage` LRU eviction correctness** — `TokenUsage._per_chat` evicts the oldest half when `_per_chat_max` is reached. Verify that: (a) eviction happens exactly when the cap is exceeded, (b) the evicted entries are the oldest (first-inserted), (c) recent entries are preserved, (d) total token counts are not affected by eviction (they're tracked globally). (`tests/unit/test_llm.py`)
 

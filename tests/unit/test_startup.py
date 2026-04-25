@@ -98,6 +98,38 @@ class TestResolveOrder:
         with pytest.raises(ValueError, match="Circular startup dependency"):
             orch._resolve_order()
 
+    def test_circular_error_message_contains_node_name(self) -> None:
+        """Circular dependency error message includes the problematic node."""
+        steps = [
+            ComponentSpec(name="alpha", factory=_noop_step, depends_on=("beta",)),
+            ComponentSpec(name="beta", factory=_noop_step, depends_on=("alpha",)),
+        ]
+        orch = StartupOrchestrator(_make_ctx(), steps=steps)
+        with pytest.raises(ValueError) as exc_info:
+            orch._resolve_order()
+        msg = str(exc_info.value)
+        assert "alpha" in msg or "beta" in msg
+
+    def test_three_node_circular_dependency(self) -> None:
+        """Three-node cycle A→B→C→A raises ValueError."""
+        steps = [
+            ComponentSpec(name="A", factory=_noop_step, depends_on=("C",)),
+            ComponentSpec(name="B", factory=_noop_step, depends_on=("A",)),
+            ComponentSpec(name="C", factory=_noop_step, depends_on=("B",)),
+        ]
+        orch = StartupOrchestrator(_make_ctx(), steps=steps)
+        with pytest.raises(ValueError, match="Circular startup dependency"):
+            orch._resolve_order()
+
+    def test_self_referential_dependency(self) -> None:
+        """Step depending on itself raises circular dependency."""
+        steps = [
+            ComponentSpec(name="A", factory=_noop_step, depends_on=("A",)),
+        ]
+        orch = StartupOrchestrator(_make_ctx(), steps=steps)
+        with pytest.raises(ValueError, match="Circular startup dependency"):
+            orch._resolve_order()
+
     def test_unknown_dependency_raises(self) -> None:
         """Referencing a non-existent step raises ValueError."""
         steps = [
@@ -106,6 +138,16 @@ class TestResolveOrder:
         orch = StartupOrchestrator(_make_ctx(), steps=steps)
         with pytest.raises(ValueError, match="Unknown startup dependency"):
             orch._resolve_order()
+
+    def test_unknown_dependency_error_message_contains_name(self) -> None:
+        """Missing dependency error includes the unknown dep name."""
+        steps = [
+            ComponentSpec(name="A", factory=_noop_step, depends_on=("nonexistent",)),
+        ]
+        orch = StartupOrchestrator(_make_ctx(), steps=steps)
+        with pytest.raises(ValueError) as exc_info:
+            orch._resolve_order()
+        assert "nonexistent" in str(exc_info.value)
 
     def test_empty_steps_list(self) -> None:
         """Empty step list resolves to empty."""
