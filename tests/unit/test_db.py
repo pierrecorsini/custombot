@@ -1,6 +1,7 @@
 """Tests for Database.save_messages_batch() atomicity, generation counter,
 name field sanitization, write circuit breaker, _read_file_lines
-reverse-seek correctness, and _message_file() path-cache correctness.
+reverse-seek correctness, _message_file() path-cache correctness,
+and _FileHandlePool LRU eviction and stale-handle recovery.
 
 Verifies:
 - save_messages_batch persists all messages in a single lock acquisition
@@ -12,6 +13,9 @@ Verifies:
 - _message_file() returns cached paths for repeated chat_ids
 - _message_file() rejects invalid chat_ids before caching
 - _message_file() cache stays within MAX_LRU_CACHE_SIZE
+- _FileHandlePool evicts LRU entries when pool exceeds max_size
+- _FileHandlePool detects and reopens closed/stale handles
+- _FileHandlePool invalidate() removes and closes a specific handle
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
-from src.db.db import Database, _sanitize_name
+from src.db.db import Database, _FileHandlePool, _sanitize_name
 from src.exceptions import DatabaseError
 from src.utils.circuit_breaker import CircuitState
 
@@ -413,7 +417,7 @@ class TestWriteCircuitBreaker:
 
         # Manually force the breaker open.
         for _ in range(5):
-            await db.write_breaker.record_failure()
+            db.write_breaker.record_failure()
         assert db.write_breaker.state == CircuitState.OPEN
 
         with pytest.raises(DatabaseError, match="circuit breaker open"):
@@ -427,7 +431,7 @@ class TestWriteCircuitBreaker:
 
         # Record a few failures (not enough to open).
         for _ in range(3):
-            await db.write_breaker.record_failure()
+            db.write_breaker.record_failure()
         assert db.write_breaker.failure_count == 3
 
         # A successful write resets the count.
@@ -443,7 +447,7 @@ class TestWriteCircuitBreaker:
 
         # Force breaker open.
         for _ in range(5):
-            await db.write_breaker.record_failure()
+            db.write_breaker.record_failure()
         assert db.write_breaker.state == CircuitState.OPEN
 
         with pytest.raises(DatabaseError, match="circuit breaker open"):
@@ -459,7 +463,7 @@ class TestWriteCircuitBreaker:
 
         # Force breaker open.
         for _ in range(5):
-            await db.write_breaker.record_failure()
+            db.write_breaker.record_failure()
         assert db.write_breaker.state == CircuitState.OPEN
 
         with pytest.raises(DatabaseError, match="circuit breaker open"):
@@ -476,12 +480,83 @@ class TestWriteCircuitBreaker:
 
         # Force breaker open.
         for _ in range(5):
-            await db.write_breaker.record_failure()
+            db.write_breaker.record_failure()
         assert db.write_breaker.state == CircuitState.OPEN
 
         # Reads should still succeed — the write breaker doesn't affect them.
         messages = await db.get_recent_messages("chat_1", limit=10)
         assert len(messages) == 1
+
+    async def test_breaker_threading_lock_from_thread_context(
+        self, initialized_db: Database
+    ) -> None:
+        """CircuitBreaker uses threading.Lock so it works from thread contexts.
+
+        Regression test for the lock-model mismatch: the breaker must be
+        callable from ``asyncio.to_thread()`` workers where no event loop
+        is available.  If ``asyncio.Lock`` were used, calling ``is_open()``
+        from a thread would raise ``RuntimeError``.
+        """
+        import threading
+
+        from src.utils.circuit_breaker import CircuitBreaker
+
+        cb = CircuitBreaker(failure_threshold=3, cooldown_seconds=60)
+
+        # Verify the internal lock is a threading.Lock, not asyncio.Lock.
+        assert isinstance(cb._lock, type(threading.Lock()))
+
+        errors: list[str] = []
+
+        def _call_from_thread():
+            """Exercise all breaker methods without an event loop."""
+            try:
+                # is_open() must work in a plain thread
+                assert cb.is_open() is False
+
+                # record_failure() must work in a plain thread
+                for _ in range(3):
+                    cb.record_failure()
+                assert cb.is_open() is True  # threshold hit → OPEN
+
+                # record_success() must work in a plain thread
+                # Manually transition to HALF_OPEN so success closes it
+                cb._state = cb._state.__class__("half_open")
+                cb.record_success()
+                assert cb.state == CircuitState.CLOSED
+            except Exception as exc:
+                errors.append(str(exc))
+
+        # Run breaker operations in a plain thread (no event loop).
+        t = threading.Thread(target=_call_from_thread)
+        t.start()
+        t.join(timeout=5)
+
+        assert not errors, f"Breaker failed from thread context: {errors}"
+
+    async def test_guarded_write_calls_breaker_from_event_loop(
+        self, initialized_db: Database
+    ) -> None:
+        """_guarded_write interacts with the breaker on the event loop thread.
+
+        This confirms the breaker's is_open / record_success / record_failure
+        are called in the async context (not inside asyncio.to_thread),
+        which is compatible with both threading.Lock and asyncio.Lock.
+        """
+        db = initialized_db
+
+        # Normal successful write — breaker should record success.
+        assert db.write_breaker.failure_count == 0
+        await db.save_message("chat_1", "user", "breaker-audit")
+        assert db.write_breaker.state == CircuitState.CLOSED
+
+        # Force breaker open and verify _guarded_write short-circuits.
+        for _ in range(10):
+            db.write_breaker.record_failure()
+        assert db.write_breaker.state == CircuitState.OPEN
+
+        with pytest.raises(DatabaseError, match="circuit breaker open"):
+            await db.save_message("chat_1", "user", "should-fail")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1073,3 +1148,173 @@ class TestMessageFilePathCache:
         # The @ and . characters should be replaced in the filename.
         assert path.name.endswith(".jsonl")
         assert "@" not in path.stem
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _FileHandlePool tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestFileHandlePool:
+    """Verify _FileHandlePool LRU eviction, stale-handle recovery, and
+    invalidate / close_all semantics."""
+
+    def test_get_or_open_returns_writable_handle(self, tmp_path: Path) -> None:
+        """get_or_open returns an open, writable file handle."""
+        pool = _FileHandlePool(max_size=10)
+        f = tmp_path / "messages.jsonl"
+        handle = pool.get_or_open(f)
+
+        assert not handle.closed
+        handle.write("test\n")
+        handle.flush()
+        assert f.read_text(encoding="utf-8") == "test\n"
+
+    def test_get_or_open_reuses_cached_handle(self, tmp_path: Path) -> None:
+        """Second call for the same path returns the same handle."""
+        pool = _FileHandlePool(max_size=10)
+        f = tmp_path / "messages.jsonl"
+        h1 = pool.get_or_open(f)
+        h2 = pool.get_or_open(f)
+
+        assert h1 is h2
+        assert len(pool._handles) == 1
+
+    def test_lru_eviction_removes_oldest(self, tmp_path: Path) -> None:
+        """When pool exceeds max_size, least-recently-used handle is evicted."""
+        pool = _FileHandlePool(max_size=3)
+        paths = [tmp_path / f"chat_{i}.jsonl" for i in range(4)]
+        handles = [pool.get_or_open(p) for p in paths]
+
+        # Pool should have evicted the first handle to stay at max_size.
+        assert len(pool._handles) == 3
+        # The oldest handle (paths[0]) should be closed.
+        assert handles[0].closed
+        # The remaining handles should still be open.
+        for h in handles[1:]:
+            assert not h.closed
+        # Keys in the pool should be the 3 most-recent paths.
+        expected_keys = [str(p) for p in paths[1:]]
+        assert list(pool._handles.keys()) == expected_keys
+
+    def test_repeated_access_refreshes_lru(self, tmp_path: Path) -> None:
+        """Accessing a handle moves it to most-recently-used, protecting it
+        from eviction."""
+        pool = _FileHandlePool(max_size=3)
+        paths = [tmp_path / f"chat_{i}.jsonl" for i in range(3)]
+        for p in paths:
+            pool.get_or_open(p)
+
+        # Re-access paths[0] (currently oldest) to refresh its LRU position.
+        pool.get_or_open(paths[0])
+
+        # Overflow: paths[1] should be evicted (it's now least-recently-used).
+        pool.get_or_open(tmp_path / "chat_overflow.jsonl")
+        assert str(paths[1]) not in pool._handles
+        assert str(paths[0]) in pool._handles
+
+    def test_stale_closed_handle_reopened(self, tmp_path: Path) -> None:
+        """A closed handle in the pool is detected and replaced with a fresh
+        one on next get_or_open."""
+        pool = _FileHandlePool(max_size=10)
+        f = tmp_path / "messages.jsonl"
+        h1 = pool.get_or_open(f)
+
+        # Simulate external closure (e.g. OS reclaimed the fd).
+        h1.close()
+        assert h1.closed
+
+        # get_or_open should detect the stale handle and reopen.
+        h2 = pool.get_or_open(f)
+        assert not h2.closed
+        assert h2 is not h1
+        assert len(pool._handles) == 1
+
+        # The new handle should be functional.
+        h2.write("after_reopen\n")
+        h2.flush()
+        assert "after_reopen" in f.read_text(encoding="utf-8")
+
+    def test_oserror_triggers_evict_all_and_retry(self, tmp_path: Path) -> None:
+        """On first OSError, pool evicts all handles and retries once."""
+        pool = _FileHandlePool(max_size=10)
+        f = tmp_path / "messages.jsonl"
+
+        # Pre-populate the pool with a handle we can track.
+        pool.get_or_open(tmp_path / "other.jsonl")
+        assert len(pool._handles) == 1
+
+        call_count = 0
+        original_open = Path.open
+
+        def flaky_open(self: Path, *args: object, **kwargs: object) -> object:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OSError("EMFILE: too many open files")
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(Path, "open", flaky_open)
+            handle = pool.get_or_open(f)
+            assert not handle.closed
+            # Pool was cleared during retry, then this handle added.
+            assert len(pool._handles) == 1
+            assert call_count == 2
+        finally:
+            monkeypatch.undo()
+
+    def test_oserror_persistent_raises_database_error(
+        self, tmp_path: Path
+    ) -> None:
+        """If retry also fails with OSError, DatabaseError is raised."""
+        pool = _FileHandlePool(max_size=10)
+        f = tmp_path / "messages.jsonl"
+
+        def always_fail(self: Path, *args: object, **kwargs: object) -> None:
+            raise OSError("persistent failure")
+
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(Path, "open", always_fail)
+            with pytest.raises(DatabaseError, match="Failed to open"):
+                pool.get_or_open(f)
+        finally:
+            monkeypatch.undo()
+
+    def test_invalidate_closes_specific_handle(self, tmp_path: Path) -> None:
+        """invalidate() removes and closes only the targeted handle."""
+        pool = _FileHandlePool(max_size=10)
+        p1 = tmp_path / "a.jsonl"
+        p2 = tmp_path / "b.jsonl"
+        h1 = pool.get_or_open(p1)
+        h2 = pool.get_or_open(p2)
+
+        pool.invalidate(p1)
+
+        assert h1.closed
+        assert not h2.closed
+        assert str(p1) not in pool._handles
+        assert str(p2) in pool._handles
+
+    def test_invalidate_nonexistent_path_is_noop(self, tmp_path: Path) -> None:
+        """invalidate() on a path not in the pool does nothing."""
+        pool = _FileHandlePool(max_size=10)
+        pool.get_or_open(tmp_path / "exists.jsonl")
+
+        # Should not raise.
+        pool.invalidate(tmp_path / "ghost.jsonl")
+        assert len(pool._handles) == 1
+
+    def test_close_all_closes_every_handle(self, tmp_path: Path) -> None:
+        """close_all() closes every pooled handle and clears the pool."""
+        pool = _FileHandlePool(max_size=10)
+        paths = [tmp_path / f"chat_{i}.jsonl" for i in range(5)]
+        handles = [pool.get_or_open(p) for p in paths]
+
+        pool.close_all()
+
+        assert len(pool._handles) == 0
+        for h in handles:
+            assert h.closed
