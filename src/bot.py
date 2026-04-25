@@ -808,7 +808,7 @@ class Bot:
                     messages=[
                         {
                             "role": "user",
-                            "content": prompt,
+                            "content": safe_prompt,
                             "name": "Scheduler",
                             "message_id": f"sched_{uuid.uuid4().hex[:8]}",
                         },
