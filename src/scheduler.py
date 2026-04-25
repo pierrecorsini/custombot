@@ -30,6 +30,8 @@ from src.constants import (
     SCHEDULER_MAX_RETRIES,
     SCHEDULER_RETRY_INITIAL_DELAY,
 )
+from src.db.db import _validate_chat_id
+from src.utils import JSONDecodeError
 from src.utils.path import sanitize_path_component
 from src.utils.retry import is_transient_error
 
@@ -199,8 +201,9 @@ class TaskScheduler:
 
         Raises:
             ValueError: If the task dict is missing required fields or has
-                invalid values.
+                invalid values, or if chat_id contains unsafe characters.
         """
+        _validate_chat_id(chat_id)
         self._validate_task(task)
         task_id = self._prepare_task(chat_id, task)
         await self._persist(chat_id)
@@ -268,7 +271,7 @@ class TaskScheduler:
             raw = await asyncio.to_thread(self._read_tasks_file, dest)
             if raw is not None:
                 self._tasks[chat_id] = json.loads(raw)
-        except (json.JSONDecodeError, OSError) as exc:
+        except (JSONDecodeError, OSError) as exc:
             log.error("Failed to load scheduler tasks for %s: %s", chat_id, exc)
 
     @staticmethod
