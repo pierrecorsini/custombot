@@ -726,32 +726,43 @@ class Bot:
                         chat_id=chat_id,
                         channel_prompt=channel_prompt,
                     )
-                    # Sanitize scheduled prompt to catch injection attempts that
-                    # could bypass normal message pipeline safeguards.
-                    safe_prompt = sanitize_user_input(prompt)
-                    injection_result = detect_injection(safe_prompt)
-                    if injection_result.detected:
-                        log.warning(
-                            "Scheduled task prompt for chat %s flagged as injection "
-                            "(confidence=%.1f, patterns=%s) — sanitizing",
-                            chat_id,
-                            injection_result.confidence,
-                            injection_result.matched_patterns,
-                            extra={
-                                "chat_id": chat_id,
-                                "injection_patterns": injection_result.matched_patterns,
-                            },
-                        )
-                    messages = result.messages
-                    messages.append(ChatMessage(role="user", content=safe_prompt))
-                except OSError as exc:
+                except Exception as exc:
                     log.warning(
-                        "Scheduled task for chat %s aborted: context build failed: %s",
+                        "Scheduled task for chat %s aborted: context assembly failed: %s",
                         chat_id,
                         exc,
                         extra={"chat_id": chat_id, "correlation_id": correlation_id},
                     )
                     return None
+
+                # Guard against assemble() returning None when build_context fails
+                if result is None:
+                    log.warning(
+                        "Scheduled task for chat %s aborted: context assembly "
+                        "returned None (build_context failure)",
+                        chat_id,
+                        extra={"chat_id": chat_id, "correlation_id": correlation_id},
+                    )
+                    return None
+
+                # Sanitize scheduled prompt to catch injection attempts that
+                # could bypass normal message pipeline safeguards.
+                safe_prompt = sanitize_user_input(prompt)
+                injection_result = detect_injection(safe_prompt)
+                if injection_result.detected:
+                    log.warning(
+                        "Scheduled task prompt for chat %s flagged as injection "
+                        "(confidence=%.1f, patterns=%s) — sanitizing",
+                        chat_id,
+                        injection_result.confidence,
+                        injection_result.matched_patterns,
+                        extra={
+                            "chat_id": chat_id,
+                            "injection_patterns": injection_result.matched_patterns,
+                        },
+                    )
+                messages = result.messages
+                messages.append(ChatMessage(role="user", content=safe_prompt))
 
                 # Run the ReAct loop
                 tools = self._skills.tool_definitions
@@ -901,6 +912,14 @@ class Bot:
             instruction=instruction_content,
             rule_id=matched_rule.id,
         )
+
+        if result is None:
+            log.warning(
+                "Context assembly returned None for chat %s — build_context failure",
+                msg.chat_id,
+                extra={"chat_id": msg.chat_id},
+            )
+            return None
 
         return TurnContext(
             messages=result.messages,
