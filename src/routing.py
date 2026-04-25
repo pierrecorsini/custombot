@@ -12,19 +12,20 @@ Messages are matched against rules in priority order (lower = first).
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
-from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.channels.base import IncomingMessage
+from src.channels.base import ChannelType, IncomingMessage
 from src.constants import (
     ROUTING_MATCH_CACHE_MAX_SIZE,
     ROUTING_MATCH_CACHE_TTL_SECONDS,
     ROUTING_WATCH_DEBOUNCE_SECONDS,
 )
+from src.utils import BoundedOrderedDict
 from src.utils.frontmatter import extract_routing_rules, parse_file
 
 log = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ class MatchingContext:
 
     sender_id: str
     chat_id: str
-    channel_type: str
+    channel_type: ChannelType | str
     text: str
     fromMe: bool = False
     toMe: bool = False
@@ -240,10 +241,14 @@ class RoutingEngine:
         self._rules_list: List[RoutingRule] = []
         self._file_mtimes: dict[str, float] = {}
         self._last_stale_check: float = 0.0
-        # TTL-bounded LRU cache for match results.
+        # TTL-bounded LRU cache for match results (delegated to BoundedOrderedDict).
         # Key: (fromMe, toMe, sender_id, chat_id, channel_type, text[:100])
-        # Value: (timestamp, (rule | None, instruction | None))
-        self._match_cache: OrderedDict[Tuple, Tuple[float, Tuple]] = OrderedDict()
+        # Value: (rule | None, instruction | None)
+        self._match_cache: BoundedOrderedDict[Tuple, Tuple] = BoundedOrderedDict(
+            max_size=ROUTING_MATCH_CACHE_MAX_SIZE,
+            eviction="half",
+            ttl=ROUTING_MATCH_CACHE_TTL_SECONDS,
+        )
 
     @property
     def _rules(self) -> List[RoutingRule]:
@@ -267,15 +272,24 @@ class RoutingEngine:
         return self._instructions_dir
 
     def _scan_file_mtimes(self) -> dict[str, float]:
-        """Collect current mtimes for all .md files in the instructions directory."""
+        """Collect current mtimes for all .md files in the instructions directory.
+
+        Uses ``os.scandir()`` instead of ``glob()`` for lower overhead:
+        DirEntry objects cache stat results and avoid pattern-matching cost.
+        """
         mtimes: dict[str, float] = {}
         if self._instructions_dir.is_dir():
-            for md_file in self._instructions_dir.glob("*.md"):
-                try:
-                    mtimes[md_file.name] = md_file.stat().st_mtime
-                except OSError:
-                    # File may have been deleted between glob and stat
-                    pass
+            try:
+                with os.scandir(self._instructions_dir) as entries:
+                    for entry in entries:
+                        if entry.is_file() and entry.name.endswith(".md"):
+                            try:
+                                mtimes[entry.name] = entry.stat().st_mtime
+                            except OSError:
+                                pass
+            except OSError:
+                # Directory may have been removed
+                pass
         return mtimes
 
     def _is_stale(self) -> bool:
@@ -365,28 +379,6 @@ class RoutingEngine:
         """Build a hashable cache key from message signature attributes."""
         return (ctx.fromMe, ctx.toMe, ctx.sender_id, ctx.chat_id, ctx.channel_type, ctx.text[:100])
 
-    def _cache_get(self, key: Tuple) -> Optional[Tuple]:
-        """Return cached match result if present and not expired, else None."""
-        entry = self._match_cache.get(key)
-        if entry is None:
-            return None
-        ts, result = entry
-        if time.monotonic() - ts > ROUTING_MATCH_CACHE_TTL_SECONDS:
-            # Expired — remove and report miss
-            self._match_cache.pop(key, None)
-            return None
-        # Move to end (most recently used)
-        self._match_cache.move_to_end(key)
-        return result
-
-    def _cache_put(self, key: Tuple, result: Tuple) -> None:
-        """Store a match result in the cache, evicting LRU if at capacity."""
-        if key in self._match_cache:
-            self._match_cache.move_to_end(key)
-        elif len(self._match_cache) >= ROUTING_MATCH_CACHE_MAX_SIZE:
-            self._match_cache.popitem(last=False)
-        self._match_cache[key] = (time.monotonic(), result)
-
     def match_with_rule(
         self, msg: IncomingMessage
     ) -> tuple[Optional["RoutingRule"], Optional[str]]:
@@ -410,7 +402,7 @@ class RoutingEngine:
         cache_key = self._cache_key(ctx)
 
         # Check cache first
-        cached = self._cache_get(cache_key)
+        cached = self._match_cache.get(cache_key)
         if cached is not None:
             return cached  # type: ignore[return-value]
 
@@ -441,9 +433,9 @@ class RoutingEngine:
                     continue
 
             result = (rule, rule.instruction)
-            self._cache_put(cache_key, result)
+            self._match_cache[cache_key] = result
             return result
 
         result = (None, None)
-        self._cache_put(cache_key, result)
+        self._match_cache[cache_key] = result
         return result
