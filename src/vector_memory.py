@@ -110,6 +110,19 @@ class VectorMemory(SqliteHelper):
         self._db.enable_load_extension(False)
         self._ensure_schema()
 
+    def warmup(self) -> None:
+        """Pre-warm one read connection so the first user query avoids the
+        sqlite-vec extension loading latency (~5ms).
+
+        Safe to call from the startup orchestrator on the main thread.
+        Subsequent reads from other threads create their own connections.
+        """
+        try:
+            self._get_read_connection()
+            log.debug("VectorMemory read connection pre-warmed")
+        except Exception as exc:
+            log.debug("VectorMemory read connection warmup skipped: %s", exc)
+
     def close(self) -> None:
         """Release all resources: embed cache, in-flight futures, read pool, and DB connection."""
         with self._cache_lock:

@@ -178,6 +178,11 @@ async def _step_bot_components(ctx: StartupContext) -> str | None:
     # doesn't pay the TCP + TLS handshake latency.
     await components.llm.warmup()
 
+    # Pre-warm VectorMemory read connection so the first semantic search
+    # avoids the sqlite-vec extension loading latency (~5ms).
+    if components.vector_memory is not None:
+        await asyncio.to_thread(components.vector_memory.warmup)
+
     # Track multiple sub-components
     ctx.initialized_components.append("Bot (LLM, Memory, Skills, Routing)")
     ctx.initialized_components.append("Database")
