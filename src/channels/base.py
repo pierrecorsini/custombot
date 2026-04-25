@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
@@ -120,6 +121,10 @@ class IncomingMessage:
         fromMe: True if message was sent by the bot user (from their number)
         toMe: True if message was sent directly to the bot user (not in a group)
         is_historical: True if message arrived before the bot connected (offline/backfill)
+        acl_passed: True if the channel verified the sender against its access-control
+            list before dispatching.  ``handle_message()`` rejects messages where
+            this is ``False`` — channels must set it to ``True`` after their ACL
+            check passes (or for trusted channels like CLI).
         correlation_id: Optional correlation ID for request tracing (from headers)
         raw: Original payload for debugging
     """
@@ -134,6 +139,7 @@ class IncomingMessage:
     fromMe: bool = False
     toMe: bool = False
     is_historical: bool = False
+    acl_passed: bool = False
     correlation_id: Optional[str] = None
     raw: Optional[dict] = None
 
@@ -347,6 +353,13 @@ async def _confirm_send(chat_id: str) -> bool:
     misconfigured or automated input sources.
     """
     from src.constants import SAFE_MODE_MAX_CONFIRM_RETRIES
+
+    if not sys.stdin.isatty():
+        log.warning(
+            "Safe mode requires an interactive terminal — send auto-rejected for chat %s",
+            chat_id,
+        )
+        return False
 
     for attempt in range(1, SAFE_MODE_MAX_CONFIRM_RETRIES + 1):
         raw = await asyncio.to_thread(input, f"  Send to {chat_id}? [Y/N]: ")
