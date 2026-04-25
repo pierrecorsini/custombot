@@ -34,6 +34,7 @@ import pytest
 # Try importing sqlite_vec — if unavailable, skip the entire module
 sqlite_vec = pytest.importorskip("sqlite_vec")
 
+from src.utils import BoundedOrderedDict
 from src.vector_memory import VectorMemory, _serialize_f32
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -758,7 +759,7 @@ class TestEmbedCache:
         client = _make_mock_client()
         vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
         vm.connect()
-        vm._embed_cache_max = 3
+        vm._embed_cache = BoundedOrderedDict(max_size=3, eviction="one")
 
         # Fill cache to max
         await vm._embed("text1")
@@ -786,7 +787,7 @@ class TestEmbedCache:
         client = _make_mock_client()
         vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
         vm.connect()
-        vm._embed_cache_max = 3
+        vm._embed_cache = BoundedOrderedDict(max_size=3, eviction="one")
 
         await vm._embed("text1")
         await vm._embed("text2")
@@ -808,7 +809,7 @@ class TestEmbedCache:
 
     @pytest.mark.asyncio
     async def test_default_cache_max_is_256(self, vm: VectorMemory):
-        assert vm._embed_cache_max == 256
+        assert vm._embed_cache._max_size == 256
 
     @pytest.mark.asyncio
     async def test_save_uses_cached_embedding(self, db_path: Path):

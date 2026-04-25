@@ -22,7 +22,6 @@ import sqlite3
 import struct
 import threading
 import time
-from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -31,7 +30,7 @@ from openai import AsyncOpenAI
 
 from src.db.sqlite_utils import SqliteHelper
 from src.exceptions import DiskSpaceError
-from src.utils import DEFAULT_MIN_DISK_SPACE, check_disk_space
+from src.utils import BoundedOrderedDict, DEFAULT_MIN_DISK_SPACE, check_disk_space
 from src.utils.retry import retry_with_backoff
 
 # TTL for the embedding API health cache.  When the embeddings endpoint is
@@ -78,8 +77,7 @@ class VectorMemory(SqliteHelper):
         self._embedding_model = embedding_model
         self._dimensions = embedding_dimensions
         # LRU cache for embeddings — avoids redundant API calls for identical text
-        self._embed_cache: OrderedDict[str, list[float]] = OrderedDict()
-        self._embed_cache_max = 256
+        self._embed_cache: BoundedOrderedDict[str, list[float]] = BoundedOrderedDict(max_size=256, eviction="half")
         # In-flight deduplication: tracks pending embedding requests so
         # concurrent calls for the same text share one API call
         self._inflight: dict[str, asyncio.Future[list[float]]] = {}
@@ -115,7 +113,7 @@ class VectorMemory(SqliteHelper):
     def close(self) -> None:
         """Release all resources: embed cache, in-flight futures, read pool, and DB connection."""
         with self._cache_lock:
-            self._embed_cache.clear()
+            self._embed_cache = BoundedOrderedDict(max_size=256, eviction="half")
         # Cancel any pending in-flight embedding futures
         for key, future in list(self._inflight.items()):
             if not future.done():
@@ -320,7 +318,6 @@ class VectorMemory(SqliteHelper):
         # 1. Check LRU cache (fast path)
         with self._cache_lock:
             if cache_key in self._embed_cache:
-                self._embed_cache.move_to_end(cache_key)
                 return self._embed_cache[cache_key]
 
         # 2. Check in-flight requests (dedup concurrent calls)
@@ -341,10 +338,8 @@ class VectorMemory(SqliteHelper):
 
             self._mark_embedding_api_healthy()
 
-            # Store in cache with LRU eviction
+            # Store in cache (BoundedOrderedDict handles eviction)
             with self._cache_lock:
-                if len(self._embed_cache) >= self._embed_cache_max:
-                    self._embed_cache.popitem(last=False)
                 self._embed_cache[cache_key] = embedding
 
             # Resolve the future so waiters get the result
@@ -385,7 +380,6 @@ class VectorMemory(SqliteHelper):
             # 1. Check LRU cache
             with self._cache_lock:
                 if cache_key in self._embed_cache:
-                    self._embed_cache.move_to_end(cache_key)
                     results[i] = self._embed_cache[cache_key]
                     continue
 
@@ -440,8 +434,6 @@ class VectorMemory(SqliteHelper):
                 cache_key = key_for_batch_pos[batch_pos]
 
                 with self._cache_lock:
-                    if len(self._embed_cache) >= self._embed_cache_max:
-                        self._embed_cache.popitem(last=False)
                     self._embed_cache[cache_key] = embedding
 
                 futures[cache_key].set_result(embedding)
