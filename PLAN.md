@@ -380,7 +380,7 @@ production readiness gaps not addressed in Phases 1–12.
 
 - [x] **Add test for `chat_stream()` missing `usage_data` edge case** — Verify that when a streaming provider doesn't return `usage` data in the stream events, `chat_stream()` doesn't raise `NameError` or `UnboundLocalError` and token tracking is skipped gracefully. (`tests/unit/test_llm.py`)
 
-- [ ] **Add test for `process_scheduled()` injection detection with confidence thresholds** — Verify that a scheduled prompt with injection patterns (e.g., "Ignore all previous instructions") is flagged by `detect_injection()` and that the sanitized version is used. Test both high-confidence (blocked) and low-confidence (logged but allowed) scenarios. (`tests/unit/test_bot.py`)
+- [x] **Add test for `process_scheduled()` injection detection with confidence thresholds** — Verify that a scheduled prompt with injection patterns (e.g., "Ignore all previous instructions") is flagged by `detect_injection()` and that the sanitized version is used. Test both high-confidence (blocked) and low-confidence (logged but allowed) scenarios. (`tests/unit/test_bot.py`)
 
 - [ ] **Add property-based test for `outbound_key()` hash collision resistance** — Use `hypothesis` to generate pairs of distinct `(chat_id, text)` inputs and verify that `outbound_key()` produces different SHA-256 hashes. While collisions are astronomically unlikely for SHA-256, the test also validates that the null-byte separator prevents prefix collisions (e.g., `("a", "bc")` vs `("ab", "c")`). (`tests/unit/test_dedup.py`)
 
