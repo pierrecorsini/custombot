@@ -68,6 +68,10 @@ from src.db.db_integrity import (
 )
 from src.exceptions import DatabaseError, DiskSpaceError
 from src.logging import get_correlation_id
+from src.security.prompt_injection import (
+    detect_injection,
+    sanitize_user_input,
+)
 from src.utils import (
     DEFAULT_MIN_DISK_SPACE,
     JsonParseMode,
@@ -88,6 +92,21 @@ def _track_db_latency(elapsed_seconds: float) -> None:
         from src.monitoring.performance import get_metrics_collector
 
         get_metrics_collector().track_db_latency(elapsed_seconds)
+    except Exception:
+        pass  # Metrics tracking must never crash DB operations
+
+
+def _track_db_write_latency(elapsed_seconds: float) -> None:
+    """Record a database *write* operation latency in the global metrics collector.
+
+    Called alongside ``_track_db_latency`` for write-path operations (message
+    saves, batch saves, chats index saves) so that Prometheus can expose a
+    dedicated ``custombot_db_write_latency`` metric.
+    """
+    try:
+        from src.monitoring.performance import get_metrics_collector
+
+        get_metrics_collector().track_db_write_latency(elapsed_seconds)
     except Exception:
         pass  # Metrics tracking must never crash DB operations
 
@@ -846,7 +865,9 @@ class Database:
         content = json_dumps(self._chats, indent=2, ensure_ascii=False)
         _db_start = time.monotonic()
         await asyncio.to_thread(self._atomic_write, self._chats_file, content)
-        _track_db_latency(time.monotonic() - _db_start)
+        elapsed = time.monotonic() - _db_start
+        _track_db_latency(elapsed)
+        _track_db_write_latency(elapsed)
 
     def _atomic_write(self, file_path: Path, content: str) -> None:
         """
@@ -1007,11 +1028,6 @@ class Database:
 
         _sanitized = False
         if role == "user" and content:
-            from src.security.prompt_injection import (
-                detect_injection,
-                sanitize_user_input,
-            )
-
             result = detect_injection(content)
             if result.detected and result.confidence >= 0.8:
                 content = sanitize_user_input(content)
@@ -1082,7 +1098,9 @@ class Database:
 
         await self._update_index([mid])
 
-        _track_db_latency(time.monotonic() - _db_start)
+        _elapsed_save_msg = time.monotonic() - _db_start
+        _track_db_latency(_elapsed_save_msg)
+        _track_db_write_latency(_elapsed_save_msg)
 
         self._bump_generation(chat_id)
 
@@ -1183,7 +1201,9 @@ class Database:
 
         await self._update_index(ids)
 
-        _track_db_latency(time.monotonic() - _db_start)
+        _elapsed_batch = time.monotonic() - _db_start
+        _track_db_latency(_elapsed_batch)
+        _track_db_write_latency(_elapsed_batch)
 
         self._bump_generation(chat_id)
 
