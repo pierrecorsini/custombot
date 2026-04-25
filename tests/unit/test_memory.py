@@ -198,51 +198,44 @@ class TestMemoryInit:
 
 
 class TestLRUCacheInternals:
-    """Tests for LRUDict-based cache mechanics in Memory."""
+    """Tests for MtimeCache-backed cache mechanics in Memory."""
 
-    def test_cache_get_miss_returns_none(self, mem: Memory):
-        assert mem._memory_cache.get("x") is None
+    def test_caches_initially_empty(self, mem: Memory):
+        assert len(mem._memory_cache) == 0
+        assert len(mem._agents_cache) == 0
 
-    def test_cache_put_and_get(self, mem: Memory):
-        mem._memory_cache["a"] = (1.0, "content")
-        result = mem._memory_cache.get("a")
-        assert result == (1.0, "content")
+    @pytest.mark.asyncio
+    async def test_miss_on_first_read(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "content")
+        await mem.read_memory("chat1")
+        assert mem._memory_cache.misses == 1
+        assert mem._memory_cache.hits == 0
 
-    def test_cache_get_moves_to_end_lru(self, mem: Memory):
-        """Accessing a key should move it to the most-recent position."""
-        mem._memory_cache["a"] = (1.0, "A")
-        mem._memory_cache["b"] = (1.0, "B")
-        # Access "a" → moves to end
-        _ = mem._memory_cache.get("a")
-        # Now "b" is oldest, should be evicted next
-        mem._memory_cache._max_size = 2
-        mem._memory_cache["c"] = (1.0, "C")
-        assert "b" not in mem._memory_cache
-        assert "a" in mem._memory_cache
-        assert "c" in mem._memory_cache
+    @pytest.mark.asyncio
+    async def test_hit_on_reread_unchanged(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "content")
+        await mem.read_memory("chat1")
+        await mem.read_memory("chat1")
+        assert mem._memory_cache.hits == 1
+        assert mem._memory_cache.misses == 1
 
-    def test_cache_put_evicts_oldest_at_capacity(self, mem: Memory):
-        mem._memory_cache._max_size = 3
-        mem._memory_cache["a"] = (1.0, "A")
-        mem._memory_cache["b"] = (1.0, "B")
-        mem._memory_cache["c"] = (1.0, "C")
-        # Cache is full; next insert should evict "a"
-        mem._memory_cache["d"] = (1.0, "D")
-        assert "a" not in mem._memory_cache
-        assert "d" in mem._memory_cache
+    @pytest.mark.asyncio
+    async def test_invalidate_removes_entry(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "content")
+        await mem.read_memory("chat1")
+        assert "chat1" in mem._memory_cache
+        mem._memory_cache.invalidate("chat1")
+        assert "chat1" not in mem._memory_cache
 
-    def test_cache_put_updates_existing_key(self, mem: Memory):
-        mem._memory_cache["a"] = (1.0, "old")
-        mem._memory_cache["a"] = (2.0, "new")
-        result = mem._memory_cache.get("a")
-        assert result == (2.0, "new")
-
-    def test_separate_caches(self, mem: Memory):
-        """Memory cache and agents cache are independent."""
-        mem._memory_cache["a"] = (1.0, "mem")
-        mem._agents_cache["a"] = (1.0, "agents")
-        assert mem._memory_cache.get("a") == (1.0, "mem")
-        assert mem._agents_cache.get("a") == (1.0, "agents")
+    @pytest.mark.asyncio
+    async def test_separate_caches(self, mem: Memory, workspace: Path):
+        """Memory cache and agents cache track hits/misses independently."""
+        _write_memory_raw(workspace, "chat1", "mem")
+        await mem.read_memory("chat1")
+        mem.ensure_workspace("chat2")
+        await mem.read_agents_md("chat2")
+        assert mem._memory_cache.misses == 1
+        assert mem._agents_cache.misses == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -297,16 +290,17 @@ class TestEnsureWorkspace:
 
     def test_clears_agents_cache_on_seed(self, mem: Memory):
         """Seeding AGENTS.md should invalidate the agents cache entry."""
-        mem._agents_cache["chat1"] = (1.0, "old")
+        # Populate agents cache via underlying LRUDict (MtimeCache has no __setitem__)
+        mem._agents_cache._cache["chat1"] = (1.0, "old")
         mem.ensure_workspace("chat1")
         assert "chat1" not in mem._agents_cache
 
     def test_does_not_clear_agents_cache_if_agents_exists(self, mem: Memory):
         """If AGENTS.md already exists, the cache should not be touched."""
         mem.ensure_workspace("chat1")  # creates AGENTS.md
-        mem._agents_cache["chat1"] = (1.0, "cached")
+        mem._agents_cache._cache["chat1"] = (1.0, "cached")
         mem.ensure_workspace("chat1")  # should NOT evict
-        assert mem._agents_cache.get("chat1") == (1.0, "cached")
+        assert mem._agents_cache._cache.get("chat1") == (1.0, "cached")
 
     def test_creates_parent_directories(self, mem: Memory):
         result = mem.ensure_workspace("deep/chat")
@@ -335,7 +329,11 @@ class TestWriteMemory:
 
     @pytest.mark.asyncio
     async def test_invalidates_memory_cache(self, mem: Memory):
-        mem._memory_cache["chat1"] = (1.0, "old")
+        # Populate cache via a normal read
+        _write_memory_raw(mem._root, "chat1", "old")
+        await mem.read_memory("chat1")
+        assert "chat1" in mem._memory_cache
+
         await mem.write_memory("chat1", "new content")
         assert "chat1" not in mem._memory_cache
 
@@ -343,6 +341,95 @@ class TestWriteMemory:
     async def test_creates_directory_if_missing(self, mem: Memory, workspace: Path):
         await mem.write_memory("new-chat", "content")
         assert _memory_path(workspace, "new-chat").exists()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# write_memory cache invalidation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestWriteMemoryCacheInvalidation:
+    """Verify that write_memory() properly invalidates the mtime cache so
+    subsequent reads always reflect the freshly written content.
+
+    Covers:
+      (a) cache entry is removed (invalidate called)
+      (b) next read returns the new content, not stale cache
+      (c) cache miss counter increments on the post-write read
+    """
+
+    @pytest.mark.asyncio
+    async def test_invalidate_removes_cached_entry(self, mem: Memory, workspace: Path):
+        """write_memory() must call _memory_cache.invalidate(chat_id), removing
+        the cached entry so a subsequent read re-fetches from disk."""
+        # Arrange — populate cache via a normal read
+        _write_memory_raw(workspace, "chat1", "original")
+        await mem.read_memory("chat1")
+        assert "chat1" in mem._memory_cache  # cache populated
+
+        # Act
+        await mem.write_memory("chat1", "new content")
+
+        # Assert — cache entry removed
+        assert "chat1" not in mem._memory_cache
+
+    @pytest.mark.asyncio
+    async def test_next_read_returns_new_content(self, mem: Memory, workspace: Path):
+        """After write_memory(), a read must return the freshly written content
+        rather than the stale cached version."""
+        # Arrange
+        _write_memory_raw(workspace, "chat1", "old")
+        await mem.read_memory("chat1")
+        assert await mem.read_memory("chat1") == "old"  # cached
+
+        # Act
+        await mem.write_memory("chat1", "updated")
+
+        # Assert
+        result = await mem.read_memory("chat1")
+        assert result == "updated"
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_counter_increments(self, mem: Memory, workspace: Path):
+        """The post-write read should be a cache miss (invalidated entry forces
+        a fresh stat+read from disk), so the miss counter must increment."""
+        # Arrange — populate cache
+        _write_memory_raw(workspace, "chat1", "initial")
+        await mem.read_memory("chat1")
+        misses_before = mem._memory_cache.misses
+
+        # Act — write invalidates, then read must go to disk
+        await mem.write_memory("chat1", "replacement")
+        await mem.read_memory("chat1")
+
+        # Assert — exactly one additional miss
+        assert mem._memory_cache.misses == misses_before + 1
+
+    @pytest.mark.asyncio
+    async def test_write_then_read_populates_cache_with_new_content(
+        self, mem: Memory, workspace: Path
+    ):
+        """After write→read, the cache should store the new content and mtime
+        so subsequent reads are cache hits with the correct data."""
+        # Arrange
+        _write_memory_raw(workspace, "chat1", "v1")
+        await mem.read_memory("chat1")
+
+        # Act
+        await mem.write_memory("chat1", "v2")
+        await mem.read_memory("chat1")
+
+        # Assert — cache now holds v2 (accessed via underlying LRUDict)
+        cached = mem._memory_cache._cache.get("chat1")
+        assert cached is not None
+        # MtimeCache stores raw file content; write_memory appends \n
+        assert cached[1].strip() == "v2"
+
+        # Further read should be a cache hit
+        hits_before = mem._memory_cache.hits
+        result = await mem.read_memory("chat1")
+        assert result == "v2"
+        assert mem._memory_cache.hits == hits_before + 1
 
 
 class TestReadMemory:
@@ -369,7 +456,7 @@ class TestReadMemory:
     async def test_populates_cache_on_read(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "cached content")
         await mem.read_memory("chat1")
-        cached = mem._memory_cache.get("chat1")
+        cached = mem._memory_cache._cache.get("chat1")
         assert cached is not None
         assert cached[1] == "cached content"
 
@@ -450,7 +537,7 @@ class TestReadAgentsMd:
     async def test_caches_content(self, mem: Memory):
         mem.ensure_workspace("chat1")
         await mem.read_agents_md("chat1")
-        cached = mem._agents_cache.get("chat1")
+        cached = mem._agents_cache._cache.get("chat1")
         assert cached is not None
         assert "Agent Instructions" in cached[1]
 
@@ -1019,13 +1106,13 @@ class TestMtimeCacheConsistency:
         stores the new content and mtime — not the old values."""
         _write_memory_raw(workspace, "chat1", "first")
         await mem.read_memory("chat1")
-        old_cached = mem._memory_cache.get("chat1")
+        old_cached = mem._memory_cache._cache.get("chat1")
         assert old_cached[1] == "first"
 
         time.sleep(0.05)
         _write_memory_raw(workspace, "chat1", "second")
         await mem.read_memory("chat1")
 
-        new_cached = mem._memory_cache.get("chat1")
+        new_cached = mem._memory_cache._cache.get("chat1")
         assert new_cached[1] == "second"
         assert new_cached[0] != old_cached[0]  # mtime changed

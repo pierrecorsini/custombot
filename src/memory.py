@@ -23,7 +23,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from src.constants import MAX_LRU_CACHE_SIZE
+import time as _time
+
+from src.constants import MAX_LRU_CACHE_SIZE, MTIME_CACHE_MISSING_TTL
 from src.security import PathSecurityError, is_path_in_workspace
 from src.utils import LRUDict
 from src.utils.path import sanitize_path_component
@@ -120,12 +122,20 @@ class MtimeCache:
     Encapsulates the ``(mtime, content)`` tuple and LRU eviction so
     callers don't repeat the stat → compare → read → store dance for
     every file they want to cache.
+
+    When a file doesn't exist, the key is recorded in ``_missing`` with
+    a timestamp.  Subsequent reads within ``MTIME_CACHE_MISSING_TTL``
+    seconds return ``None`` immediately, avoiding the
+    ``asyncio.to_thread()`` hop that would otherwise stat the filesystem
+    only to discover the file is still absent.
     """
 
-    __slots__ = ("_cache", "_hits", "_misses")
+    __slots__ = ("_cache", "_missing", "_hits", "_misses")
 
     def __init__(self, max_size: int = MAX_LRU_CACHE_SIZE) -> None:
         self._cache: LRUDict = LRUDict(max_size=max_size)
+        # {key: monotonic timestamp} — tracks keys whose file was absent
+        self._missing: dict[str, float] = {}
         self._hits: int = 0
         self._misses: int = 0
 
@@ -136,6 +146,14 @@ class MtimeCache:
         or ``None`` if the file does not exist.
         Raises :class:`OSError` on I/O failures.
         """
+        # Fast path: file was previously absent and TTL hasn't expired
+        missing_ts = self._missing.get(key)
+        if missing_ts is not None:
+            if _time.monotonic() - missing_ts < MTIME_CACHE_MISSING_TTL:
+                return None
+            # TTL expired — allow a fresh stat to detect file creation
+            self._missing.pop(key, None)
+
         cached = self._cache.get(key)
         cached_mtime = cached[0] if cached else None
         try:
@@ -145,7 +163,11 @@ class MtimeCache:
         except Exception as exc:
             raise OSError(f"Read failed for {path}: {exc}") from exc
         if mtime is None:
+            # File does not exist — remember as missing
+            self._missing[key] = _time.monotonic()
             return None
+        # File exists — clear any stale missing marker
+        self._missing.pop(key, None)
         if content is None:
             # Cache hit — mtime unchanged, reuse cached content
             self._hits += 1
@@ -160,6 +182,7 @@ class MtimeCache:
     def invalidate(self, key: str) -> None:
         """Remove *key* from the cache (e.g. after a write)."""
         self._cache.pop(key, None)
+        self._missing.pop(key, None)
 
     @property
     def hits(self) -> int:

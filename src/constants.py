@@ -475,6 +475,16 @@ HEALTH_MAX_REQUEST_BODY_BYTES: int = 1024  # 1 KB
 HEALTH_MAX_URL_LENGTH: int = 2048  # 2 KB
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MtimeCache — Missing-File TTL
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Seconds to remember that a file didn't exist before rechecking via stat().
+# Avoids redundant asyncio.to_thread() hops for new chats where MEMORY.md
+# (or AGENTS.md) hasn't been created yet.  30s balances latency savings
+# against prompt detection of externally-created files.
+MTIME_CACHE_MISSING_TTL: float = 30.0
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Config Hot-Reload Watcher
 # ─────────────────────────────────────────────────────────────────────────────
 
