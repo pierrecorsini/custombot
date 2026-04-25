@@ -425,7 +425,7 @@ not addressed in Phases 1–13.
 
 ### Performance Optimization
 
-- [ ] **Eliminate double file-open in `_read_file_lines()` for large files** — `_read_file_lines()` opens the file twice for files ≥64KB: once in binary mode for the mmap reverse-seek (line 1710), then again in text mode to read the final region (line 1746). For large files, this creates two file handles and two seek operations. Refactor to decode the mmap region directly using `mm[pos:].decode("utf-8")` instead of re-opening in text mode, eliminating the second `open()` syscall and the associated OS overhead. (`src/db/db.py:1710-1753`)
+- [x] **Eliminate double file-open in `_read_file_lines()` for large files** — `_read_file_lines()` opens the file twice for files ≥64KB: once in binary mode for the mmap reverse-seek (line 1710), then again in text mode to read the final region (line 1746). For large files, this creates two file handles and two seek operations. Refactor to decode the mmap region directly using `mm[pos:].decode("utf-8")` instead of re-opening in text mode, eliminating the second `open()` syscall and the associated OS overhead. (`src/db/db.py:1710-1753`)
 
 - [ ] **Replace `RoutingEngine._scan_file_mtimes()` glob with `os.scandir()`** — `_scan_file_mtimes()` calls `self._instructions_dir.glob("*.md")` on every stale check (debounced to once per `ROUTING_WATCH_DEBOUNCE_SECONDS`). `glob()` internally lists all entries and filters by pattern. `os.scandir()` is faster because it returns `DirEntry` objects with cached `stat()` results and avoids the pattern-matching overhead. For directories with many instruction files, this reduces the stale-check cost by ~2x. (`src/routing.py:269-279`)
 

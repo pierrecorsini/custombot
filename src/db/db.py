@@ -1741,10 +1741,8 @@ class Database:
                     else:
                         pos = region_start
 
-        # Read just the needed region as text
-        with file_path.open("r", encoding="utf-8") as f:
-            f.seek(max(pos, 0))
-            remaining_text = f.read()
+                # Decode directly from mmap — avoids a second open() syscall
+                remaining_text = mm[max(pos, 0):].decode("utf-8")
 
         # Split and take last N lines, preserving order (oldest first)
         all_lines = remaining_text.splitlines()
