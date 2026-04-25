@@ -477,7 +477,7 @@ not addressed in Phases 1–13.
 
 - [x] **Add integration test for `process_scheduled()` end-to-end with event emission** — Once event emission is added to `process_scheduled()`, verify: (a) `scheduled_task_started` event is emitted with correct `chat_id`, (b) `scheduled_task_completed` event is emitted after the response is persisted, (c) event data includes the response length. Subscribe a mock handler to verify emission. (`tests/integration/test_scheduled_pipeline.py`)
 
-- [ ] **Add test for `_read_file_lines()` double-open elimination** — After consolidating the mmap path to avoid re-opening the file, verify: (a) the returned lines are identical to the previous implementation, (b) files at exactly the 64KB boundary are handled correctly, (c) an empty file returns an empty list, (d) a file with only a header line returns an empty list. (`tests/unit/test_db.py`)
+- [x] **Add test for `_read_file_lines()` double-open elimination** — After consolidating the mmap path to avoid re-opening the file, verify: (a) the returned lines are identical to the previous implementation, (b) files at exactly the 64KB boundary are handled correctly, (c) an empty file returns an empty list, (d) a file with only a header line returns an empty list. (`tests/unit/test_db.py`)
 
 - [ ] **Add test for `_IPLimiter` rate limiting with burst and cooldown** — Verify that: (a) requests within the limit are allowed, (b) requests exceeding the limit within the window are rejected with a `retry_after` value, (c) after the window expires, requests are allowed again, (d) LRU eviction works when `max_ips` is exceeded. (`tests/unit/test_health_security_headers.py` or new file)
 
