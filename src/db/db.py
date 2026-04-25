@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mmap
 import os
 import re
 import shutil
@@ -1625,9 +1626,9 @@ class Database:
         """Read the last N lines from a file without reading the entire file.
 
         For small files (<64KB), reads normally using deque for O(limit) memory.
-        For larger files, seeks backwards from the end in chunks to find line
-        boundaries, then reads only the needed region — achieving O(limit) I/O
-        instead of O(total_lines).
+        For larger files, uses mmap-based reverse-seek to find line boundaries,
+        letting the OS manage page-level access without loading the entire file
+        into Python memory. Falls back to deque read if mmap is unavailable.
 
         If the reverse-seek exceeds ``_MAX_SEEK_ITERATIONS`` chunks (e.g. a
         corrupted file with very few newlines), it falls back to a simple
@@ -1640,43 +1641,45 @@ class Database:
             with file_path.open("r", encoding="utf-8") as f:
                 return [line.rstrip("\r") for line in deque(f, maxlen=limit)]
 
-        # Reverse seek: find line boundaries from the end without reading
-        # every line. We count newlines in binary chunks to locate the
-        # byte offset where the last N lines begin.
-        chunk_size = 8192
-        pos = file_size
-        newline_count = 0
         target_newlines = limit + 1  # +1 because last line may not end with \n
+        newline_count = 0
         iterations = 0
+        pos = file_size
 
         with file_path.open("rb") as f:
-            while pos > 0 and newline_count < target_newlines:
-                iterations += 1
-                if iterations > self._MAX_SEEK_ITERATIONS:
-                    log.warning(
-                        "Reverse-seek exceeded %d chunks for %s; "
-                        "falling back to deque read (file may be corrupted).",
-                        self._MAX_SEEK_ITERATIONS,
-                        file_path,
-                        extra=_db_log_extra(),
-                    )
-                    f.close()
-                    with file_path.open("r", encoding="utf-8") as fb:
-                        return [line.rstrip("\r") for line in deque(fb, maxlen=limit)]
+            try:
+                mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            except (OSError, ValueError):
+                # mmap unavailable (special filesystem, empty mapping) — fall back
+                return [line.rstrip("\r") for line in deque(f, maxlen=limit)]
 
-                read_size = min(chunk_size, pos)
-                pos -= read_size
-                f.seek(pos)
-                chunk = f.read(read_size)
+            with mm:
+                while pos > 0 and newline_count < target_newlines:
+                    iterations += 1
+                    if iterations > self._MAX_SEEK_ITERATIONS:
+                        log.warning(
+                            "Reverse-seek exceeded %d chunks for %s; "
+                            "falling back to deque read (file may be corrupted).",
+                            self._MAX_SEEK_ITERATIONS,
+                            file_path,
+                            extra=_db_log_extra(),
+                        )
+                        with file_path.open("r", encoding="utf-8") as fb:
+                            return [line.rstrip("\r") for line in deque(fb, maxlen=limit)]
 
-                # Count newlines in this chunk
-                for i in range(len(chunk) - 1, -1, -1):
-                    if chunk[i] == ord("\n"):
-                        newline_count += 1
-                        if newline_count >= target_newlines:
-                            # pos + i + 1 is the byte offset of the first line we want
-                            pos = pos + i + 1
-                            break
+                    # Scan a region of up to 8192 bytes backwards through
+                    # the mmap. The OS manages page-level access so only
+                    # touched pages are loaded into memory.
+                    region_end = pos
+                    region_start = max(0, pos - 8192)
+                    for i in range(region_end - 1, region_start - 1, -1):
+                        if mm[i] == ord("\n"):
+                            newline_count += 1
+                            if newline_count >= target_newlines:
+                                pos = i + 1
+                                break
+                    else:
+                        pos = region_start
 
         # Read just the needed region as text
         with file_path.open("r", encoding="utf-8") as f:
