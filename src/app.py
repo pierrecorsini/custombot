@@ -5,6 +5,9 @@ Encapsulates the full bot application lifecycle in a single class,
 with named methods for each phase: startup, wiring, message handling,
 and shutdown. Makes the startup sequence testable without a running
 WhatsApp connection.
+
+Startup is delegated to ``StartupOrchestrator`` (see ``src/core/startup.py``)
+which executes a declarative list of ``ComponentSpec`` steps in order.
 """
 
 from __future__ import annotations
@@ -12,65 +15,42 @@ from __future__ import annotations
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from src.builder import BotComponents, _build_bot
+from src.builder import BotComponents
 from src.channels.base import BaseChannel, IncomingMessage
-from src.config import Config, CONFIG_PATH
-from src.config.config_watcher import ConfigChangeApplier, ConfigWatcher
-from src.constants import CONFIG_WATCH_INTERVAL_SECONDS, DEFAULT_CHANNEL_STARTUP_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT, DEFAULT_THREAD_POOL_WORKERS, WORKSPACE_CLEANUP_INTERVAL_SECONDS, WORKSPACE_DIR
-from src.core.event_bus import EVENT_ERROR_OCCURRED, Event, get_event_bus
-from src.core.message_pipeline import (
-    MessageContext,
-    MessagePipeline,
-    PipelineDependencies,
-    build_pipeline_from_config,
-)
-from src.lifecycle import (
-    _log_component_init,
-    _log_component_ready,
-    _log_startup_begin,
-    _log_startup_complete,
-    perform_shutdown,
-)
+from src.config import Config
+from src.constants import DEFAULT_CHANNEL_STARTUP_TIMEOUT
+from src.core.event_bus import Event, EventName, get_event_bus
+from src.core.message_pipeline import MessageContext, MessagePipeline
+from src.core.startup import StartupContext, StartupOrchestrator
+from src.lifecycle import _log_component_init, _log_component_ready, _log_startup_complete, perform_shutdown
 from src.logging.logging_config import (
     clear_correlation_id,
     get_correlation_id,
     set_correlation_id,
 )
 from src.monitoring import SessionMetrics
-from src.monitoring.workspace_monitor import WorkspaceMonitor
-from src.scheduler import TaskScheduler
-from src.shutdown import GracefulShutdown
-from src.skills.builtin.task_scheduler import set_scheduler_instance
 from src.ui.cli_output import cli as cli_output
 
 if TYPE_CHECKING:
+    from src.config.config_watcher import ConfigWatcher
     from src.health import HealthServer
+    from src.monitoring.workspace_monitor import WorkspaceMonitor
+    from src.scheduler import TaskScheduler
+    from src.shutdown import GracefulShutdown
 
 log = logging.getLogger(__name__)
-
-
-class _NoOpConfigApplier:
-    """Fallback applier used when the channel is not a WhatsAppChannel (e.g. tests).
-
-    Still detects and logs config changes but does not propagate them to
-    components that require a concrete channel type.
-    """
-
-    def apply(self, old_config: Config, new_config: Config) -> None:
-        log.debug("Config change detected but channel is mocked — skipping apply")
 
 
 class Application:
     """Encapsulates the full bot application lifecycle.
 
     Phases:
-        1. ``_startup()`` — Initialize all components
-        2. ``_wire_scheduler()`` — Configure scheduler callbacks
+        1. ``_startup()`` — Initialize all components via ``StartupOrchestrator``
+        2. ``run()`` — Start polling, wait for shutdown, then cleanup
         3. ``_on_message()`` — Handle incoming messages
-        4. ``run()`` — Start polling, wait for shutdown, then cleanup
+        4. ``_shutdown_cleanup()`` — Graceful teardown
     """
 
     def __init__(
@@ -87,7 +67,7 @@ class Application:
         self._session_metrics = SessionMetrics()
         self._initialized_components: list[str] = []
 
-        # Components — set during _startup()
+        # Components — set during _startup() by StartupOrchestrator steps
         self._shutdown_mgr: GracefulShutdown | None = None
         self._components: BotComponents | None = None
         self._scheduler: TaskScheduler | None = None
@@ -96,6 +76,7 @@ class Application:
         self._executor: ThreadPoolExecutor | None = None
         self._workspace_monitor: WorkspaceMonitor | None = None
         self._config_watcher: ConfigWatcher | None = None
+        self._health_server: HealthServer | None = None
 
     @property
     def channel(self) -> BaseChannel:
@@ -189,132 +170,28 @@ class Application:
     # ── Startup Phase ───────────────────────────────────────────────────────
 
     async def _startup(self) -> float:
-        """Initialize all components and return the startup begin timestamp."""
-        from src.channels.whatsapp import WhatsAppChannel
+        """Initialize all components via ``StartupOrchestrator``.
 
-        startup_time = _log_startup_begin(self._config)
-
-        # Shutdown manager
-        _log_component_init("Shutdown Manager", "started")
-        timeout = (
-            self._config.shutdown_timeout
-            if self._config.shutdown_timeout is not None
-            else DEFAULT_SHUTDOWN_TIMEOUT
+        Returns the startup begin timestamp for duration tracking.
+        """
+        ctx = StartupContext(
+            config=self._config,
+            session_metrics=self._session_metrics,
+            app=self,
         )
-        self._shutdown_mgr = GracefulShutdown(timeout=timeout)
-        loop = asyncio.get_running_loop()
-        self.shutdown_mgr.register_signal_handlers(loop)
-        _log_component_ready("Shutdown Manager")
-        self._initialized_components.append("Shutdown Manager")
+        orchestrator = StartupOrchestrator(ctx)
+        startup_time = await orchestrator.run_all()
 
-        # Thread pool executor — must be set BEFORE _build_bot() so all
-        # subsequent asyncio.to_thread() calls use the configured pool.
-        _log_component_init("Thread Pool Executor", "started")
-        workers = self._config.max_thread_pool_workers or DEFAULT_THREAD_POOL_WORKERS
-        self._executor = ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="cb-worker"
-        )
-        loop.set_default_executor(self._executor)
-        _log_component_ready("Thread Pool Executor", f"max_workers={workers}")
-        self._initialized_components.append(f"Thread Pool ({workers} workers)")
-
-        # Bot components
-        _log_component_init("Bot Components", "started")
-        self._components = await _build_bot(self._config, session_metrics=self._session_metrics)
-        self.components.bot.validate_wiring()
-        _log_component_ready("Bot Components", "all subsystems ready")
-        self._initialized_components.append("Bot (LLM, Memory, Skills, Routing)")
-        self._initialized_components.append("Database")
-
-        # Scheduler
-        self._scheduler = await self._init_scheduler()
-
-        # Channel
-        _log_component_init("WhatsApp Channel", "started")
-        self._channel = WhatsAppChannel(
-            self._config.whatsapp,
-            safe_mode=self._safe_mode,
-            load_history=self._config.load_history,
-        )
-        _log_component_ready(
-            "WhatsApp Channel", f"provider={self._config.whatsapp.provider}"
-        )
-        self._initialized_components.append("WhatsApp Channel")
-
-        self._wire_scheduler()
-        await self._start_health_server()
-
-        # Recover stale messages from previous crash/restart
-        await self.components.bot.recover_pending_messages(channel=self.channel)
-
-        self._pipeline = self._build_pipeline()
-
-        # Start workspace size monitoring and periodic cleanup
-        _log_component_init("Workspace Monitor", "started")
-        self._workspace_monitor = WorkspaceMonitor(workspace_dir=WORKSPACE_DIR)
-        self._workspace_monitor.start_periodic_cleanup()
-        _log_component_ready(
-            "Workspace Monitor",
-            f"interval={WORKSPACE_CLEANUP_INTERVAL_SECONDS:.0f}s",
-        )
-        self._initialized_components.append("Workspace Monitor")
-
-        # Start config hot-reload watcher (polling-based)
-        _log_component_init("Config Watcher", "started")
-        self._config_watcher = self._init_config_watcher()
-        self._config_watcher.start()
-        _log_component_ready(
-            "Config Watcher",
-            f"path={CONFIG_PATH}, interval={CONFIG_WATCH_INTERVAL_SECONDS:.0f}s",
-        )
-        self._initialized_components.append("Config Watcher")
+        # Update the health server with the complete startup durations
+        # (the snapshot taken during _step_health_server only covers steps
+        # that ran *before* the Health Server step).
+        if self._health_server is not None:
+            full_durations = dict(ctx.component_durations)
+            if ctx.components is not None and ctx.components.component_durations:
+                full_durations.update(ctx.components.component_durations)
+            self._health_server.update_startup_durations(full_durations)
 
         return startup_time
-
-    async def _init_scheduler(self) -> TaskScheduler:
-        """Create, configure, and start the task scheduler."""
-        _log_component_init("Task Scheduler", "started")
-        workspace = Path(WORKSPACE_DIR)
-        scheduler = TaskScheduler()
-        # Wire unified dedup service for outbound message dedup
-        scheduler.set_dedup_service(self.components.dedup)
-        scheduler.configure(
-            workspace=workspace,
-            on_trigger=lambda chat_id, prompt: self.components.bot.process_scheduled(
-                chat_id, prompt
-            ),
-        )
-        set_scheduler_instance(scheduler)
-        await scheduler.load_all()
-        scheduler.start()
-        _log_component_ready("Task Scheduler", f"workspace={workspace}")
-        self._initialized_components.append("Task Scheduler")
-        return scheduler
-
-    def _init_config_watcher(self) -> ConfigWatcher:
-        """Create the config hot-reload watcher with component references."""
-        from src.channels.whatsapp import WhatsAppChannel
-
-        # Only set up hot-reload with a real WhatsAppChannel (not test mocks)
-        if not isinstance(self._channel, WhatsAppChannel):
-            log.debug(
-                "Config watcher: channel is not WhatsAppChannel — using no-op applier"
-            )
-            applier = _NoOpConfigApplier()
-        else:
-            applier = ConfigChangeApplier(
-                app_config=self._config,
-                bot=self.components.bot,
-                channel=self._channel,
-                llm=self.components.llm,
-                shutdown_mgr=self.shutdown_mgr,
-                reconfigure_logging=self._reconfigure_logging,
-            )
-        return ConfigWatcher(
-            config_path=CONFIG_PATH,
-            current_config=self._config,
-            applier=applier,
-        )
 
     @staticmethod
     def _reconfigure_logging(config: Config) -> None:
@@ -339,6 +216,8 @@ class Application:
         custom middleware paths are driven by ``config.json``.  Falls back
         to the built-in default order when ``middleware_order`` is empty.
         """
+        from src.core.message_pipeline import PipelineDependencies, build_pipeline_from_config
+
         mw_cfg = self._config.middleware
         deps = PipelineDependencies(
             shutdown_mgr=self.shutdown_mgr,
@@ -353,7 +232,7 @@ class Application:
             deps=deps,
         )
 
-    # ── Wiring Phase ────────────────────────────────────────────────────────
+    # ── Wiring ──────────────────────────────────────────────────────────────
 
     def _wire_scheduler(self) -> None:
         """Wire scheduler callbacks to the WhatsApp channel."""
@@ -370,37 +249,6 @@ class Application:
                 chat_id, prompt, channel=channel
             )
         )
-
-    async def _start_health_server(self) -> None:
-        """Start health check server if a port was configured."""
-        if not self._health_port:
-            return
-
-        from src.health import HealthServer
-
-        _log_component_init("Health Server", "started")
-        try:
-            self._health_server = HealthServer(
-                db=self.components.db,
-                token_usage=self.components.token_usage,
-                bot=self.components.bot,
-                scheduler=self.scheduler,
-                llm_log_dir=(
-                    f"{WORKSPACE_DIR}/logs/llm" if self._config.log_llm else None
-                ),
-                workspace_dir=WORKSPACE_DIR,
-                shutdown_mgr=self.shutdown_mgr,
-            )
-            await self._health_server.start(port=self._health_port)
-            _log_component_ready("Health Server", f"port={self._health_port}")
-            self._initialized_components.append(f"Health Server (port {self._health_port})")
-            cli_output.dim(
-                f"  Health check: http://0.0.0.0:{self._health_port}/health  "
-                f"Readiness: http://0.0.0.0:{self._health_port}/ready"
-            )
-        except Exception as e:
-            log.warning("Failed to start health server on port %d: %s", self._health_port, e)
-            self._health_server = None
 
     # ── Message Handler ─────────────────────────────────────────────────────
 
@@ -426,7 +274,7 @@ class Application:
             # break the error-handling path.
             try:
                 await get_event_bus().emit(Event(
-                    name=EVENT_ERROR_OCCURRED,
+                    name=EventName.ERROR_OCCURRED,
                     data={
                         "chat_id": msg.chat_id,
                         "error_type": type(exc).__name__,
