@@ -2643,6 +2643,165 @@ class TestEmbedBatchApiErrorPropagation:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# _embed_batch() Count Validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEmbedBatchCountValidation:
+    """Tests for _embed_batch() count validation when the API returns a
+    mismatched number of embeddings.
+
+    The _embed_batch() implementation validates that the API returns exactly
+    len(unique_texts) embedding results. If the count doesn't match (e.g. due
+    to content filtering or API errors), a ValueError is raised.
+
+    This covers aspect (c) of the Phase 14 test requirement:
+      "count validation when API returns fewer embeddings than requested"
+
+    Aspects (a) and (b) — mixed cached/uncached batches and duplicate text
+    deduplication — are covered by TestEmbedBatchCacheInflight.
+    """
+
+    @pytest.mark.asyncio
+    async def test_api_returns_fewer_embeddings_raises_value_error(
+        self, db_path: Path
+    ):
+        """When the API returns fewer embeddings than unique texts,
+        _embed_batch() raises ValueError with a descriptive message."""
+        client = _make_mock_client()
+        original_create = client.embeddings.create
+
+        async def short_response_create(**kwargs):
+            inp = kwargs["input"]
+            if isinstance(inp, list) and len(inp) > 1:
+                # Return only 1 embedding regardless of input count
+                text = inp[0]
+                seed = int(hashlib.sha256(text.encode()).hexdigest(), 16) % (2**31)
+                vec = _make_embedding(seed)
+                resp = MagicMock()
+                resp.data = [MagicMock(embedding=vec)]
+                return resp
+            return await original_create(**kwargs)
+
+        client.embeddings.create = short_response_create
+
+        vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm.connect()
+
+        with pytest.raises(ValueError, match="returned 1 results for 2 inputs"):
+            await vm._embed_batch(["text_x", "text_y"])
+
+        vm.close()
+
+    @pytest.mark.asyncio
+    async def test_api_returns_zero_embeddings(self, db_path: Path):
+        """When the API returns an empty data list for a non-empty batch,
+        ValueError is raised."""
+        client = _make_mock_client()
+
+        async def empty_response_create(**kwargs):
+            resp = MagicMock()
+            resp.data = []
+            return resp
+
+        client.embeddings.create = empty_response_create
+
+        vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm.connect()
+
+        with pytest.raises(ValueError, match="returned 0 results for 3 inputs"):
+            await vm._embed_batch(["aaa", "bbb", "ccc"])
+
+        vm.close()
+
+    @pytest.mark.asyncio
+    async def test_count_mismatch_cleans_up_inflight(self, db_path: Path):
+        """After a count mismatch error, all in-flight entries should be removed."""
+        client = _make_mock_client()
+
+        async def empty_response_create(**kwargs):
+            resp = MagicMock()
+            resp.data = []
+            return resp
+
+        client.embeddings.create = empty_response_create
+
+        vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm.connect()
+
+        with pytest.raises(ValueError):
+            await vm._embed_batch(["aaa", "bbb", "ccc"])
+
+        for text in ["aaa", "bbb", "ccc"]:
+            key = hashlib.sha256(text.encode()).hexdigest()
+            assert key not in vm._inflight
+
+        vm.close()
+
+    @pytest.mark.asyncio
+    async def test_count_mismatch_does_not_pollute_cache(self, db_path: Path):
+        """After a count mismatch error, the LRU cache should not contain entries
+        for any of the texts that were sent to the API."""
+        client = _make_mock_client()
+        original_create = client.embeddings.create
+
+        async def one_short_create(**kwargs):
+            inp = kwargs["input"]
+            if isinstance(inp, list) and len(inp) > 1:
+                # Return one fewer embedding than requested
+                results = []
+                for text in inp[:-1]:
+                    seed = int(hashlib.sha256(text.encode()).hexdigest(), 16) % (2**31)
+                    vec = _make_embedding(seed)
+                    results.append(MagicMock(embedding=vec))
+                resp = MagicMock()
+                resp.data = results
+                return resp
+            return await original_create(**kwargs)
+
+        client.embeddings.create = one_short_create
+
+        vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm.connect()
+
+        with pytest.raises(ValueError):
+            await vm._embed_batch(["uncached_a", "uncached_b"])
+
+        for text in ["uncached_a", "uncached_b"]:
+            key = hashlib.sha256(text.encode()).hexdigest()
+            assert key not in vm._embed_cache
+
+        vm.close()
+
+    @pytest.mark.asyncio
+    async def test_value_error_not_retried(self, db_path: Path):
+        """ValueError from count mismatch is non-transient, so @retry_with_backoff
+        should not retry — the API is called exactly once."""
+        client = _make_mock_client()
+        call_count = 0
+
+        async def counting_empty_create(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            resp = MagicMock()
+            resp.data = []
+            return resp
+
+        client.embeddings.create = counting_empty_create
+
+        vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm.connect()
+
+        with pytest.raises(ValueError):
+            await vm._embed_batch(["text1", "text2"])
+
+        # ValueError is non-transient — no retries
+        assert call_count == 1
+
+        vm.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Concurrent Read-Write Isolation (WAL-mode snapshot consistency)
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -465,7 +465,7 @@ not addressed in Phases 1–13.
 
 ### Test Coverage
 
-- [ ] **Add test for `VectorMemory._embed_batch()` deduplication and cache resolution** — `_embed_batch()` has complex logic: LRU cache check → in-flight dedup → API call → future resolution. There's no test covering: (a) a batch where some texts are cached and some aren't, (b) duplicate texts within the same batch, (c) the count validation when API returns fewer embeddings than requested. (`tests/unit/test_vector_memory.py`)
+- [x] **Add test for `VectorMemory._embed_batch()` deduplication and cache resolution** — `_embed_batch()` has complex logic: LRU cache check → in-flight dedup → API call → future resolution. There's no test covering: (a) a batch where some texts are cached and some aren't, (b) duplicate texts within the same batch, (c) the count validation when API returns fewer embeddings than requested. (`tests/unit/test_vector_memory.py`)
 
 - [ ] **Add test for `_FileHandlePool` LRU eviction and stale-handle recovery** — `_FileHandlePool` manages a bounded pool of file handles with LRU eviction. No test verifies: (a) that handles are evicted when the pool exceeds `max_size`, (b) that a closed/stale handle is detected and reopened on next `get_or_open()`, (c) that `invalidate()` correctly removes a handle from the pool. (`tests/unit/test_db.py`)
 
