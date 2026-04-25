@@ -338,7 +338,7 @@ production readiness gaps not addressed in Phases 1–12.
 
 - [x] **Add `mmap`-based reverse-seek for large JSONL files in `_read_file_lines()`** — `_read_file_lines()` does a reverse byte-seek to read the last N lines from a JSONL file. For very large files (5000+ lines), this involves reading potentially hundreds of KB sequentially. Using `mmap.mmap()` for the seek operation avoids loading the entire file into Python memory and allows the OS to manage page-level access. This is a targeted optimization for the compression-threshold scenario. (`src/db/db.py` — `_read_file_lines` method)
 
-- [ ] **Batch `save_message` calls in `process_scheduled()` into a single `save_messages_batch`** — `process_scheduled()` calls `upsert_chat`, then `save_message` for the user turn, then `save_message` for the assistant turn (3 separate file writes). Each `save_message` acquires the per-chat lock, opens the JSONL file, appends, and closes. Combine all 3 writes into a single `save_messages_batch` call to reduce file I/O from 3 round-trips to 1, consistent with how `_finalize_response` already batches writes. (`src/bot.py:777-789`)
+- [x] **Batch `save_message` calls in `process_scheduled()` into a single `save_messages_batch`** — `process_scheduled()` calls `upsert_chat`, then `save_message` for the user turn, then `save_message` for the assistant turn (3 separate file writes). Each `save_message` acquires the per-chat lock, opens the JSONL file, appends, and closes. Combine all 3 writes into a single `save_messages_batch` call to reduce file I/O from 3 round-trips to 1, consistent with how `_finalize_response` already batches writes. (`src/bot.py:777-789`)
 
 ### Error Handling & Resilience
 

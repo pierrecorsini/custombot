@@ -29,6 +29,7 @@ from src.exceptions import ErrorCode, LLMError
 from src.rate_limiter import RateLimitResult
 from src.routing import RoutingRule
 from src.security.prompt_injection import ContentFilterResult
+from tests.helpers.llm_mocks import make_chat_response, make_tool_call
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -128,40 +129,6 @@ def _make_routing_rule(
         skillExecVerbose=skillExecVerbose,
     )
 
-
-def _make_llm_response(
-    content: str = "Hello back!",
-    finish_reason: str = "stop",
-    tool_calls: list | None = None,
-) -> MagicMock:
-    """Create a mock LLM chat completion response."""
-    message = MagicMock()
-    message.content = content
-    message.tool_calls = tool_calls
-
-    choice = MagicMock()
-    choice.finish_reason = finish_reason
-    choice.message = message
-
-    completion = MagicMock()
-    completion.choices = [choice]
-    return completion
-
-
-def _make_tool_call(
-    call_id: str = "call_001",
-    name: str = "web_search",
-    arguments: str = '{"query": "test"}',
-) -> MagicMock:
-    """Create a mock tool call object."""
-    func = MagicMock()
-    func.name = name
-    func.arguments = arguments
-
-    tool_call = MagicMock()
-    tool_call.id = call_id
-    tool_call.function = func
-    return tool_call
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -642,7 +609,7 @@ class TestHandleMessageRateLimiting:
         bot._routing = routing
 
         # Simulate an LLM that stops immediately
-        response = _make_llm_response(content="Hi there!")
+        response = make_chat_response(content="Hi there!")
         bot._llm.chat = AsyncMock(return_value=response)
 
         # Mock build_context and other internals
@@ -674,7 +641,7 @@ class TestHandleMessageQueue:
         routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
 
-        response = _make_llm_response(content="response")
+        response = make_chat_response(content="response")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -695,7 +662,7 @@ class TestHandleMessageQueue:
         routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
 
-        response = _make_llm_response(content="response")
+        response = make_chat_response(content="response")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -714,7 +681,7 @@ class TestHandleMessageQueue:
         routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
 
-        response = _make_llm_response(content="response")
+        response = make_chat_response(content="response")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -824,7 +791,7 @@ class TestHandleMessageMetrics:
         mock_metrics = MagicMock()
         bot._metrics = mock_metrics
 
-        response = _make_llm_response(content="ok")
+        response = make_chat_response(content="ok")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -847,7 +814,7 @@ class TestHandleMessageMetrics:
         mock_metrics = MagicMock()
         bot._metrics = mock_metrics
 
-        response = _make_llm_response(content="ok")
+        response = make_chat_response(content="ok")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -1015,7 +982,7 @@ class TestReactLoop:
     async def test_immediate_stop_returns_content(self):
         """LLM returns stop immediately — no tool calls."""
         bot = _make_bot()
-        response = _make_llm_response(content="Final answer", finish_reason="stop")
+        response = make_chat_response(content="Final answer", finish_reason="stop")
         bot._llm.chat = AsyncMock(return_value=response)
 
         text, tool_log = await bot._react_loop(
@@ -1031,7 +998,7 @@ class TestReactLoop:
         """LLM returns stop with None content — fallback to default."""
         bot = _make_bot()
         bot._metrics = MagicMock()
-        response = _make_llm_response(content=None, finish_reason="stop")
+        response = make_chat_response(content=None, finish_reason="stop")
         bot._llm.chat = AsyncMock(return_value=response)
 
         text, tool_log = await bot._react_loop(
@@ -1048,13 +1015,13 @@ class TestReactLoop:
         bot = _make_bot()
 
         # First LLM call returns tool_calls, second returns stop
-        tool_call = _make_tool_call()
-        tool_response = _make_llm_response(
+        tool_call = make_tool_call()
+        tool_response = make_chat_response(
             content=None,
             finish_reason="tool_calls",
             tool_calls=[tool_call],
         )
-        stop_response = _make_llm_response(content="Done!", finish_reason="stop")
+        stop_response = make_chat_response(content="Done!", finish_reason="stop")
         bot._llm.chat = AsyncMock(side_effect=[tool_response, stop_response])
 
         # Mock tool_call_to_dict and tool executor
@@ -1095,9 +1062,9 @@ class TestReactLoop:
         bot = _make_bot(max_tool_iterations=3)
         bot._metrics = MagicMock()
 
-        tool_call = _make_tool_call()
+        tool_call = make_tool_call()
         # Every iteration returns tool_calls (never stops)
-        tool_response = _make_llm_response(
+        tool_response = make_chat_response(
             content=None,
             finish_reason="tool_calls",
             tool_calls=[tool_call],
@@ -1125,7 +1092,7 @@ class TestReactLoop:
     async def test_tracks_llm_latency(self):
         bot = _make_bot()
         bot._metrics = MagicMock()
-        response = _make_llm_response(content="hi", finish_reason="stop")
+        response = make_chat_response(content="hi", finish_reason="stop")
         bot._llm.chat = AsyncMock(return_value=response)
 
         await bot._react_loop(
@@ -1140,14 +1107,14 @@ class TestReactLoop:
         """Edge case: finish_reason is not 'tool_calls' but tool_calls exist."""
         bot = _make_bot()
 
-        tool_call = _make_tool_call()
+        tool_call = make_tool_call()
         # finish_reason is "stop" but tool_calls are present (edge case)
-        edge_response = _make_llm_response(
+        edge_response = make_chat_response(
             content=None,
             finish_reason="stop",
             tool_calls=[tool_call],
         )
-        stop_response = _make_llm_response(content="Done!", finish_reason="stop")
+        stop_response = make_chat_response(content="Done!", finish_reason="stop")
         bot._llm.chat = AsyncMock(side_effect=[edge_response, stop_response])
         bot._llm.tool_call_to_dict = MagicMock(
             return_value={
@@ -1171,7 +1138,7 @@ class TestReactLoop:
         """finish_reason is 'tool_calls' but tool_calls list is empty."""
         bot = _make_bot()
         # First call has tool_calls finish_reason but empty list
-        empty_tc_response = _make_llm_response(
+        empty_tc_response = make_chat_response(
             content=None,
             finish_reason="tool_calls",
             tool_calls=[],  # empty list
@@ -1180,7 +1147,7 @@ class TestReactLoop:
         # which iterates over empty list, so no tool execution happens
         # But choice.message.tool_calls is [], so iteration does nothing
         # Then we loop again
-        stop_response = _make_llm_response(content="Done!", finish_reason="stop")
+        stop_response = make_chat_response(content="Done!", finish_reason="stop")
         bot._llm.chat = AsyncMock(side_effect=[empty_tc_response, stop_response])
         bot._llm.tool_call_to_dict = MagicMock(
             return_value={
@@ -1210,7 +1177,7 @@ class TestProcessToolCalls:
 
     async def test_processes_single_tool_call(self):
         bot = _make_bot()
-        tool_call = _make_tool_call()
+        tool_call = make_tool_call()
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
@@ -1236,8 +1203,8 @@ class TestProcessToolCalls:
 
     async def test_processes_multiple_tool_calls(self):
         bot = _make_bot()
-        tc1 = _make_tool_call(call_id="c1", name="web_search", arguments='{"q": "a"}')
-        tc2 = _make_tool_call(call_id="c2", name="bash", arguments='{"cmd": "ls"}')
+        tc1 = make_tool_call(call_id="c1", name="web_search", arguments='{"q": "a"}')
+        tc2 = make_tool_call(call_id="c2", name="bash", arguments='{"cmd": "ls"}')
 
         choice = MagicMock()
         choice.message.tool_calls = [tc1, tc2]
@@ -1264,7 +1231,7 @@ class TestProcessToolCalls:
     async def test_invalid_json_args_handled(self):
         """Tool call with invalid JSON arguments falls back to empty dict."""
         bot = _make_bot()
-        tool_call = _make_tool_call(arguments="not valid json{{{")
+        tool_call = make_tool_call(arguments="not valid json{{{")
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
@@ -1286,7 +1253,7 @@ class TestProcessToolCalls:
     async def test_null_arguments_handled(self):
         """Tool call with null arguments falls back to empty dict."""
         bot = _make_bot()
-        tool_call = _make_tool_call(arguments=None)
+        tool_call = make_tool_call(arguments=None)
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
@@ -1308,7 +1275,7 @@ class TestProcessToolCalls:
     async def test_stream_callback_called(self):
         """Stream callback is invoked for each tool execution."""
         bot = _make_bot()
-        tool_call = _make_tool_call()
+        tool_call = make_tool_call()
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
@@ -1338,7 +1305,7 @@ class TestProcessToolCalls:
     async def test_no_stream_callback_without_one(self):
         """No error when stream_callback is None."""
         bot = _make_bot()
-        tool_call = _make_tool_call()
+        tool_call = make_tool_call()
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
@@ -1405,7 +1372,7 @@ class TestProcessToolCalls:
     async def test_tool_result_appended_to_messages(self):
         """Verify the tool result message has correct structure."""
         bot = _make_bot()
-        tool_call = _make_tool_call(call_id="tc_999")
+        tool_call = make_tool_call(call_id="tc_999")
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
@@ -1431,8 +1398,8 @@ class TestProcessToolCalls:
     async def test_multiple_tool_calls_execute_in_parallel(self):
         """Multiple tool calls run concurrently, not sequentially."""
         bot = _make_bot()
-        tc1 = _make_tool_call(call_id="c1", name="web_search", arguments='{"q": "a"}')
-        tc2 = _make_tool_call(call_id="c2", name="bash", arguments='{"cmd": "ls"}')
+        tc1 = make_tool_call(call_id="c1", name="web_search", arguments='{"q": "a"}')
+        tc2 = make_tool_call(call_id="c2", name="bash", arguments='{"cmd": "ls"}')
 
         choice = MagicMock()
         choice.message.tool_calls = [tc1, tc2]
@@ -1473,7 +1440,7 @@ class TestProcessToolCalls:
     async def test_parallel_malformed_tool_does_not_block_siblings(self):
         """A malformed tool call (missing function) doesn't block other tool calls."""
         bot = _make_bot()
-        tc1 = _make_tool_call(call_id="c1", name="web_search", arguments='{"q": "a"}')
+        tc1 = make_tool_call(call_id="c1", name="web_search", arguments='{"q": "a"}')
         tc2 = MagicMock()
         tc2.id = "c2"
         tc2.function = None
@@ -1513,7 +1480,7 @@ class TestProcessToolCalls:
         total = MAX_TOOL_CALLS_PER_TURN + 3
         tool_calls = []
         for i in range(total):
-            tc = _make_tool_call(
+            tc = make_tool_call(
                 call_id=f"c{i}",
                 name=f"tool_{i}",
                 arguments=f'{{"arg": {i}}}',
@@ -1581,7 +1548,7 @@ class TestProcessToolCalls:
 
         tool_calls = []
         for i in range(MAX_TOOL_CALLS_PER_TURN):
-            tc = _make_tool_call(call_id=f"c{i}", name=f"tool_{i}")
+            tc = make_tool_call(call_id=f"c{i}", name=f"tool_{i}")
             tc.type = "function"  # MagicMock doesn't auto-match strings
             tool_calls.append(tc)
 
@@ -1633,9 +1600,9 @@ class TestProcessToolCalls:
 
         bot = _make_bot()
 
-        tc1 = _make_tool_call(call_id="c1", name="fast_tool", arguments='{"a": 1}')
+        tc1 = make_tool_call(call_id="c1", name="fast_tool", arguments='{"a": 1}')
         tc1.type = "function"
-        tc2 = _make_tool_call(call_id="c2", name="slow_tool", arguments='{"b": 2}')
+        tc2 = make_tool_call(call_id="c2", name="slow_tool", arguments='{"b": 2}')
         tc2.type = "function"
 
         choice = MagicMock()
@@ -1720,7 +1687,7 @@ class TestProcess:
         routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
 
-        response = _make_llm_response(content="Hi!")
+        response = make_chat_response(content="Hi!")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -1746,7 +1713,7 @@ class TestProcess:
         routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
 
-        response = _make_llm_response(content="Final answer")
+        response = make_chat_response(content="Final answer")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -1770,9 +1737,9 @@ class TestProcess:
         routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
 
-        tool_call = _make_tool_call()
-        tool_response = _make_llm_response(finish_reason="tool_calls", tool_calls=[tool_call])
-        stop_response = _make_llm_response(content="Here's what I found")
+        tool_call = make_tool_call()
+        tool_response = make_chat_response(finish_reason="tool_calls", tool_calls=[tool_call])
+        stop_response = make_chat_response(content="Here's what I found")
         bot._llm.chat = AsyncMock(side_effect=[tool_response, stop_response])
         bot._llm.tool_call_to_dict = MagicMock(
             return_value={
@@ -1804,7 +1771,7 @@ class TestProcess:
         routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
 
-        response = _make_llm_response(content="Hi!")
+        response = make_chat_response(content="Hi!")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -1989,7 +1956,7 @@ class TestProcessScheduled:
 
     async def test_returns_response_text(self):
         bot = _make_bot()
-        response = _make_llm_response(content="Scheduled task complete")
+        response = make_chat_response(content="Scheduled task complete")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -2017,7 +1984,7 @@ class TestProcessScheduled:
 
     async def test_persists_messages_to_db(self):
         bot = _make_bot()
-        response = _make_llm_response(content="Report done")
+        response = make_chat_response(content="Report done")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -2029,18 +1996,20 @@ class TestProcessScheduled:
                 prompt="Run daily report",
             )
 
-        # Should upsert_chat and save both user + assistant messages
+        # Should upsert_chat and batch-save both user + assistant messages
         bot._db.upsert_chat.assert_awaited_once()
-        assert bot._db.save_message.await_count == 2
-        calls = bot._db.save_message.call_args_list
-        assert calls[0].kwargs["role"] == "user"
-        assert calls[0].kwargs["content"] == "Run daily report"
-        assert calls[1].kwargs["role"] == "assistant"
-        assert calls[1].kwargs["content"] == "Report done"
+        bot._db.save_messages_batch.assert_awaited_once()
+        batch_kwargs = bot._db.save_messages_batch.call_args.kwargs
+        messages = batch_kwargs["messages"]
+        assert len(messages) == 2
+        assert messages[0]["role"] == "user"
+        assert messages[0]["content"] == "Run daily report"
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["content"] == "Report done"
 
     async def test_uses_channel_prompt_from_channel(self):
         bot = _make_bot()
-        response = _make_llm_response(content="ok")
+        response = make_chat_response(content="ok")
         bot._llm.chat = AsyncMock(return_value=response)
 
         channel = MagicMock()
@@ -2062,7 +2031,7 @@ class TestProcessScheduled:
 
     async def test_no_channel_prompt_without_channel(self):
         bot = _make_bot()
-        response = _make_llm_response(content="ok")
+        response = make_chat_response(content="ok")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -2079,7 +2048,7 @@ class TestProcessScheduled:
 
     async def test_appends_prompt_as_user_message(self):
         bot = _make_bot()
-        response = _make_llm_response(content="ok")
+        response = make_chat_response(content="ok")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -2099,7 +2068,7 @@ class TestProcessScheduled:
 
     async def test_handles_topic_meta(self):
         bot = _make_bot()
-        response = _make_llm_response(content="Response with META")
+        response = make_chat_response(content="Response with META")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -2114,7 +2083,7 @@ class TestProcessScheduled:
 
     async def test_user_message_name_is_scheduler(self):
         bot = _make_bot()
-        response = _make_llm_response(content="ok")
+        response = make_chat_response(content="ok")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -2126,9 +2095,10 @@ class TestProcessScheduled:
                 prompt="test",
             )
 
-        # The user message save should have name="Scheduler"
-        user_save = bot._db.save_message.call_args_list[0]
-        assert user_save.kwargs["name"] == "Scheduler"
+        # The user message in the batch should have name="Scheduler"
+        batch_kwargs = bot._db.save_messages_batch.call_args.kwargs
+        user_msg = batch_kwargs["messages"][0]
+        assert user_msg["name"] == "Scheduler"
 
     async def test_returns_none_without_persisting_when_react_loop_returns_none(self):
         """process_scheduled returns None and skips DB writes when _react_loop yields None."""
@@ -2223,7 +2193,7 @@ class TestHandleMessageEndToEnd:
         routing.match_with_rule = MagicMock(return_value=(rule, "math.md"))
         bot._routing = routing
 
-        response = _make_llm_response(content="2+2 equals 4.")
+        response = make_chat_response(content="2+2 equals 4.")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -2248,12 +2218,12 @@ class TestHandleMessageEndToEnd:
         routing.match_with_rule = MagicMock(return_value=(rule, "search.md"))
         bot._routing = routing
 
-        tool_call = _make_tool_call(name="web_search", arguments='{"query": "Python tutorials"}')
-        tool_response = _make_llm_response(
+        tool_call = make_tool_call(name="web_search", arguments='{"query": "Python tutorials"}')
+        tool_response = make_chat_response(
             finish_reason="tool_calls",
             tool_calls=[tool_call],
         )
-        final_response = _make_llm_response(content="Here are some Python tutorials...")
+        final_response = make_chat_response(content="Here are some Python tutorials...")
 
         bot._llm.chat = AsyncMock(side_effect=[tool_response, final_response])
         bot._llm.tool_call_to_dict = MagicMock(
@@ -2283,8 +2253,8 @@ class TestHandleMessageEndToEnd:
         routing.match_with_rule = MagicMock(return_value=(rule, "chat.md"))
         bot._routing = routing
 
-        response1 = _make_llm_response(content="Response to chat 1")
-        response2 = _make_llm_response(content="Response to chat 2")
+        response1 = make_chat_response(content="Response to chat 1")
+        response2 = make_chat_response(content="Response to chat 2")
         bot._llm.chat = AsyncMock(side_effect=[response1, response2])
 
         msg1 = _make_message(chat_id="chat_A", message_id="msg_A", text="Hello A")
@@ -2316,7 +2286,7 @@ class TestHandleMessageEndToEnd:
         routing.match_with_rule = MagicMock(return_value=(rule, "chat.md"))
         bot._routing = routing
 
-        response = _make_llm_response(content="ok")
+        response = make_chat_response(content="ok")
         bot._llm.chat = AsyncMock(return_value=response)
 
         with (
@@ -2538,7 +2508,7 @@ class TestCallLlmWithRetry:
             message="rate limited",
             error_code=ErrorCode.LLM_RATE_LIMITED,
         )
-        success_response = _make_llm_response(content="Hello!", finish_reason="stop")
+        success_response = make_chat_response(content="Hello!", finish_reason="stop")
         bot._llm.chat = AsyncMock(side_effect=[rate_limit_error, success_response])
 
         result = await bot._call_llm_with_retry(
@@ -2565,7 +2535,7 @@ class TestCallLlmWithRetry:
             message="timed out",
             error_code=ErrorCode.LLM_TIMEOUT,
         )
-        success_response = _make_llm_response(content="Done!", finish_reason="stop")
+        success_response = make_chat_response(content="Done!", finish_reason="stop")
         bot._llm.chat = AsyncMock(side_effect=[timeout_error, success_response])
 
         result = await bot._call_llm_with_retry(
@@ -2591,7 +2561,7 @@ class TestCallLlmWithRetry:
             message="connection failed",
             error_code=ErrorCode.LLM_CONNECTION_FAILED,
         )
-        success_response = _make_llm_response(content="OK", finish_reason="stop")
+        success_response = make_chat_response(content="OK", finish_reason="stop")
         bot._llm.chat = AsyncMock(side_effect=[conn_error, success_response])
 
         result = await bot._call_llm_with_retry(
@@ -3044,9 +3014,9 @@ class TestFinalizeResponse:
     async def test_uses_streaming_when_configured(self):
         """When use_streaming=True, uses chat_stream instead of chat."""
         bot = _make_bot()
-        success_response = _make_llm_response(content="streamed!", finish_reason="stop")
+        success_response = make_chat_response(content="streamed!", finish_reason="stop")
         bot._llm.chat_stream = AsyncMock(return_value=success_response)
-        bot._llm.chat = AsyncMock(return_value=_make_llm_response(content="wrong", finish_reason="stop"))
+        bot._llm.chat = AsyncMock(return_value=make_chat_response(content="wrong", finish_reason="stop"))
 
         result = await bot._call_llm_with_retry(
             chat_id="chat_123",

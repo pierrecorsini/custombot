@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_message_function_tool_call import ChatCompletionMessageFunctionToolCall
+from openai.types.chat import ChatCompletion
 from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionToolMessageParam,
@@ -42,11 +43,14 @@ from src.constants import (
     DEFAULT_CHAT_RATE_LIMIT,
     MAX_LRU_CACHE_SIZE,
     MAX_MESSAGE_LENGTH,
+    MAX_TOOL_CALLS_PER_TURN,
     MAX_TOOL_RESULT_PERSIST_LENGTH,
     MEMORY_CHECK_INTERVAL_SECONDS,
     MEMORY_CRITICAL_THRESHOLD_PERCENT,
     MEMORY_WARNING_THRESHOLD_PERCENT,
     RATE_LIMIT_WINDOW_SECONDS,
+    REACT_LOOP_MAX_RETRIES,
+    REACT_LOOP_RETRY_INITIAL_DELAY,
     SCHEDULED_ERROR_PREFIXES,
     WORKSPACE_DIR,
 )
@@ -92,6 +96,13 @@ lifecycle_log = logging.getLogger("lifecycle.bot")
 
 # Type alias for streaming tool execution updates
 StreamCallback = Callable[[str], Awaitable[None]]
+
+# LLM error codes that are transient and worth retrying.
+_RETRYABLE_LLM_ERROR_CODES: frozenset[ErrorCode] = frozenset({
+    ErrorCode.LLM_RATE_LIMITED,
+    ErrorCode.LLM_TIMEOUT,
+    ErrorCode.LLM_CONNECTION_FAILED,
+})
 
 # Per-request routing flag — contextvar prevents cross-request state leaks
 # when multiple messages are processed concurrently on the event loop.
@@ -306,6 +317,15 @@ class Bot:
         if self._dedup is None:
             return None
         return self._dedup.stats
+
+    def get_db_write_breaker(self) -> CircuitBreaker | None:
+        """Return the DB write circuit breaker for health/metrics endpoints.
+
+        Returns ``None`` if the database is not wired.
+        """
+        if self._db is None:
+            return None
+        return self._db.write_breaker
 
     # ── crash recovery ────────────────────────────────────────────────────────
 
@@ -753,19 +773,19 @@ class Bot:
                         },
                     )
 
-                # Persist both turns in conversation history
+                # Persist both turns in a single batch write
                 await self._db.upsert_chat(chat_id, "Scheduler")
-                await self._db.save_message(
+                await self._db.save_messages_batch(
                     chat_id=chat_id,
-                    role="user",
-                    content=prompt,
-                    name="Scheduler",
-                    message_id=f"sched_{uuid.uuid4().hex[:8]}",
-                )
-                await self._db.save_message(
-                    chat_id=chat_id,
-                    role="assistant",
-                    content=response_text,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt,
+                            "name": "Scheduler",
+                            "message_id": f"sched_{uuid.uuid4().hex[:8]}",
+                        },
+                        {"role": "assistant", "content": response_text},
+                    ],
                 )
 
                 log.info(
@@ -903,10 +923,30 @@ class Bot:
             channel=channel,
         )
 
-        # 5. Parse topic META from response and update topic cache
-        response_text = self._context_assembler.finalize_turn(msg.chat_id, raw_response)
+        # 5–7. Finalize and persist response
+        return await self._finalize_response(
+            chat_id=msg.chat_id,
+            raw_response=raw_response,
+            tool_log=tool_log,
+            buffered_persist=buffered_persist,
+            generation=generation,
+            verbose=verbose,
+        )
 
-        # 5b. Filter sensitive content (PII, secrets, API keys) from LLM response
+    async def _finalize_response(
+        self,
+        chat_id: str,
+        raw_response: str,
+        tool_log: list[ToolLogEntry],
+        buffered_persist: list[dict],
+        generation: int,
+        verbose: str,
+    ) -> str:
+        """Post-ReAct finalization: topic, filtering, summary, persist, event."""
+        # Parse topic META from response and update topic cache
+        response_text = self._context_assembler.finalize_turn(chat_id, raw_response)
+
+        # Filter sensitive content (PII, secrets, API keys) from LLM response
         filter_result = filter_response_content(response_text)
         if filter_result.flagged:
             response_text = filter_result.sanitized_content
@@ -914,38 +954,99 @@ class Bot:
                 "Filtered sensitive content from LLM response: %s",
                 filter_result.categories,
                 extra={
-                    "chat_id": msg.chat_id,
+                    "chat_id": chat_id,
                     "filter_categories": filter_result.categories,
                 },
             )
 
-        # 6. Append tool summary if skillExecVerbose == "summary"
+        # Append tool summary if skillExecVerbose == "summary"
         if verbose == "summary" and tool_log:
             response_text = format_response_with_tool_log(response_text, tool_log)
 
-        # 7. Persist assistant turn + buffered tool messages in a single batch write
-        #    Check generation to detect concurrent writes (e.g. scheduled task).
+        # Persist assistant turn + buffered tool messages in a single batch write
         batch = [*buffered_persist, {"role": "assistant", "content": response_text}]
-        if not self._db.check_generation(msg.chat_id, generation):
+        if not self._db.check_generation(chat_id, generation):
             log.warning(
                 "Write conflict detected for chat %s — generation changed during "
                 "processing. Re-reading latest history before persist.",
-                msg.chat_id,
-                extra={"chat_id": msg.chat_id},
+                chat_id,
+                extra={"chat_id": chat_id},
             )
-        await self._db.save_messages_batch(chat_id=msg.chat_id, messages=batch)
+        await self._db.save_messages_batch(chat_id=chat_id, messages=batch)
 
         # Emit response_sent event for plugins/subscribers
         await get_event_bus().emit(Event(
             name="response_sent",
-            data={"chat_id": msg.chat_id, "response_length": len(response_text)},
-            source="Bot._process",
+            data={"chat_id": chat_id, "response_length": len(response_text)},
+            source="Bot._finalize_response",
             correlation_id=get_correlation_id(),
         ))
 
         return response_text
 
     # ── ReAct loop ─────────────────────────────────────────────────────────
+
+    async def _call_llm_with_retry(
+        self,
+        chat_id: str,
+        messages: list[ChatCompletionMessageParam],
+        tools: list[ChatCompletionToolParam] | None,
+        stream_callback: StreamCallback | None,
+        use_streaming: bool,
+        iteration: int,
+        tool_log: list[ToolLogEntry],
+        buffered_persist: list[dict],
+    ) -> ChatCompletion | None:
+        """Call the LLM with retry for transient errors.
+
+        Returns the LLM completion on success, or ``None`` when the circuit
+        breaker is open (caller should return the unavailable message).
+        Non-transient and exhausted-transient errors are re-raised.
+        """
+        from src.utils.retry import calculate_delay_with_jitter
+
+        delay = REACT_LOOP_RETRY_INITIAL_DELAY
+
+        for attempt in range(REACT_LOOP_MAX_RETRIES + 1):
+            try:
+                if use_streaming:
+                    return await self._llm.chat_stream(
+                        messages,
+                        tools=tools,
+                        on_chunk=stream_callback,
+                        chat_id=chat_id,
+                    )
+                return await self._llm.chat(messages, tools=tools, chat_id=chat_id)
+            except LLMError as exc:
+                if exc.error_code == ErrorCode.LLM_CIRCUIT_BREAKER_OPEN:
+                    log.warning("Circuit breaker open — returning unavailable message")
+                    self._metrics.track_react_iterations(iteration + 1)
+                    self._metrics.track_conversation_depth(chat_id, iteration + 1)
+                    return None
+                if exc.error_code not in _RETRYABLE_LLM_ERROR_CODES:
+                    raise
+                if attempt >= REACT_LOOP_MAX_RETRIES:
+                    log.warning(
+                        "LLM retry exhausted after %d attempts for chat %s: %s",
+                        REACT_LOOP_MAX_RETRIES + 1,
+                        chat_id,
+                        exc.error_code,
+                    )
+                    raise
+                actual_delay = calculate_delay_with_jitter(delay)
+                log.info(
+                    "Transient LLM error (%s), retrying attempt %d/%d after %.2fs for chat %s",
+                    exc.error_code,
+                    attempt + 1,
+                    REACT_LOOP_MAX_RETRIES,
+                    actual_delay,
+                    chat_id,
+                )
+                await asyncio.sleep(actual_delay)
+                delay *= 2
+
+        # Unreachable, but satisfies the type checker.
+        raise RuntimeError("Unexpected state in _call_llm_with_retry")  # pragma: no cover
 
     async def _react_loop(
         self,
@@ -982,33 +1083,22 @@ class Bot:
         for iteration in range(max_iter):
             # Track LLM latency
             llm_start = time.perf_counter()
-            try:
-                if use_streaming:
-                    # Build a streaming-aware callback that forwards text
-                    # chunks to the user via the stream_callback (which
-                    # sends via the channel).  Only flush chunks for the
-                    # final text response — tool-call iterations accumulate
-                    # silently.
-                    completion = await self._llm.chat_stream(
-                        messages,
-                        tools=tools,
-                        on_chunk=stream_callback,
-                        chat_id=chat_id,
-                    )
-                else:
-                    completion = await self._llm.chat(messages, tools=tools, chat_id=chat_id)
-            except LLMError as exc:
-                if exc.error_code == ErrorCode.LLM_CIRCUIT_BREAKER_OPEN:
-                    log.warning("Circuit breaker open — returning unavailable message")
-                    self._metrics.track_react_iterations(iteration + 1)
-                    self._metrics.track_conversation_depth(chat_id, iteration + 1)
-                    return (
-                        "⚠️ Service temporarily unavailable. "
-                        "The AI provider is experiencing issues. Please try again in a minute.",
-                        tool_log,
-                        buffered_persist,
-                    )
-                raise
+
+            # Call LLM with retry for transient errors (rate-limit, timeout,
+            # connection failures).  Non-transient errors and circuit-breaker-
+            # open are handled immediately without retrying.
+            completion = await self._call_llm_with_retry(
+                chat_id, messages, tools, stream_callback, use_streaming,
+                iteration, tool_log, buffered_persist,
+            )
+            if completion is None:
+                # Circuit breaker was open — response already returned.
+                return (
+                    "⚠️ Service temporarily unavailable. "
+                    "The AI provider is experiencing issues. Please try again in a minute.",
+                    tool_log,
+                    buffered_persist,
+                )
             llm_latency = time.perf_counter() - llm_start
             self._metrics.track_llm_latency(llm_latency)
 
@@ -1132,6 +1222,25 @@ class Bot:
 
         # Execute all function-type tool calls in parallel via structured concurrency
         function_calls = [tc for tc in tool_calls if tc.type == "function"]
+
+        # Cap parallel tool calls to prevent resource exhaustion.  A confused or
+        # prompt-injected LLM could request dozens of concurrent tool calls that
+        # exhaust file handles, thread-pool slots, or memory.  Excess calls are
+        # rejected with a warning fed back to the LLM so it can re-prioritise.
+        rejected_calls: list = []
+        if len(function_calls) > MAX_TOOL_CALLS_PER_TURN:
+            rejected_calls = function_calls[MAX_TOOL_CALLS_PER_TURN:]
+            function_calls = function_calls[:MAX_TOOL_CALLS_PER_TURN]
+            log.warning(
+                "Tool-call limit reached in chat %s: %d requested, %d max — "
+                "%d calls rejected",
+                chat_id,
+                len(function_calls) + len(rejected_calls),
+                MAX_TOOL_CALLS_PER_TURN,
+                len(rejected_calls),
+                extra={"chat_id": chat_id},
+            )
+
         results: list[tuple[str, str, ToolLogEntry]] = []
         try:
             async with asyncio.TaskGroup() as tg:
@@ -1156,7 +1265,7 @@ class Bot:
                 if t.done() and not t.cancelled():
                     try:
                         results.append(t.result())
-                    except Exception:
+                    except BaseException:
                         pass
 
         # Append results to messages in original order
@@ -1184,6 +1293,27 @@ class Bot:
             if stream_callback:
                 formatted = format_single_tool_execution(tool_entry)
                 await stream_callback(formatted)
+
+        # Append synthetic error results for tool calls that exceeded the cap.
+        # The LLM must receive a result for every tool_call_id it issued,
+        # otherwise the API contract is violated and the next turn fails.
+        for tc in rejected_calls:
+            tc_id = tc.id
+            tool_name = tc.function.name if tc.function else "unknown"
+            rejection_msg = (
+                f"⚠️ Tool call rejected: per-turn limit of "
+                f"{MAX_TOOL_CALLS_PER_TURN} reached. "
+                f"Prioritise remaining tasks and retry in the next turn."
+            )
+            tool_msg: ChatCompletionToolMessageParam = {
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "content": rejection_msg,
+            }
+            messages.append(tool_msg)
+            buffered_persist.append(
+                {"role": "tool", "content": rejection_msg, "name": tool_name}
+            )
 
         return tool_log, buffered_persist
 
