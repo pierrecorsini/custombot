@@ -487,4 +487,4 @@ not addressed in Phases 1–13.
 
 - [x] **Add `dependabot.yml` for automated dependency update PRs** — Dependencies are pinned with `~=` version specifiers but there's no automated process to create PRs when new versions are published. Add a `.github/dependabot.yml` configured for pip and GitHub Actions with weekly review cadence and auto-assign to maintainers. (`.github/dependabot.yml`, new file)
 
-- [ ] **Bump `--cov-fail-under` from 70 to 75 in CI** — Phase 14 adds 7+ new tests (above). If coverage exceeds 75% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 13 targeting 75% by 2026-06-15. (`.github/workflows/ci.yml:111`)
+- [x] **Bump `--cov-fail-under` from 70 to 75 in CI** — Phase 14 adds 7+ new tests (above). If coverage exceeds 75% after these additions, update the threshold to lock in the improvement, following the roadmap documented in Phase 13 targeting 75% by 2026-06-15. (`.github/workflows/ci.yml:111`)
