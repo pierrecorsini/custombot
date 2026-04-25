@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 from src.core.context_builder import ChatMessage, build_context
 from src.core.topic_cache import TopicCache, parse_meta
 from src.memory import DEFAULT_AGENTS_MD
+from src.monitoring.performance import get_metrics_collector
 
 log = logging.getLogger(__name__)
 
@@ -151,6 +152,9 @@ class ContextAssembler:
         compressed_summary = self._handle_gather_result(
             compressed_summary, "compressed_summary", chat_id, default=None,
         )
+
+        if compressed_summary is not None:
+            get_metrics_collector().track_compression_summary_used()
 
         messages = await build_context(
             db=self._db,

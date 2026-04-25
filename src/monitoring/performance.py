@@ -113,6 +113,13 @@ LLM_LATENCY_HISTOGRAM_BUCKETS_MS: tuple[float, ...] = (
     500.0, 1000.0, 2000.0, 5000.0, 10000.0, 30000.0, 60000.0, 120000.0,
 )
 
+# Fixed bucket boundaries (milliseconds) for the DB write latency histogram.
+# DB writes (JSONL appends, index updates) are typically sub-100ms; buckets
+# are tuned for the fast write path rather than the slower LLM call path.
+DB_WRITE_LATENCY_HISTOGRAM_BUCKETS_MS: tuple[float, ...] = (
+    5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0,
+)
+
 
 @dataclass
 class LatencyStats:
@@ -182,6 +189,30 @@ class SkillTimeoutRatio:
             "max_ratio": round(self.max_ratio, 4),
             "mean_ratio": round(self.mean_ratio, 4),
             "p95_ratio": round(self.p95_ratio, 4),
+        }
+
+
+@dataclass
+class OversizedArgsSizeStats:
+    """Per-skill oversized argument size distribution.
+
+    Tracks the count, minimum, maximum, and cumulative total bytes of
+    rejected oversized argument payloads so operators can identify which
+    skills are being abused or misconfigured.
+    """
+
+    count: int = 0
+    min_bytes: int = 0
+    max_bytes: int = 0
+    total_bytes: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "count": self.count,
+            "min_bytes": self.min_bytes,
+            "max_bytes": self.max_bytes,
+            "total_bytes": self.total_bytes,
+            "avg_bytes": round(self.total_bytes / self.count, 1) if self.count else 0.0,
         }
 
 
@@ -260,6 +291,11 @@ class PerformanceSnapshot:
     db_op_count: int = 0
     db_latency: LatencyStats = field(default_factory=LatencyStats)
 
+    # Database write operation metrics (separate from reads)
+    db_write_op_count: int = 0
+    db_write_latency: LatencyStats = field(default_factory=LatencyStats)
+    db_write_latency_histogram: dict[str, Any] = field(default_factory=dict)
+
     # ReAct loop iteration metrics
     react_iteration_count: int = 0
     react_iterations: LatencyStats = field(default_factory=LatencyStats)
@@ -288,6 +324,18 @@ class PerformanceSnapshot:
     outbound_dedup_hits: int = 0
     outbound_dedup_misses: int = 0
 
+    # Compression summary usage
+    compression_summary_used_total: int = 0
+
+    # Per-skill oversized argument rejection counts
+    skill_oversized_args: dict[str, int] = field(default_factory=dict)
+
+    # Per-skill oversized argument size distribution
+    skill_oversized_args_sizes: dict[str, OversizedArgsSizeStats] = field(default_factory=dict)
+
+    # LLM error classification counter (error_code → count)
+    llm_error_classifications: dict[str, int] = field(default_factory=dict)
+
     # System metrics
     cpu_percent: float = 0.0
     memory_percent: float = 0.0
@@ -308,6 +356,7 @@ class PerformanceSnapshot:
                 "call_count": self.llm_call_count,
                 "latency": self.llm_latency.to_dict(),
                 "histogram": self.llm_latency_histogram,
+                "error_classifications": dict(self.llm_error_classifications),
             },
             "skills": {
                 "call_count": self.skill_call_count,
@@ -320,6 +369,9 @@ class PerformanceSnapshot:
             "database": {
                 "op_count": self.db_op_count,
                 "latency": self.db_latency.to_dict(),
+                "write_op_count": self.db_write_op_count,
+                "write_latency": self.db_write_latency.to_dict(),
+                "write_histogram": self.db_write_latency_histogram,
             },
             "react_iterations": {
                 "count": self.react_iteration_count,
@@ -356,6 +408,11 @@ class PerformanceSnapshot:
                 )
                 if (self.outbound_dedup_hits + self.outbound_dedup_misses) > 0
                 else 0.0,
+            },
+            "compression_summary_used_total": self.compression_summary_used_total,
+            "skill_oversized_args": dict(self.skill_oversized_args),
+            "skill_oversized_args_sizes": {
+                k: v.to_dict() for k, v in self.skill_oversized_args_sizes.items()
             },
             "system": {
                 "cpu_percent": round(self.cpu_percent, 1),
@@ -536,6 +593,12 @@ class PerformanceMetrics:
         self._llm_latencies: deque[float] = deque(maxlen=history_size)
         self._db_latencies: deque[float] = deque(maxlen=history_size)
 
+        # DB write latency histogram (separate from general DB latency)
+        self._db_write_latency_histogram = LatencyHistogram(
+            DB_WRITE_LATENCY_HISTOGRAM_BUCKETS_MS
+        )
+        self._db_write_latencies: deque[float] = deque(maxlen=history_size)
+
         # Fixed-bucket histogram for LLM latency Prometheus exposition
         self._llm_latency_histogram = LatencyHistogram(LLM_LATENCY_HISTOGRAM_BUCKETS_MS)
 
@@ -557,11 +620,21 @@ class PerformanceMetrics:
         # Per-skill timeout ratio tracking (actual_time / timeout_seconds)
         self._skill_timeout_ratios: dict[str, deque[float]] = {}
 
+        # Per-skill oversized argument tracking (skill_name → count)
+        self._skill_oversized_args: dict[str, int] = {}
+
+        # Per-skill oversized argument size distribution (skill_name → stats)
+        self._skill_oversized_args_sizes: dict[str, OversizedArgsSizeStats] = {}
+
+        # LLM error classification counter (error_code → count)
+        self._llm_error_counts: dict[str, int] = {}
+
         # Counters
         self._message_count: int = 0
         self._llm_call_count: int = 0
         self._skill_call_count: int = 0
         self._db_op_count: int = 0
+        self._db_write_op_count: int = 0
 
         # Memory cache effectiveness counters
         self._memory_cache_hits: int = 0
@@ -570,6 +643,9 @@ class PerformanceMetrics:
         # Outbound message dedup counters
         self._outbound_dedup_hits: int = 0
         self._outbound_dedup_misses: int = 0
+
+        # Compression summary usage counter
+        self._compression_summary_used_total: int = 0
 
         # Sliding-window error tracking (deque of timestamps per window)
         self._total_error_count: int = 0
@@ -656,6 +732,20 @@ class PerformanceMetrics:
         self._db_latencies.append(latency_ms)
         self._db_op_count += 1
 
+    def track_db_write_latency(self, latency_seconds: float) -> None:
+        """Record a database write operation latency (JSONL append, index update).
+
+        Tracked separately from general DB latency so operators can set alerts
+        specifically on slow writes without noise from read operations.
+
+        Args:
+            latency_seconds: Time taken for the DB write operation.
+        """
+        latency_ms = latency_seconds * 1000
+        self._db_write_latencies.append(latency_ms)
+        self._db_write_latency_histogram.observe(latency_ms)
+        self._db_write_op_count += 1
+
     def track_skill_time(self, skill_name: str, latency_seconds: float) -> None:
         """
         Record a skill execution time.
@@ -685,6 +775,46 @@ class PerformanceMetrics:
         m.calls += 1
         m.errors += 1
         m.error_types[error_type] = m.error_types.get(error_type, 0) + 1
+
+    def track_llm_error(self, error_code: str) -> None:
+        """Record an LLM error by its classified error code.
+
+        Enables operators to set targeted alerts on specific error
+        categories (e.g., alert on ``ERR_1001`` within 5 minutes).
+
+        Args:
+            error_code: The :class:`ErrorCode` value string (e.g. ``"ERR_1001"``).
+        """
+        self._llm_error_counts[error_code] = (
+            self._llm_error_counts.get(error_code, 0) + 1
+        )
+
+    def track_skill_args_oversized(self, skill_name: str, arg_size_bytes: int) -> None:
+        """Record a rejected skill call due to oversized arguments.
+
+        Args:
+            skill_name: Name of the skill that received oversized args.
+            arg_size_bytes: Size of the raw argument payload in bytes.
+        """
+        self._skill_oversized_args[skill_name] = (
+            self._skill_oversized_args.get(skill_name, 0) + 1
+        )
+
+        # Update size distribution (min/max/total)
+        stats = self._skill_oversized_args_sizes.get(skill_name)
+        if stats is None:
+            stats = OversizedArgsSizeStats(
+                count=1,
+                min_bytes=arg_size_bytes,
+                max_bytes=arg_size_bytes,
+                total_bytes=arg_size_bytes,
+            )
+            self._skill_oversized_args_sizes[skill_name] = stats
+        else:
+            stats.count += 1
+            stats.min_bytes = min(stats.min_bytes, arg_size_bytes)
+            stats.max_bytes = max(stats.max_bytes, arg_size_bytes)
+            stats.total_bytes += arg_size_bytes
 
     def track_skill_timeout_ratio(
         self, skill_name: str, actual_seconds: float, timeout_seconds: float
@@ -762,6 +892,15 @@ class PerformanceMetrics:
     def track_outbound_dedup_miss(self) -> None:
         """Record an outbound message dedup cache miss (new message allowed)."""
         self._outbound_dedup_misses += 1
+
+    def track_compression_summary_used(self) -> None:
+        """Record that a compressed conversation summary was used during context assembly.
+
+        Incremented only when ``get_compressed_summary()`` returns a non-None
+        value, indicating that the chat's history has been compressed and the
+        summary was injected into the LLM context.
+        """
+        self._compression_summary_used_total += 1
 
     def track_error(self) -> None:
         """Record an error with timestamp for sliding-window rate tracking."""
@@ -877,6 +1016,9 @@ class PerformanceMetrics:
             },
             db_op_count=self._db_op_count,
             db_latency=_calculate_latency_stats(self._db_latencies),
+            db_write_op_count=self._db_write_op_count,
+            db_write_latency=_calculate_latency_stats(self._db_write_latencies),
+            db_write_latency_histogram=self._db_write_latency_histogram.to_dict(),
             react_iteration_count=len(self._react_iteration_counts),
             react_iterations=_calculate_latency_stats(self._react_iteration_counts),
             react_iterations_total=self._react_iterations_total,
@@ -899,6 +1041,18 @@ class PerformanceMetrics:
             memory_cache_misses=self._memory_cache_misses,
             outbound_dedup_hits=self._outbound_dedup_hits,
             outbound_dedup_misses=self._outbound_dedup_misses,
+            compression_summary_used_total=self._compression_summary_used_total,
+            skill_oversized_args=dict(self._skill_oversized_args),
+            skill_oversized_args_sizes={
+                name: OversizedArgsSizeStats(
+                    count=s.count,
+                    min_bytes=s.min_bytes,
+                    max_bytes=s.max_bytes,
+                    total_bytes=s.total_bytes,
+                )
+                for name, s in self._skill_oversized_args_sizes.items()
+            },
+            llm_error_classifications=dict(self._llm_error_counts),
             error_windows=self._get_error_window_counts(),
             total_error_count=self._total_error_count,
         )
@@ -924,7 +1078,8 @@ class PerformanceMetrics:
         log.info(
             "Performance summary | messages=%d | msg_latency_p95=%.1fms | "
             "llm_calls=%d | llm_latency_p95=%.1fms | skills=%d | "
-            "db_ops=%d | db_latency_p95=%.1fms | react_iters=%d(%.1f/%.1f/%.1f min/med/max) | "
+            "db_ops=%d | db_latency_p95=%.1fms | db_writes=%d | db_write_latency_p95=%.1fms | "
+            "react_iters=%d(%.1f/%.1f/%.1f min/med/max) | "
             "queue=%d | cpu=%.1f%% | mem=%.1f%%",
             snapshot.message_count,
             snapshot.message_latency.p95_ms,
@@ -933,6 +1088,8 @@ class PerformanceMetrics:
             snapshot.skill_call_count,
             snapshot.db_op_count,
             snapshot.db_latency.p95_ms,
+            snapshot.db_write_op_count,
+            snapshot.db_write_latency.p95_ms,
             snapshot.react_iteration_count,
             snapshot.react_iterations.min_ms,
             snapshot.react_iterations.median_ms,
@@ -949,6 +1106,8 @@ class PerformanceMetrics:
                 "skill_call_count": snapshot.skill_call_count,
                 "db_op_count": snapshot.db_op_count,
                 "db_latency_ms": snapshot.db_latency.to_dict(),
+                "db_write_op_count": snapshot.db_write_op_count,
+                "db_write_latency_ms": snapshot.db_write_latency.to_dict(),
                 "react_iterations": snapshot.react_iterations.to_dict(),
                 "queue_depth": snapshot.queue_depth,
                 "cpu_percent": snapshot.cpu_percent,

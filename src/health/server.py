@@ -821,6 +821,16 @@ def _build_prometheus_output(
         )
     )
 
+    # ── Compression Summary Metrics ──────────────────────────────────────────
+    lines.append(
+        _format_prometheus_metric(
+            "custombot_compression_summary_used_total",
+            "Total times a compressed conversation summary was used during context assembly",
+            "counter",
+            snapshot.compression_summary_used_total,
+        )
+    )
+
     # ── Skill Metrics ────────────────────────────────────────────────────────
     lines.append(
         _format_prometheus_metric(
