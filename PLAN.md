@@ -10,8 +10,8 @@
 
 ## Performance Optimization
 
-- [ ] Add connection pooling for the file-based Database — the `FileHandlePool` caps at 256 handles but `MessageStore` still opens/closes for reads; implement a read-handle pool or mmap-based reads for hot-path message retrieval
-- [ ] Batch embedding API calls in `VectorMemory` — multiple `store()` calls in quick succession each trigger a separate OpenAI embeddings request; implement request coalescing with a short debounce window to batch embeddings
+- [x] Add connection pooling for the file-based Database — the `FileHandlePool` caps at 256 handles but `MessageStore` still opens/closes for reads; implement a read-handle pool or mmap-based reads for hot-path message retrieval
+- [x] Batch embedding API calls in `VectorMemory` — multiple `store()` calls in quick succession each trigger a separate OpenAI embeddings request; implement request coalescing with a short debounce window to batch embeddings
 - [ ] Pre-warm routing rule cache on startup — `RoutingEngine.match_with_rule()` triggers lazy rule loading on the first message; call `load_rules()` eagerly during startup (it does, but `_is_stale()` can re-trigger scans per-message with debouncing at only 2s)
 - [ ] Evaluate replacing `orjson` hot-path serialization with msgpack for tool-call result payloads — tool results can be large (e.g., file reads) and msgpack's binary format would reduce both serialization time and memory for in-flight pipeline data
 
