@@ -69,6 +69,7 @@ from src.db.db_utils import (
 )
 from src.db.file_pool import FileHandlePool
 from src.db.message_store import MessageStore
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.exceptions import DatabaseError, DiskSpaceError, ErrorCode
 from src.utils import (
     DEFAULT_MIN_DISK_SPACE,
@@ -528,6 +529,12 @@ class Database:
         try:
             parsed = json_loads(first_line)
         except Exception:
+            log_noncritical(
+                NonCriticalCategory.FILE_PARSING,
+                "Failed to parse JSONL header in %s",
+                logger=log,
+                extra={"file": str(file_path)},
+            )
             return
 
         if isinstance(parsed, dict) and parsed.get("type") == "header":
@@ -563,6 +570,12 @@ class Database:
             try:
                 msg = json_loads(line)
             except Exception:
+                log_noncritical(
+                    NonCriticalCategory.DB_OPERATION,
+                    "Skipping unparseable line during JSONL migration in %s",
+                    logger=log,
+                    extra={"file": str(file_path)},
+                )
                 migrated.append(line)
                 continue
 

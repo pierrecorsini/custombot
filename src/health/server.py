@@ -24,6 +24,7 @@ import time
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Optional
 
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.health.checks import (
     check_database,
     check_disk_usage,
@@ -1708,9 +1709,11 @@ class HealthServer:
                     if last is not None and last.growth_mb_per_hour is not None:
                         workspace_growth = last.growth_mb_per_hour
                 except Exception:
-                    pass
-
-                # Filesystem-level free/total via existing disk utility
+                    log_noncritical(
+                        NonCriticalCategory.METRICS,
+                        "Failed to collect workspace growth metric",
+                        logger=log,
+                    )
                 try:
                     from src.utils.disk import check_disk_space
 
@@ -1746,8 +1749,11 @@ class HealthServer:
                 from src.core.event_bus import get_event_bus
                 output += _build_event_bus_prometheus_output(get_event_bus())
             except Exception:
-                pass
-            return web.Response(
+                log_noncritical(
+                    NonCriticalCategory.METRICS,
+                    "Failed to include event bus metrics in Prometheus output",
+                    logger=log,
+                )
                 text=output,
                 content_type="text/plain",
                 charset="utf-8",

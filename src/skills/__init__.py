@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from src.skills.base import BaseSkill
+from src.core.errors import NonCriticalCategory, log_noncritical
 
 if TYPE_CHECKING:
     from src.config.config import ShellConfig
@@ -88,7 +89,12 @@ class SkillRegistry:
                 try:
                     skill.wire_llm(llm)
                 except Exception:
-                    log.exception("Failed to wire LLM client into skill %r", skill.name)
+                    log_noncritical(
+                        NonCriticalCategory.SKILL_PARSING,
+                        "Failed to wire LLM client into skill %r",
+                        logger=log,
+                        extra={"skill": skill.name},
+                    )
                     continue
                 wired += 1
         if wired:

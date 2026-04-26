@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 from openai.types.chat.chat_completion_message_function_tool_call import ChatCompletionMessageFunctionToolCall
 
 from src.constants import DEFAULT_SKILL_TIMEOUT, SLOW_SKILL_THRESHOLD_SECONDS
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.core.event_bus import Event, get_event_bus
 from src.exceptions import SkillError, get_user_friendly_message
 from src.logging import get_correlation_id
@@ -261,7 +262,12 @@ class ToolExecutor:
                         source="ToolExecutor",
                     ))
                 except Exception:
-                    pass  # Event emission must never break skill execution
+                    log_noncritical(
+                        NonCriticalCategory.EVENT_EMISSION,
+                        "Failed to emit skill_executed event for %s",
+                        name,
+                        logger=log,
+                    )
 
                 return str(result) if result is not None else ""
 

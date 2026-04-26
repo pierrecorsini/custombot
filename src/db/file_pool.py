@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import threading
 from collections import OrderedDict
+
+from src.core.errors import NonCriticalCategory, log_noncritical
 from pathlib import Path
 from typing import IO
 
@@ -117,7 +119,11 @@ class FileHandlePool:
             if not handle.closed:
                 handle.close()
         except Exception:
-            pass  # Best-effort close during shutdown
+            log_noncritical(
+                NonCriticalCategory.CONNECTION_CLEANUP,
+                "Failed to close file handle during pool shutdown",
+                logger=log,
+            )
 
 
 # Backward-compatible alias so existing imports keep working.

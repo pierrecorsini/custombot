@@ -19,6 +19,7 @@ from src.channels.base import BaseChannel, IncomingMessage, MessageHandler
 from src.channels.neonize_backend import NeonizeBackend
 from src.channels.stealth import mark_sent
 from src.config import WhatsAppConfig
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.ui.cli_output import cli as cli_output
 from src.utils import LRUDict
 from src.utils.phone import normalize_phone
@@ -229,11 +230,14 @@ Always format your response for plain-text WhatsApp rendering. Your message must
                 )
             except Exception:
                 # Per-chunk retry: one attempt with a short delay
-                log.warning(
+                log_noncritical(
+                    NonCriticalCategory.CHANNEL_SEND,
                     "Send chunk %d/%d failed for %s, retrying once",
                     i + 1,
                     total_chunks,
                     chat_id,
+                    logger=log,
+                    level=logging.WARNING,
                 )
                 await asyncio.sleep(_CHUNK_RETRY_DELAY)
                 try:

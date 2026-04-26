@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from src.constants import MAX_QUEUED_TEXT_LENGTH
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.utils import JsonParseMode, json_dumps, safe_json_parse
 
 if TYPE_CHECKING:
@@ -562,7 +563,12 @@ class MessageQueue:
             try:
                 await asyncio.to_thread(_cleanup)
             except Exception:
-                pass
+                log_noncritical(
+                    NonCriticalCategory.QUEUE_OPERATION,
+                    "Failed to clean up temp queue file %s",
+                    tmp,
+                    logger=log,
+                )
             raise
 
 

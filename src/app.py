@@ -24,6 +24,7 @@ from src.constants import DEFAULT_CHANNEL_STARTUP_TIMEOUT
 from src.core.event_bus import Event, EventName, get_event_bus
 from src.core.message_pipeline import MessageContext, MessagePipeline
 from src.core.startup import StartupContext, StartupOrchestrator
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.lifecycle import _log_component_init, _log_component_ready, _log_startup_complete, perform_shutdown
 from src.logging.logging_config import (
     clear_correlation_id,
@@ -284,7 +285,12 @@ class Application:
                     correlation_id=get_correlation_id(),
                 ))
             except Exception:
-                pass  # Event emission must not mask the original exception
+                log_noncritical(
+                    NonCriticalCategory.EVENT_EMISSION,
+                    "Failed to emit error_occurred event for chat %s",
+                    msg.chat_id,
+                    logger=log,
+                )
             raise
         finally:
             clear_correlation_id()

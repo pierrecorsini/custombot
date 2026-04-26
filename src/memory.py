@@ -26,6 +26,7 @@ from typing import List, Optional
 import time as _time
 
 from src.constants import MAX_LRU_CACHE_SIZE, MTIME_CACHE_MISSING_TTL
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.security import PathSecurityError, is_path_in_workspace
 from src.utils import LRUDict
 from src.utils.path import sanitize_path_component
@@ -110,7 +111,12 @@ def _track_cache_event(hit: bool) -> None:
         else:
             get_metrics_collector().track_memory_cache_miss()
     except Exception:
-        pass
+        log_noncritical(
+            NonCriticalCategory.CACHE_TRACKING,
+            "Failed to track memory cache %s event",
+            "hit" if hit else "miss",
+            logger=log,
+        )
 
 
 # ── MtimeCache ─────────────────────────────────────────────────────────────

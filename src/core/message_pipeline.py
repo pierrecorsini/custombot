@@ -36,6 +36,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, Sequence
 
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.ui.cli_output import log_message_flow
 
 if TYPE_CHECKING:
@@ -206,7 +207,12 @@ def build_pipeline_from_config(
             factory = _import_factory(path)
             middlewares.append(factory(deps))
         except Exception:
-            log.exception("Failed to load middleware from %r — skipping", path)
+            log_noncritical(
+                NonCriticalCategory.MIDDLEWARE_LOADING,
+                "Failed to load middleware from %r — skipping",
+                logger=log,
+                extra={"path": path},
+            )
 
     if not middlewares:
         log.warning("No middleware loaded — pipeline will be a no-op")

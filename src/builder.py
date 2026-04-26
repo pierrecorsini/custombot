@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Optional, Protocol, Sequence
 
 from src.config import Config
 from src.constants import WORKSPACE_DIR
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.utils.dag import topological_sort
 from src.lifecycle import (
     _log_component_init,
@@ -221,7 +222,11 @@ async def _step_vector_memory(ctx: BuilderContext) -> str | None:
             try:
                 vm.close()
             except Exception:
-                pass
+                log_noncritical(
+                    NonCriticalCategory.CLEANUP,
+                    "Failed to close VectorMemory during startup probe cleanup",
+                    logger=log,
+                )
             raise RuntimeError(f"Embedding model unavailable: {probe_msg}")
         ctx.vector_memory = vm
         # Wire vector memory into DB for embedding compression summaries

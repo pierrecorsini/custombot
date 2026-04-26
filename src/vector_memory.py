@@ -29,6 +29,7 @@ import sqlite_vec
 from openai import AsyncOpenAI
 
 from src.db.sqlite_utils import SqliteHelper
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.exceptions import DiskSpaceError
 from src.utils import BoundedOrderedDict, DEFAULT_MIN_DISK_SPACE, check_disk_space
 from src.utils.retry import retry_with_backoff
@@ -54,7 +55,12 @@ def _track_embed_cache_event(hit: bool) -> None:
         else:
             get_metrics_collector().track_embed_cache_miss()
     except Exception:
-        pass
+        log_noncritical(
+            NonCriticalCategory.CACHE_TRACKING,
+            "Failed to track embedding cache %s event",
+            "hit" if hit else "miss",
+            logger=log,
+        )
 _SCHEMA_VERSION = 1
 
 # Ordered list of migrations: (target_version, [sql, ...]).
@@ -226,7 +232,11 @@ class VectorMemory(SqliteHelper):
                 try:
                     conn.close()
                 except Exception:
-                    pass
+                    log_noncritical(
+                        NonCriticalCategory.CONNECTION_CLEANUP,
+                        "Failed to close read connection during shutdown",
+                        logger=log,
+                    )
             self._read_connections.clear()
         # Reset thread-local so next access on any thread creates a fresh conn
         self._thread_local = threading.local()

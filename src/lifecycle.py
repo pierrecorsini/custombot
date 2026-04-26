@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
 
 from src.config import Config
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.security.url_sanitizer import sanitize_url_for_logging
 
 if TYPE_CHECKING:
@@ -39,6 +40,11 @@ def _get_verbosity() -> str:
 
         return get_verbosity().value
     except Exception:
+        log_noncritical(
+            NonCriticalCategory.CONFIG_LOAD,
+            "Failed to resolve verbosity level, defaulting to 'normal'",
+            logger=log,
+        )
         return "normal"
 
 

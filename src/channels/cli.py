@@ -23,6 +23,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from src.channels.base import BaseChannel, IncomingMessage, MessageHandler
+from src.core.errors import NonCriticalCategory, log_noncritical
 
 log = logging.getLogger(__name__)
 
@@ -153,6 +154,11 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
         except EOFError:
             return None
         except Exception:
+            log_noncritical(
+                NonCriticalCategory.CHANNEL_INPUT,
+                "Failed to read CLI input",
+                logger=log,
+            )
             return None
 
     def _print_response(self, text: str) -> None:

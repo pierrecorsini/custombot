@@ -22,6 +22,7 @@ from src.constants import (
     COMPRESSION_KEEP_RECENT,
     COMPRESSION_LINE_THRESHOLD,
 )
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.db.db_index import save_index
 from src.db.db_utils import (
     _atomic_write,
@@ -95,7 +96,12 @@ class CompressionService:
             if isinstance(parsed, dict):
                 return parsed.get("content")
         except Exception:
-            pass
+            log_noncritical(
+                NonCriticalCategory.COMPRESSION,
+                "Failed to read compressed summary from %s",
+                summary_file,
+                logger=log,
+            )
         return None
 
     async def compress_chat_history(self, chat_id: str) -> bool:
@@ -135,9 +141,11 @@ class CompressionService:
                         chat_id, summary_text, category="compression_summary",
                     )
                 except Exception:
-                    log.debug(
-                        "Failed to embed compression summary for %s (non-critical)",
+                    log_noncritical(
+                        NonCriticalCategory.EMBEDDING,
+                        "Failed to embed compression summary for %s",
                         chat_id,
+                        logger=log,
                         extra=_db_log_extra(chat_id),
                     )
 
@@ -201,7 +209,11 @@ class CompressionService:
                         header_line = line
                         continue
                 except Exception:
-                    pass
+                    log_noncritical(
+                        NonCriticalCategory.COMPRESSION,
+                        "Malformed JSONL header line in compression scan",
+                        logger=log,
+                    )
             msg_lines.append(line)
 
         if len(msg_lines) <= COMPRESSION_LINE_THRESHOLD:
@@ -223,6 +235,11 @@ class CompressionService:
             try:
                 msg = json_loads(line)
             except Exception:
+                log_noncritical(
+                    NonCriticalCategory.COMPRESSION,
+                    "Skipping malformed JSONL line during compression",
+                    logger=log,
+                )
                 continue
 
             msg_id = msg.get("id")
@@ -267,9 +284,12 @@ class CompressionService:
                     ):
                         last_ts = existing_last
             except Exception:
-                pass
-
-        # Format date range (UTC for consistency)
+                log_noncritical(
+                    NonCriticalCategory.COMPRESSION,
+                    "Failed to read existing summary metadata from %s during compression",
+                    summary_file,
+                    logger=log,
+                )
         date_range = ""
         if first_ts is not None and last_ts is not None:
             start = datetime.datetime.fromtimestamp(

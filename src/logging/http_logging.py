@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 import httpx
 
+from src.core.errors import NonCriticalCategory, log_noncritical
+
 # Sensitive field patterns to redact in logs
 SENSITIVE_FIELDS = frozenset(
     {
@@ -193,8 +195,14 @@ def log_response(
                         error_body[:500],
                     )
             except Exception:
-                pass
-    else:
+                log_noncritical(
+                    NonCriticalCategory.LOGGING,
+                    "Failed to extract error response body for %s %s [corr: %s]",
+                    method.upper(),
+                    url,
+                    corr_id,
+                    logger=logger,
+                )
         # Only log at INFO level in verbose mode, otherwise DEBUG
         effective_level = level if _should_log_http_requests() else logging.DEBUG
 

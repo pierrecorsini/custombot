@@ -54,6 +54,7 @@ from src.constants import (
     SCHEDULED_ERROR_PREFIXES,
     WORKSPACE_DIR,
 )
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.core.event_bus import Event, EventBus, get_event_bus
 from src.core.context_assembler import ContextAssembler, ContextResult
 from src.core.context_builder import ChatMessage
@@ -699,7 +700,12 @@ class Bot:
                 correlation_id=get_correlation_id(),
             ))
         except Exception:
-            pass  # Event emission must never break scheduled task processing
+            log_noncritical(
+                NonCriticalCategory.EVENT_EMISSION,
+                "Failed to emit scheduled_task_started event for chat %s",
+                chat_id,
+                logger=log,
+            )
 
         # Acquire per-chat lock to prevent concurrent execution with handle_message
         # or other scheduled tasks for the same chat (ref-tracked for safe eviction)
@@ -849,7 +855,12 @@ class Bot:
                         correlation_id=get_correlation_id(),
                     ))
                 except Exception:
-                    pass  # Event emission must never break scheduled task processing
+                    log_noncritical(
+                        NonCriticalCategory.EVENT_EMISSION,
+                        "Failed to emit scheduled_task_completed event for chat %s",
+                        chat_id,
+                        logger=log,
+                    )
 
                 return response_text
 

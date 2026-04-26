@@ -48,6 +48,7 @@ from src.db.db_utils import (
     _validate_chat_id,
 )
 from src.db.file_pool import FileHandlePool
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.exceptions import DatabaseError
 from src.security.prompt_injection import (
     detect_injection,
@@ -305,9 +306,10 @@ class MessageStore:
             try:
                 await trigger_compression_fn(chat_id)
             except Exception:
-                log.debug(
-                    "History compression check failed for %s (non-critical)",
-                    chat_id,
+                log_noncritical(
+                    NonCriticalCategory.COMPRESSION,
+                    "History compression check failed for %s",
+                    logger=log,
                     extra=_db_log_extra(chat_id),
                 )
 
@@ -406,9 +408,10 @@ class MessageStore:
             try:
                 await trigger_compression_fn(chat_id)
             except Exception:
-                log.debug(
-                    "History compression check failed for %s (non-critical)",
-                    chat_id,
+                log_noncritical(
+                    NonCriticalCategory.COMPRESSION,
+                    "History compression check failed for %s",
+                    logger=log,
                     extra=_db_log_extra(chat_id),
                 )
 

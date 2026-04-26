@@ -28,13 +28,9 @@ from typing import Callable, Awaitable
 from src.config import LLMConfig
 from src.constants import (
     CIRCUIT_BREAKER_COOLDOWN_SECONDS,
-    CIRCUIT_BREAKER_FAILURE_THRESHOLD,
-    DEFAULT_HTTPX_MAX_CONNECTIONS,
-    DEFAULT_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
-    LLM_WARMUP_TIMEOUT,
-    STREAM_MIN_CHUNK_CHARS,
-    WORKSPACE_DIR,
 )
+
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.exceptions import ErrorCode, LLMError
 from src.llm_error_classifier import classify_llm_error
 from src.logging import get_correlation_id
@@ -565,7 +561,11 @@ class LLMClient:
                     await on_chunk(buffered_chunk)
                     buffered_chunk = ""
                 except Exception:
-                    pass  # best-effort — never mask the original error
+                    log_noncritical(
+                        NonCriticalCategory.STREAMING,
+                        "Best-effort chunk flush failed in stream finally block",
+                        logger=log,
+                    )
 
     @property
     def circuit_breaker(self) -> CircuitBreaker:

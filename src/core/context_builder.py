@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from src.db import Database
 
 from src.constants import CHARS_PER_TOKEN, CJK_CHARS_PER_TOKEN, DEFAULT_CONTEXT_TOKEN_BUDGET
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.core.topic_cache import META_PROMPT
 from src.security.prompt_injection import (
     DEFAULT_MAX_SYSTEM_PROMPT_LENGTH,
@@ -211,7 +212,13 @@ async def build_context(
             total_used, DEFAULT_CONTEXT_TOKEN_BUDGET
         )
     except Exception:
-        pass  # metrics collection must never break context building
+        log_noncritical(
+            NonCriticalCategory.METRICS,
+            "Failed to track context budget utilization (%d/%d tokens)",
+            total_used,
+            DEFAULT_CONTEXT_TOKEN_BUDGET,
+            logger=log,
+        )
 
     # Sanitize user messages in history to prevent delayed injection
     sanitized_history = _sanitize_history(bundle)

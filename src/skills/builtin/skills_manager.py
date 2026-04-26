@@ -14,13 +14,17 @@ Tools:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 from pathlib import Path
 from typing import Any, List, Optional
 
 from src.constants import WORKSPACE_DIR
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.skills.base import BaseSkill
+
+log = logging.getLogger(__name__)
 from src.utils.async_executor import AsyncExecutor
 
 # Directory where user skills are installed (relative to project root)
@@ -175,6 +179,12 @@ class SkillsListSkill(BaseSkill):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except Exception:
+            log_noncritical(
+                NonCriticalCategory.SKILL_PARSING,
+                "Failed to parse skill file %s",
+                path,
+                logger=log,
+            )
             return []
 
         skills = []
@@ -227,7 +237,12 @@ class SkillsListSkill(BaseSkill):
                             desc = line.split(":", 1)[1].strip().strip("\"'")
                     return name, desc
         except Exception:
-            pass
+            log_noncritical(
+                NonCriticalCategory.SKILL_PARSING,
+                "Failed to parse skill metadata from %s",
+                path,
+                logger=log,
+            )
         return default_name, ""
 
 

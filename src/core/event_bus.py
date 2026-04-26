@@ -47,6 +47,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.utils.singleton import get_or_create_singleton, reset_singleton
 
 log = logging.getLogger(__name__)
@@ -258,9 +259,11 @@ async def _safe_call(handler: EventHandler, event: Event) -> None:
     try:
         await handler(event)
     except Exception:
-        log.exception(
+        log_noncritical(
+            NonCriticalCategory.EVENT_EMISSION,
             "Error in event handler for '%s'",
             event.name,
+            logger=log,
             extra={
                 "event_name": event.name,
                 "source": event.source,

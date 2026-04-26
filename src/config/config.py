@@ -39,6 +39,7 @@ from src.constants import (
     MAX_TOOL_ITERATIONS,
     WORKSPACE_DIR,
 )
+from src.core.errors import NonCriticalCategory, log_noncritical
 
 CONFIG_PATH = Path(f"{WORKSPACE_DIR}/config.json")
 
@@ -125,6 +126,12 @@ def _collect_known_field_names(cls: Type) -> Dict[str, List[str]]:
         try:
             hints = get_type_hints(dc)
         except Exception:
+            log_noncritical(
+                NonCriticalCategory.TYPE_RESOLUTION,
+                "Failed to resolve type hints for %s, falling back to empty hints",
+                getattr(dc, "__name__", dc),
+                logger=log,
+            )
             hints = {}
 
         names = [f.name for f in fields(dc)]  # type: ignore[arg-type]
@@ -403,6 +410,12 @@ def _from_dict(cls: Type[T], data: dict) -> T:
     try:
         hints = get_type_hints(cls)
     except Exception:
+        log_noncritical(
+            NonCriticalCategory.TYPE_RESOLUTION,
+            "Failed to resolve type hints for %s during deserialization",
+            getattr(cls, "__name__", cls),
+            logger=log,
+        )
         hints = {}
     kwargs: dict = {}
     for f in fields(cls):  # type: ignore[arg-type]
