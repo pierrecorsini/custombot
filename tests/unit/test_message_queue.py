@@ -29,6 +29,7 @@ from hypothesis import strategies as st
 from src.message_queue import (
     MessageQueue,
     MessageStatus,
+    QueueCorruptionResult,
     QueuedMessage,
     get_message_queue,
 )
@@ -2413,17 +2414,18 @@ class TestLoadPendingFileCorruptionRecovery:
         assert queue._pending["after-binary"].text == valid_after.text
         await queue.close()
 
-    async def test_non_utf8_bytes_degrades_gracefully(self, tmp_path: Path):
-        """File with non-UTF-8 bytes causes read_text() to fail entirely.
+    async def test_non_utf8_bytes_recovers_valid_lines(self, tmp_path: Path):
+        """Non-UTF-8 bytes are replaced; valid entries on other lines are recovered.
 
-        _load_pending() catches the exception and degrades to an empty queue
-        rather than crashing. This is the expected graceful degradation behavior.
+        When a crash produces non-UTF-8 bytes in the queue file, read_text with
+        errors='replace' substitutes U+FFFD for invalid bytes, allowing valid
+        lines elsewhere in the file to be recovered instead of losing everything.
         """
         data_dir = tmp_path / "data"
         data_dir.mkdir()
         qfile = data_dir / "message_queue.jsonl"
 
-        valid_msg = make_queued(message_id="lost-to-encoding")
+        valid_msg = make_queued(message_id="survives-encoding")
         parts = [
             (json.dumps(valid_msg.to_dict()) + "\n").encode("utf-8"),
             b"\x80\x81\x82\xff\xfe\xfd\n",  # non-UTF-8 bytes
@@ -2433,10 +2435,9 @@ class TestLoadPendingFileCorruptionRecovery:
         queue = MessageQueue(str(data_dir))
         await queue.connect()
 
-        # read_text(encoding="utf-8") fails on non-UTF-8 bytes, so entire load
-        # degrades to empty — this is the documented graceful degradation
-        assert queue._pending == {}
-        assert await queue.get_pending_count() == 0
+        # Valid entry on the first line is recovered; non-UTF-8 line is skipped
+        assert "survives-encoding" in queue._pending
+        assert await queue.get_pending_count() == 1
         assert queue._initialized is True
         await queue.close()
 
@@ -2584,3 +2585,567 @@ class TestLoadPendingFileCorruptionRecovery:
         assert queue._pending["mix-valid-a"].chat_id == "chat-1"
         assert queue._pending["mix-valid-b"].chat_id == "chat-2"
         await queue.close()
+
+
+class TestOrphanedTmpRecovery:
+    """Tests for recovering pending messages from an orphaned .tmp file.
+
+    When the process crashes during _persist_pending()'s atomic write,
+    the main queue file may be deleted while the .tmp file survives.
+    _promote_orphaned_tmp() renames .tmp → main so that _load_pending()
+    can read the surviving data.
+    """
+
+    async def test_tmp_promoted_when_main_missing(self, tmp_path: Path):
+        """Main file deleted by crash, .tmp has valid pending entries."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+        tmp_file = data_dir / "message_queue.tmp"
+
+        msg_a = make_queued(message_id="orphan-1", text="first")
+        msg_b = make_queued(message_id="orphan-2", text="second")
+
+        # Write valid data ONLY to .tmp (main doesn't exist)
+        tmp_file.write_text(
+            json.dumps(msg_a.to_dict()) + "\n"
+            + json.dumps(msg_b.to_dict()) + "\n",
+            encoding="utf-8",
+        )
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        assert await queue.get_pending_count() == 2
+        assert "orphan-1" in queue._pending
+        assert "orphan-2" in queue._pending
+        assert queue._pending["orphan-1"].text == "first"
+        assert queue._pending["orphan-2"].text == "second"
+        # .tmp should have been promoted to main
+        assert qfile.exists()
+        assert not tmp_file.exists()
+        await queue.close()
+
+    async def test_tmp_cleaned_up_when_main_exists(self, tmp_path: Path):
+        """Both files exist — .tmp is removed, main is authoritative."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+        tmp_file = data_dir / "message_queue.tmp"
+
+        msg_main = make_queued(message_id="from-main", text="main data")
+        msg_tmp = make_queued(message_id="from-tmp", text="tmp data")
+
+        qfile.write_text(json.dumps(msg_main.to_dict()) + "\n", encoding="utf-8")
+        tmp_file.write_text(json.dumps(msg_tmp.to_dict()) + "\n", encoding="utf-8")
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        # Main is authoritative; tmp-only entries are NOT merged
+        assert "from-main" in queue._pending
+        assert "from-tmp" not in queue._pending
+        assert not tmp_file.exists()
+        await queue.close()
+
+    async def test_no_tmp_file_normal_startup(self, tmp_path: Path):
+        """Normal startup with no .tmp file — no warnings or errors."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        assert await queue.get_pending_count() == 0
+        await queue.close()
+
+    async def test_partial_tmp_promoted_and_lines_skipped(self, tmp_path: Path):
+        """.tmp has both valid and corrupted lines — valid ones are recovered."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        tmp_file = data_dir / "message_queue.tmp"
+
+        valid_msg = make_queued(message_id="partial-ok", text="survives")
+        tmp_file.write_text(
+            json.dumps(valid_msg.to_dict()) + "\n"
+            + "CORRUPT LINE\n"
+            + '{"message_id": "truncated", "chat_i',
+            encoding="utf-8",
+        )
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        assert "partial-ok" in queue._pending
+        assert "truncated" not in queue._pending
+        assert await queue.get_pending_count() == 1
+        await queue.close()
+
+
+class TestBackupOnCorruption:
+    """Tests for creating a backup of the corrupted queue file before eviction.
+
+    When _load_pending() detects corrupted lines, it creates a timestamped
+    backup in .data/backups/ before the eager eviction overwrites the file.
+    This preserves the corrupted data for manual inspection.
+    """
+
+    async def test_backup_created_when_corruption_detected(self, tmp_path: Path):
+        """Corrupted lines trigger a backup before eviction."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid_msg = make_queued(message_id="backup-ok")
+        original_content = (
+            json.dumps(valid_msg.to_dict()) + "\n"
+            + "CORRUPT LINE\n"
+        )
+        qfile.write_text(original_content, encoding="utf-8")
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        assert "backup-ok" in queue._pending
+
+        # Backup should have been created
+        backup_dir = data_dir / "backups"
+        assert backup_dir.exists()
+        backups = list(backup_dir.glob("message_queue_*.jsonl.bak"))
+        assert len(backups) == 1
+        # Backup contains the original corrupted content
+        assert backups[0].read_text(encoding="utf-8") == original_content
+        await queue.close()
+
+    async def test_no_backup_when_file_is_clean(self, tmp_path: Path):
+        """No backup created when there are no corrupted lines."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid_msg = make_queued(message_id="clean-ok")
+        qfile.write_text(json.dumps(valid_msg.to_dict()) + "\n", encoding="utf-8")
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        assert "clean-ok" in queue._pending
+
+        backup_dir = data_dir / "backups"
+        if backup_dir.exists():
+            backups = list(backup_dir.glob("message_queue_*.jsonl.bak"))
+            assert len(backups) == 0
+        await queue.close()
+
+    async def test_backup_preserves_all_lines_including_corrupt(self, tmp_path: Path):
+        """Backup preserves the full corrupted file for manual recovery."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid_a = make_queued(message_id="keep-a", text="hello")
+        valid_b = make_queued(message_id="keep-b", text="world")
+        original_content = (
+            json.dumps(valid_a.to_dict()) + "\n"
+            + "GARBAGE\n"
+            + json.dumps(valid_b.to_dict()) + "\n"
+            + '{"partial":\n'
+        )
+        qfile.write_text(original_content, encoding="utf-8")
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        assert await queue.get_pending_count() == 2
+
+        backup_dir = data_dir / "backups"
+        backups = list(backup_dir.glob("message_queue_*.jsonl.bak"))
+        assert len(backups) == 1
+        # Backup preserves ALL original lines, including corrupt ones
+        assert backups[0].read_text(encoding="utf-8") == original_content
+        await queue.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 13. QueueCorruptionResult dataclass & _last_corruption_result tracking
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestQueueCorruptionResult:
+    """Tests for QueueCorruptionResult dataclass and _last_corruption_result."""
+
+    async def test_no_corruption_result_on_clean_file(self, tmp_path: Path):
+        """Clean file produces _last_corruption_result with is_corrupted=False."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid_msg = make_queued(message_id="clean-1")
+        qfile.write_text(json.dumps(valid_msg.to_dict()) + "\n", encoding="utf-8")
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        assert queue._last_corruption_result is not None
+        assert queue._last_corruption_result.is_corrupted is False
+        assert queue._last_corruption_result.corrupted_lines == []
+        assert queue._last_corruption_result.total_lines == 1
+        assert queue._last_corruption_result.valid_lines == 1
+        assert queue._last_corruption_result.pending_lines == 1
+        await queue.close()
+
+    async def test_corruption_result_tracks_bad_lines(self, tmp_path: Path):
+        """Corrupted lines are tracked with line numbers in _last_corruption_result."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid = make_queued(message_id="ok-1")
+        qfile.write_text(
+            json.dumps(valid.to_dict()) + "\n"
+            + "CORRUPT LINE\n"
+            + '{"partial":\n',
+            encoding="utf-8",
+        )
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        result = queue._last_corruption_result
+        assert result is not None
+        assert result.is_corrupted is True
+        assert result.total_lines == 3
+        assert result.valid_lines == 1
+        assert result.pending_lines == 1
+        assert result.corrupted_lines == [2, 3]
+        assert len(result.error_details) == 2
+        await queue.close()
+
+    async def test_corruption_result_tracks_completed_lines(self, tmp_path: Path):
+        """Completed full-message entries are counted separately from pending."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        pending = make_queued(message_id="pend-1")
+        # Full QueuedMessage dict with status=completed (not the short
+        # completion marker which lacks chat_id/text and would be counted
+        # as corrupted instead).
+        completed = make_queued(message_id="done-1", status=MessageStatus.COMPLETED)
+        qfile.write_text(
+            json.dumps(pending.to_dict()) + "\n" + json.dumps(completed.to_dict()) + "\n",
+            encoding="utf-8",
+        )
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        result = queue._last_corruption_result
+        assert result is not None
+        assert result.completed_lines == 1
+        assert result.pending_lines == 1
+        assert result.valid_lines == 2
+        await queue.close()
+
+    async def test_no_corruption_result_before_connect(self, tmp_path: Path):
+        """_last_corruption_result is None before connect()."""
+        queue = MessageQueue(str(tmp_path / "data"))
+        assert queue._last_corruption_result is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 14. validate() public method
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestValidateMethod:
+    """Tests for MessageQueue.validate() — non-destructive integrity check."""
+
+    async def test_validate_clean_file(self, tmp_path: Path):
+        """validate() returns is_corrupted=False for a clean file."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid = make_queued(message_id="v-ok-1")
+        qfile.write_text(json.dumps(valid.to_dict()) + "\n", encoding="utf-8")
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        result = await queue.validate()
+        assert isinstance(result, QueueCorruptionResult)
+        assert result.is_corrupted is False
+        assert result.corrupted_lines == []
+        assert result.total_lines == 1
+        assert result.valid_lines == 1
+        assert result.pending_lines == 1
+        await queue.close()
+
+    async def test_validate_corrupted_file(self, tmp_path: Path):
+        """validate() detects corrupted lines without modifying anything."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid = make_queued(message_id="v-ok-2")
+        original_content = (
+            json.dumps(valid.to_dict()) + "\n"
+            + "GARBAGE\n"
+            + '{"truncated":\n'
+        )
+        qfile.write_text(original_content, encoding="utf-8")
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        result = await queue.validate()
+        assert result.is_corrupted is True
+        assert result.corrupted_lines == [2, 3]
+        assert result.valid_lines == 1
+        assert result.total_lines == 3
+
+        # validate() must NOT modify the file
+        assert qfile.read_text(encoding="utf-8") == original_content
+        await queue.close()
+
+    async def test_validate_nonexistent_file(self, tmp_path: Path):
+        """validate() handles missing file gracefully."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        result = await queue.validate()
+        assert isinstance(result, QueueCorruptionResult)
+        assert "Queue file does not exist" in result.error_details
+        await queue.close()
+
+    async def test_validate_with_completed_entries(self, tmp_path: Path):
+        """validate() distinguishes pending vs completed entries."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        pending = make_queued(message_id="v-pend")
+        completed = json.dumps({
+            "message_id": "v-done",
+            "status": "completed",
+            "completed_at": time.time(),
+        })
+        qfile.write_text(
+            json.dumps(pending.to_dict()) + "\n" + completed + "\n",
+            encoding="utf-8",
+        )
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        result = await queue.validate()
+        assert result.pending_lines == 1
+        assert result.completed_lines == 1
+        assert result.total_lines == 2
+        await queue.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 15. repair() public method
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRepairMethod:
+    """Tests for MessageQueue.repair() — corruption detection + repair."""
+
+    async def test_repair_removes_corrupted_lines(self, tmp_path: Path):
+        """repair() removes corrupted lines and preserves valid ones."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid_a = make_queued(message_id="repair-ok-a", text="hello")
+        valid_b = make_queued(message_id="repair-ok-b", text="world")
+        original = (
+            json.dumps(valid_a.to_dict()) + "\n"
+            + "CORRUPT\n"
+            + json.dumps(valid_b.to_dict()) + "\n"
+            + '{"partial":\n'
+        )
+        qfile.write_text(original, encoding="utf-8")
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        result = await queue.repair()
+        assert result.is_corrupted is True
+        assert result.repaired is True
+        assert len(result.corrupted_lines) == 2
+
+        # After repair, only valid lines remain in the file
+        repaired_content = qfile.read_text(encoding="utf-8")
+        assert "CORRUPT" not in repaired_content
+        assert '{"partial":' not in repaired_content
+        assert "repair-ok-a" in repaired_content
+        assert "repair-ok-b" in repaired_content
+
+        # In-memory pending reflects repaired state
+        assert "repair-ok-a" in queue._pending
+        assert "repair-ok-b" in queue._pending
+        await queue.close()
+
+    async def test_repair_creates_backup(self, tmp_path: Path):
+        """repair() creates a backup before modifying the file."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid = make_queued(message_id="repair-bak")
+        qfile.write_text(
+            json.dumps(valid.to_dict()) + "\n" + "BAD LINE\n",
+            encoding="utf-8",
+        )
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        result = await queue.repair()
+        assert result.backup_path is not None
+        backup_path = Path(result.backup_path)
+        assert backup_path.exists()
+        # Backup preserves the original corrupted content
+        assert "BAD LINE" in backup_path.read_text(encoding="utf-8")
+        await queue.close()
+
+    async def test_repair_clean_file_is_noop(self, tmp_path: Path):
+        """repair() on a clean file returns is_corrupted=False, repaired=False."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid = make_queued(message_id="repair-clean")
+        original = json.dumps(valid.to_dict()) + "\n"
+        qfile.write_text(original, encoding="utf-8")
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        result = await queue.repair()
+        assert result.is_corrupted is False
+        assert result.repaired is False
+        # File unchanged
+        assert qfile.read_text(encoding="utf-8") == original
+        await queue.close()
+
+    async def test_repair_preserves_data_integrity(self, tmp_path: Path):
+        """After repair, loaded messages have correct field values."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid = make_queued(
+            message_id="repair-fields",
+            chat_id="chat-42",
+            text="exact text",
+            sender_id="sender-x",
+            sender_name="Alice",
+        )
+        qfile.write_text(
+            json.dumps(valid.to_dict()) + "\n" + "GARBAGE\n",
+            encoding="utf-8",
+        )
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        result = await queue.repair()
+        assert result.repaired is True
+
+        msg = queue._pending["repair-fields"]
+        assert msg.chat_id == "chat-42"
+        assert msg.text == "exact text"
+        assert msg.sender_id == "sender-x"
+        assert msg.sender_name == "Alice"
+        await queue.close()
+
+    async def test_repair_then_validate_is_clean(self, tmp_path: Path):
+        """After repair, validate() reports the file as clean."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        qfile = data_dir / "message_queue.jsonl"
+
+        valid = make_queued(message_id="repair-then-val")
+        qfile.write_text(
+            json.dumps(valid.to_dict()) + "\n" + "BAD\n",
+            encoding="utf-8",
+        )
+
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        repair_result = await queue.repair()
+        assert repair_result.repaired is True
+
+        validate_result = await queue.validate()
+        assert validate_result.is_corrupted is False
+        assert validate_result.corrupted_lines == []
+        await queue.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 16. Append durability (flush + fsync)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestAppendDurability:
+    """Tests for flush+fsync durability in append operations."""
+
+    async def test_enqueue_persists_to_disk(self, tmp_path: Path):
+        """After enqueue, the message is readable directly from disk."""
+        data_dir = tmp_path / "data"
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        msg = await queue.enqueue(
+            make_incoming(message_id="dur-1", text="durable message")
+        )
+        await queue.close()
+
+        # Read file directly — must contain the enqueued message
+        qfile = data_dir / "message_queue.jsonl"
+        content = qfile.read_text(encoding="utf-8")
+        assert "dur-1" in content
+        assert "durable message" in content
+
+    async def test_complete_persists_marker_to_disk(self, tmp_path: Path):
+        """After complete, the completion marker is on disk (before close)."""
+        data_dir = tmp_path / "data"
+        queue = MessageQueue(str(data_dir))
+        queue._compact_threshold = 100  # prevent compaction, force append
+        await queue.connect()
+
+        await queue.enqueue(make_incoming(message_id="dur-comp-1"))
+        await queue.complete("dur-comp-1")
+
+        # Don't close — check disk state immediately after complete
+        qfile = data_dir / "message_queue.jsonl"
+        content = qfile.read_text(encoding="utf-8")
+        assert "dur-comp-1" in content
+        assert "completed" in content
+
+        await queue.close()
+
+    async def test_multiple_enqueues_all_persisted(self, tmp_path: Path):
+        """Multiple enqueue calls each fsync — all data reaches disk."""
+        data_dir = tmp_path / "data"
+        queue = MessageQueue(str(data_dir))
+        await queue.connect()
+
+        for i in range(10):
+            await queue.enqueue(make_incoming(message_id=f"dur-multi-{i}"))
+
+        await queue.close()
+
+        qfile = data_dir / "message_queue.jsonl"
+        content = qfile.read_text(encoding="utf-8")
+        for i in range(10):
+            assert f"dur-multi-{i}" in content

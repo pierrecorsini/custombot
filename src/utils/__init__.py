@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Generic, TypeVar
 
 from src.constants import MAX_LRU_CACHE_SIZE
 
@@ -243,7 +244,122 @@ class LRUDict:
         return self._cache.pop(key, default)
 
 
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
+
+class BoundedOrderedDict(Generic[_K, _V]):
+    """Generic bounded LRU dictionary with configurable eviction and optional TTL.
+
+    Supports two eviction strategies:
+    - ``"oldest"``: evict the single oldest (LRU) entry when full.
+    - ``"half"``: evict the oldest half of entries when full, amortising
+      eviction cost for write-heavy workloads.
+
+    When ``ttl`` is set, entries older than ``ttl`` seconds are treated as
+    missing on access (``__contains__``, ``__getitem__``, ``get``) and are
+    lazily removed.
+
+    Example::
+
+        cache: BoundedOrderedDict[str, int] = BoundedOrderedDict(
+            max_size=500, eviction="half", ttl=60.0
+        )
+        cache["key"] = 42
+        assert cache.get("key") == 42
+    """
+
+    __slots__ = ("_cache", "_max_size", "_eviction", "_ttl")
+
+    def __init__(
+        self,
+        max_size: int = MAX_LRU_CACHE_SIZE,
+        eviction: str = "oldest",
+        ttl: float | None = None,
+    ) -> None:
+        self._cache: OrderedDict[_K, tuple[_V, float]] = OrderedDict()
+        self._max_size = max_size
+        self._eviction = eviction
+        self._ttl = ttl
+
+    # ── internal helpers ──────────────────────────────────────────────────
+
+    def _is_alive(self, inserted_at: float) -> bool:
+        """Return True if the entry is within its TTL window."""
+        if self._ttl is None:
+            return True
+        return (time.monotonic() - inserted_at) < self._ttl
+
+    def _evict(self) -> None:
+        """Evict entries according to the configured strategy."""
+        if len(self._cache) < self._max_size:
+            return
+        if self._eviction == "half":
+            count = max(1, len(self._cache) // 2)
+        else:
+            count = 1
+        for _ in range(count):
+            if self._cache:
+                self._cache.popitem(last=False)
+
+    # ── dict-like interface ───────────────────────────────────────────────
+
+    def __setitem__(self, key: _K, value: _V) -> None:
+        """Insert or update a value, evicting if necessary."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
+            self._evict()
+        self._cache[key] = (value, time.monotonic())
+
+    def __getitem__(self, key: _K) -> _V:
+        """Get a value, raising KeyError or returning stale if TTL expired."""
+        value, inserted_at = self._cache[key]
+        if not self._is_alive(inserted_at):
+            del self._cache[key]
+            raise KeyError(key)
+        self._cache.move_to_end(key)
+        return value
+
+    def __contains__(self, key: object) -> bool:
+        try:
+            entry = self._cache[key]  # type: ignore[index]
+        except KeyError:
+            return False
+        if not self._is_alive(entry[1]):
+            self._cache.pop(key, None)  # type: ignore[arg-type]
+            return False
+        return True
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def get(self, key: _K, default: _V | None = None) -> _V | None:
+        """Get a value with TTL check; returns *default* if missing or stale."""
+        try:
+            value, inserted_at = self._cache[key]
+        except KeyError:
+            return default
+        if not self._is_alive(inserted_at):
+            self._cache.pop(key, None)
+            return default
+        self._cache.move_to_end(key)
+        return value
+
+    def pop(self, key: _K, default: _V | None = None) -> _V | None:
+        """Remove and return a value, or *default* if not found."""
+        entry = self._cache.pop(key, None)
+        if entry is None:
+            return default
+        return entry[0]
+
+    def clear(self) -> None:
+        """Remove all entries."""
+        self._cache.clear()
+
+
 __all__ = [
+    "BoundedOrderedDict",
     "LRULockCache",
     "LRUDict",
     "async_read_text",

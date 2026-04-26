@@ -322,3 +322,45 @@ class TestCircuitBreakerStateProperty:
         valid_states = {CircuitState.CLOSED, CircuitState.OPEN, CircuitState.HALF_OPEN}
         for state in observed_states:
             assert state in valid_states
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# force_close() — health-probe-driven recovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestForceClose:
+    """Verify force_close() transitions from OPEN and HALF_OPEN to CLOSED."""
+
+    def test_force_close_from_open(self):
+        """force_close() should transition OPEN → CLOSED."""
+        breaker = CircuitBreaker(failure_threshold=3, cooldown_seconds=60)
+        _force_to_open(breaker)
+        assert breaker.state == CircuitState.OPEN
+
+        breaker.force_close()
+
+        assert breaker.state == CircuitState.CLOSED
+        assert breaker.failure_count == 0
+
+    def test_force_close_from_half_open(self):
+        """force_close() should also transition HALF_OPEN → CLOSED."""
+        breaker = CircuitBreaker(failure_threshold=3, cooldown_seconds=10)
+        _force_to_open(breaker)
+        _force_to_half_open(breaker)
+        assert breaker.state == CircuitState.HALF_OPEN
+
+        breaker.force_close()
+
+        assert breaker.state == CircuitState.CLOSED
+        assert breaker.failure_count == 0
+
+    def test_force_close_from_closed_is_noop(self):
+        """force_close() on an already CLOSED breaker should be a no-op."""
+        breaker = CircuitBreaker(failure_threshold=3, cooldown_seconds=10)
+        assert breaker.state == CircuitState.CLOSED
+
+        breaker.force_close()
+
+        assert breaker.state == CircuitState.CLOSED
+        assert breaker.failure_count == 0

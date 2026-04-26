@@ -14,6 +14,7 @@ Unit tests covering:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1976,3 +1977,141 @@ class TestTokenUsageDoubleCountingRegression:
         assert top[0]["prompt"] == 15
         assert top[0]["completion"] == 30
         assert top[0]["total"] == 45
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Health probe — health-check-driven LLM failover
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestHealthProbe:
+    """Verify background health probe force-closes the circuit breaker on recovery."""
+
+    async def test_probe_starts_on_failure(self, valid_cfg):
+        """_ensure_health_probe() should spawn a task when breaker is OPEN."""
+        client = LLMClient(valid_cfg)
+        # Drive breaker to OPEN
+        for _ in range(client._circuit_breaker._failure_threshold):
+            await client._circuit_breaker.record_failure()
+        assert client._circuit_breaker.state.value == "open"
+
+        client._ensure_health_probe()
+
+        assert client._health_probe_task is not None
+        # Clean up
+        client._health_probe_task.cancel()
+        try:
+            await client._health_probe_task
+        except asyncio.CancelledError:
+            pass
+
+    async def test_probe_noop_when_closed(self, valid_cfg):
+        """_ensure_health_probe() should be a no-op when breaker is CLOSED."""
+        client = LLMClient(valid_cfg)
+        assert client._circuit_breaker.state.value == "closed"
+
+        client._ensure_health_probe()
+
+        assert client._health_probe_task is None
+
+    async def test_probe_idempotent(self, valid_cfg):
+        """Repeated _ensure_health_probe() calls should not spawn duplicate tasks."""
+        client = LLMClient(valid_cfg)
+        for _ in range(client._circuit_breaker._failure_threshold):
+            await client._circuit_breaker.record_failure()
+
+        client._ensure_health_probe()
+        first_task = client._health_probe_task
+        client._ensure_health_probe()  # Second call — should be no-op
+
+        assert client._health_probe_task is first_task
+        # Clean up
+        first_task.cancel()
+        try:
+            await first_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_probe_force_closes_on_success(self, valid_cfg):
+        """Health probe should force-close the breaker when models.list() succeeds."""
+        client = LLMClient(valid_cfg)
+        for _ in range(client._circuit_breaker._failure_threshold):
+            await client._circuit_breaker.record_failure()
+        assert client._circuit_breaker.state.value == "open"
+
+        with patch.object(
+            client._client.models, "list", AsyncMock(return_value=MagicMock())
+        ), patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01):
+            client._ensure_health_probe()
+            # Wait for the probe loop to run at least one iteration
+            await asyncio.sleep(0.05)
+
+        assert client._circuit_breaker.state.value == "closed"
+        assert client._health_probe_task is None
+
+    @pytest.mark.asyncio
+    async def test_probe_retries_on_failure(self, valid_cfg):
+        """Health probe should keep running when models.list() fails."""
+        client = LLMClient(valid_cfg)
+        for _ in range(client._circuit_breaker._failure_threshold):
+            await client._circuit_breaker.record_failure()
+
+        call_count = 0
+
+        async def _failing_probe():
+            nonlocal call_count
+            call_count += 1
+            raise Exception("provider still down")
+
+        with patch.object(
+            client._client.models, "list", side_effect=_failing_probe
+        ), patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01):
+            client._ensure_health_probe()
+            await asyncio.sleep(0.05)
+
+        # Probe should have tried multiple times and breaker should still be OPEN
+        assert call_count >= 1
+        assert client._circuit_breaker.state.value == "open"
+        # Clean up
+        if client._health_probe_task:
+            client._health_probe_task.cancel()
+            try:
+                await client._health_probe_task
+            except asyncio.CancelledError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_probe_stops_when_breaker_closes_naturally(self, valid_cfg):
+        """Probe loop should exit when breaker transitions away from OPEN."""
+        client = LLMClient(valid_cfg)
+        for _ in range(client._circuit_breaker._failure_threshold):
+            await client._circuit_breaker.record_failure()
+
+        # Close the breaker after a short delay
+        async def _close_after_delay():
+            await asyncio.sleep(0.03)
+            await client._circuit_breaker.force_close()
+
+        with patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01):
+            asyncio.create_task(_close_after_delay())
+            client._ensure_health_probe()
+            await asyncio.sleep(0.1)
+
+        assert client._health_probe_task is None
+
+    @pytest.mark.asyncio
+    async def test_close_cancels_probe(self, valid_cfg):
+        """LLMClient.close() should cancel the running health probe."""
+        client = LLMClient(valid_cfg)
+        for _ in range(client._circuit_breaker._failure_threshold):
+            await client._circuit_breaker.record_failure()
+
+        with patch.object(
+            client._client.models, "list", AsyncMock(side_effect=Exception("down"))
+        ), patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01):
+            client._ensure_health_probe()
+            assert client._health_probe_task is not None
+            await client.close()
+
+        assert client._health_probe_task is None

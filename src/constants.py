@@ -280,6 +280,13 @@ CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
 # to HALF_OPEN to probe whether the LLM provider has recovered.
 CIRCUIT_BREAKER_COOLDOWN_SECONDS: float = 60.0
 
+# Interval (seconds) between proactive health probes while the LLM circuit
+# breaker is OPEN.  A background task polls models.list() at this interval;
+# on success the breaker is force-closed, allowing traffic to resume without
+# waiting for the full cooldown.  Shorter intervals detect recovery faster
+# but generate more API requests; 10s balances speed against overhead.
+LLM_HEALTH_PROBE_INTERVAL_SECONDS: float = 10.0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Database Write Circuit Breaker Configuration
 # ─────────────────────────────────────────────────────────────────────────────

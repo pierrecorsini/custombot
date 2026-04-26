@@ -71,7 +71,7 @@ try:
         """
         opt = 0
         if not ensure_ascii:
-            opt |= _orjson.OPT_APPEND_NEWLINE  # not relevant for dumps, but harmless
+            pass  # no special flags needed
         try:
             if indent:
                 opt |= _orjson.OPT_INDENT_2

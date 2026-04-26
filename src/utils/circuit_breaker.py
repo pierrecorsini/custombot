@@ -125,5 +125,26 @@ class CircuitBreaker:
                     self._cooldown_seconds,
                 )
 
+    async def force_close(self) -> None:
+        """Force the breaker to CLOSED from OPEN or HALF_OPEN.
+
+        Used by health-check-driven recovery: when an external probe
+        confirms the provider has recovered, the breaker can be closed
+        immediately without waiting for the full cooldown period to expire.
+        """
+        async with self._lock:
+            if self._state in (CircuitState.OPEN, CircuitState.HALF_OPEN):
+                elapsed = time.monotonic() - self._last_failure_time
+                prev_state = self._state.value
+                self._state = CircuitState.CLOSED
+                self._failure_count = 0
+                log.info(
+                    "Circuit breaker force-CLOSED by health probe "
+                    "(was %s for %.1fs, cooldown was %.0fs)",
+                    prev_state,
+                    elapsed,
+                    self._cooldown_seconds,
+                )
+
 
 __all__ = ["CircuitBreaker", "CircuitState"]

@@ -9,6 +9,7 @@ Just set base_url + api_key in config.json.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -26,6 +27,12 @@ from typing import Callable, Awaitable
 from src.config import LLMConfig
 from src.constants import (
     CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+    DEFAULT_HTTPX_MAX_CONNECTIONS,
+    DEFAULT_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
+    LLM_HEALTH_PROBE_INTERVAL_SECONDS,
+    LLM_WARMUP_TIMEOUT,
+    WORKSPACE_DIR,
 )
 
 from src.core.errors import NonCriticalCategory, log_noncritical
@@ -34,7 +41,7 @@ from src.llm_error_classifier import classify_llm_error
 from src.llm_provider import TokenUsage
 from src.logging import get_correlation_id
 from src.security.url_sanitizer import sanitize_url_for_logging
-from src.utils.circuit_breaker import CircuitBreaker
+from src.utils.circuit_breaker import CircuitBreaker, CircuitState
 from src.utils.retry import retry_with_backoff
 from src.utils.type_guards import is_llm_config
 
@@ -80,6 +87,7 @@ class LLMClient:
             failure_threshold=CIRCUIT_BREAKER_FAILURE_THRESHOLD,
             cooldown_seconds=CIRCUIT_BREAKER_COOLDOWN_SECONDS,
         )
+        self._health_probe_task: asyncio.Task[None] | None = None
         self._llm_logger: LLMLogger | None = None
         if log_llm:
             from src.logging.llm_logging import LLMLogger
@@ -93,6 +101,45 @@ class LLMClient:
             cfg.model,
             sanitize_url_for_logging(cfg.base_url),
         )
+
+    # ── health probe ────────────────────────────────────────────────────────
+
+    def _ensure_health_probe(self) -> None:
+        """Spawn a background health probe if the circuit breaker is OPEN.
+
+        Idempotent: if a probe is already running or the breaker is not OPEN,
+        this is a no-op.  The probe polls ``models.list()`` at a fixed
+        interval and force-closes the breaker as soon as the provider
+        recovers — avoiding the full cooldown wait.
+        """
+        if self._health_probe_task is not None:
+            return
+        if self._circuit_breaker.state != CircuitState.OPEN:
+            return
+        self._health_probe_task = asyncio.create_task(self._health_probe_loop())
+        log.info("LLM health probe started (interval=%.0fs)", LLM_HEALTH_PROBE_INTERVAL_SECONDS)
+
+    async def _health_probe_loop(self) -> None:
+        """Background task polling the LLM provider while the breaker is open."""
+        try:
+            while self._circuit_breaker.state == CircuitState.OPEN:
+                await asyncio.sleep(LLM_HEALTH_PROBE_INTERVAL_SECONDS)
+                # Re-check after sleep — breaker may have closed naturally.
+                if self._circuit_breaker.state != CircuitState.OPEN:
+                    break
+                try:
+                    await asyncio.wait_for(self._client.models.list(), timeout=5.0)
+                    await self._circuit_breaker.force_close()
+                    log.info("LLM health probe succeeded — circuit breaker force-closed")
+                    return
+                except Exception as exc:
+                    log_noncritical(
+                        NonCriticalCategory.HEALTH_CHECK,
+                        f"LLM health probe failed: {type(exc).__name__}: {exc}",
+                        logger=log,
+                    )
+        finally:
+            self._health_probe_task = None
 
     # ── public API ─────────────────────────────────────────────────────────
 
@@ -111,8 +158,6 @@ class LLMClient:
 
         Returns ``True`` if the warmup succeeded, ``False`` otherwise.
         """
-        import asyncio
-
         try:
             await asyncio.wait_for(
                 self._client.models.list(),
@@ -261,7 +306,7 @@ class LLMClient:
             chat_id: Optional chat ID for per-chat token tracking.
         """
         # Circuit breaker: reject immediately when provider is down
-        if self._circuit_breaker.is_open():
+        if await self._circuit_breaker.is_open():
             raise LLMError(
                 message="LLM provider is temporarily unavailable (circuit breaker open)",
                 suggestion="Please try again in a minute",
@@ -270,13 +315,15 @@ class LLMClient:
 
         try:
             result = await self._raw_chat(messages, tools=tools, timeout=timeout, chat_id=chat_id)
-            self._circuit_breaker.record_success()
+            await self._circuit_breaker.record_success()
             return result
         except LLMError:
-            self._circuit_breaker.record_failure()
+            await self._circuit_breaker.record_failure()
+            self._ensure_health_probe()
             raise
         except Exception as exc:
-            self._circuit_breaker.record_failure()
+            await self._circuit_breaker.record_failure()
+            self._ensure_health_probe()
             classified = classify_llm_error(exc)
             log.error(
                 "LLM error classified: %s → %s (code=%s)",
@@ -324,7 +371,7 @@ class LLMClient:
             the non-streaming :meth:`chat` return value).
         """
         # Circuit breaker: reject immediately when provider is down
-        if self._circuit_breaker.is_open():
+        if await self._circuit_breaker.is_open():
             raise LLMError(
                 message="LLM provider is temporarily unavailable (circuit breaker open)",
                 suggestion="Please try again in a minute",
@@ -473,9 +520,11 @@ class LLMClient:
 
         except LLMError:
             await self._circuit_breaker.record_failure()
+            self._ensure_health_probe()
             raise
         except Exception as exc:
             await self._circuit_breaker.record_failure()
+            self._ensure_health_probe()
             classified = classify_llm_error(exc)
             log.error(
                 "LLM streaming error classified: %s → %s (code=%s)",
@@ -519,6 +568,12 @@ class LLMClient:
 
     async def close(self) -> None:
         """Close the underlying httpx connection pool for clean shutdown."""
+        if self._health_probe_task is not None:
+            self._health_probe_task.cancel()
+            try:
+                await self._health_probe_task
+            except asyncio.CancelledError:
+                pass
         await self._http_client.aclose()
         log.debug("LLM client connection pool closed")
 
