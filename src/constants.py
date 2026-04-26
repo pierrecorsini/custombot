@@ -45,6 +45,13 @@ MAX_LRU_CACHE_SIZE: int = 1000
 # Windows 512, macOS 256) and leaves headroom for other file operations.
 MAX_FILE_HANDLES: int = 256
 
+# Maximum number of pooled read-mode file handles for JSONL message retrieval.
+# Read handles are reused across get_recent_messages() calls, eliminating
+# per-read open/close syscalls on the hot path.  Smaller than the write pool
+# because reads are bursty (triggered by incoming messages) while writes are
+# continuous (every message produces one).
+MAX_READ_FILE_HANDLES: int = 128
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HTTP / Network Timeouts
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,7 +254,10 @@ WORKSPACE_DIR: str = "workspace"
 
 # Minimum interval (seconds) between stale-checks on instruction .md files.
 # Prevents redundant stat() calls when match() is invoked at high frequency.
-ROUTING_WATCH_DEBOUNCE_SECONDS: float = 1.0
+# Set to 5s so the per-message _is_stale() call triggers at most one filesystem
+# scan (os.scandir + stat on every .md) every 5 seconds, reducing I/O on the
+# hot path while still detecting instruction-file changes promptly.
+ROUTING_WATCH_DEBOUNCE_SECONDS: float = 5.0
 
 # TTL (seconds) for the routing match result cache. Identical message signatures
 # within this window return the cached match result without re-evaluating rules.
