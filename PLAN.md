@@ -18,8 +18,8 @@
 ## Error Handling & Resilience
 
 - [x] Add structured retry with backoff for SQLite writes in `Database` — JSONL message writes currently have a circuit breaker but no retry; transient disk-full or lock-contention errors should retry with exponential backoff before tripping the breaker
-- [ ] Implement health-check-driven LLM failover — when the LLM circuit breaker opens, proactively poll the provider endpoint and auto-close the breaker on recovery instead of waiting for the full cooldown period
-- [ ] Add graceful degradation when `VectorMemory` embedding model is unreachable at runtime — startup probe catches initial failures, but mid-session API outages cause unhandled `LLMError` in `store()`; catch and log gracefully, queuing failed embeddings for retry
+- [x] Implement health-check-driven LLM failover — when the LLM circuit breaker opens, proactively poll the provider endpoint and auto-close the breaker on recovery instead of waiting for the full cooldown period
+- [x] Add graceful degradation when `VectorMemory` embedding model is unreachable at runtime — startup probe catches initial failures, but mid-session API outages cause unhandled `LLMError` in `store()`; catch and log gracefully, queuing failed embeddings for retry
 - [ ] Harden `MessageQueue` against JSONL corruption — if the queue file is partially written (crash mid-write), the entire queue becomes unreadable; add line-level recovery that skips malformed lines instead of failing the whole file
 
 ## Test Coverage & Quality

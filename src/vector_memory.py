@@ -46,6 +46,9 @@ _EMBED_HEALTH_TTL = 60.0
 _BATCH_DEBOUNCE = 0.05  # 50 ms
 # Safety cap on the number of texts sent in a single batched API call.
 _MAX_BATCH_SIZE = 64
+# Maximum number of queued retry entries.  Oldest entries are dropped when
+# the cap is exceeded to prevent unbounded memory growth during extended outages.
+_MAX_RETRY_QUEUE_SIZE = 1000
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +129,11 @@ class VectorMemory(SqliteHelper):
         self._pending_saves: list[tuple[str, asyncio.Future[list[float]]]] = []
         self._flush_handle: asyncio.TimerHandle | None = None
 
+        # Retry queue for saves that failed due to embedding API outages.
+        # Each entry is (chat_id, text, category, queued_at_timestamp).
+        # Flushed opportunistically when a subsequent save succeeds.
+        self._pending_retries: list[tuple[str, str, str, float]] = []
+
     # ── lifecycle ───────────────────────────────────────────────────────
 
     def connect(self) -> None:
@@ -169,6 +177,13 @@ class VectorMemory(SqliteHelper):
             if not future.done():
                 future.cancel()
         self._pending_saves.clear()
+        # Report and clear any queued retry saves
+        if self._pending_retries:
+            log.info(
+                "VectorMemory shutting down with %d queued retry saves (dropped)",
+                len(self._pending_retries),
+            )
+            self._pending_retries.clear()
         # Cancel any pending in-flight embedding futures
         for key, future in list(self._inflight.items()):
             if not future.done():
@@ -359,6 +374,75 @@ class VectorMemory(SqliteHelper):
         with self._cache_lock:
             self._embed_api_healthy = False
             self._embed_api_last_check = time.monotonic()
+
+    def _queue_for_retry(
+        self, chat_id: str, text: str, category: str,
+    ) -> None:
+        """Queue a failed save for later retry, capping queue size."""
+        if len(self._pending_retries) >= _MAX_RETRY_QUEUE_SIZE:
+            dropped = self._pending_retries.pop(0)
+            log.warning(
+                "Retry queue full (%d); dropping oldest save for chat=%s",
+                _MAX_RETRY_QUEUE_SIZE, dropped[0],
+            )
+        self._pending_retries.append((chat_id, text, category, time.time()))
+        log.debug(
+            "Queued vector memory save for retry (chat=%s, queue=%d)",
+            chat_id, len(self._pending_retries),
+        )
+
+    async def _retry_pending_saves(self) -> None:
+        """Attempt to flush queued retry saves when the embedding API recovers.
+
+        Called opportunistically after a successful save.  If the first retry
+        fails, the remaining items are re-queued and we back off until the
+        next successful operation.
+        """
+        if not self._pending_retries:
+            return
+
+        # Only attempt retries if the health TTL has expired or API is healthy
+        with self._cache_lock:
+            if not self._embed_api_healthy:
+                elapsed = time.monotonic() - self._embed_api_last_check
+                if elapsed < _EMBED_HEALTH_TTL:
+                    return  # Still in cooldown
+
+        items = self._pending_retries[:]
+        self._pending_retries.clear()
+        retried = 0
+        for chat_id, text, category, queued_at in items:
+            try:
+                self._check_embedding_api_health()
+                embedding = await self._batched_embed(text)
+                now = time.time()
+                await asyncio.to_thread(
+                    self._insert_entry, chat_id, text, category, now, embedding,
+                )
+                retried += 1
+                age = round(now - queued_at, 1)
+                log.debug(
+                    "Retry-saved vector memory chat=%s (queued %.1fs ago)",
+                    chat_id, age,
+                )
+            except Exception as exc:
+                log_noncritical(
+                    NonCriticalCategory.EMBEDDING,
+                    "Retry still failing for vector memory save chat=%s: %s",
+                    chat_id, exc,
+                    logger=log,
+                )
+                # Re-queue this item plus all remaining; API still down
+                remaining = [(chat_id, text, category, queued_at)]
+                idx = items.index((chat_id, text, category, queued_at))
+                remaining.extend(items[idx + 1:])
+                self._pending_retries.extend(remaining)
+                break
+
+        if retried:
+            log.info(
+                "Flushed %d/%d queued vector memory saves", retried, len(items),
+            )
 
     # ── embeddings ──────────────────────────────────────────────────────
 
@@ -575,20 +659,40 @@ class VectorMemory(SqliteHelper):
         Uses batch coalescing: rapid ``save()`` calls are grouped into a
         single embedding API request via a short debounce window, reducing
         API overhead when many memories are saved in quick succession.
+
+        If the embedding API is unreachable mid-session, the save is queued
+        for retry and ``-1`` is returned — callers never see an exception.
         """
         assert self._db is not None
 
-        self._check_embedding_api_health()
-        embedding = await self._batched_embed(text)
-        now = time.time()
+        try:
+            self._check_embedding_api_health()
+            embedding = await self._batched_embed(text)
+            now = time.time()
 
-        # Run synchronous DB writes in thread pool to avoid blocking the event loop
-        row_id = await asyncio.to_thread(
-            self._insert_entry, chat_id, text, category, now, embedding
-        )
+            # Run synchronous DB writes in thread pool to avoid blocking the event loop
+            row_id = await asyncio.to_thread(
+                self._insert_entry, chat_id, text, category, now, embedding
+            )
 
-        log.debug("Saved vector memory id=%d chat=%s", row_id, chat_id)
-        return row_id
+            log.debug("Saved vector memory id=%d chat=%s", row_id, chat_id)
+
+            # Opportunistically flush queued retries on success
+            if self._pending_retries:
+                asyncio.ensure_future(self._retry_pending_saves())
+
+            return row_id
+        except Exception as exc:
+            self._mark_embedding_api_unhealthy()
+            log_noncritical(
+                NonCriticalCategory.EMBEDDING,
+                "Embedding API unreachable during save(chat=%s); queuing for retry: %s",
+                chat_id, exc,
+                logger=log,
+                level=logging.WARNING,
+            )
+            self._queue_for_retry(chat_id, text, category)
+            return -1
 
     async def save_batch(
         self,
@@ -609,17 +713,36 @@ class VectorMemory(SqliteHelper):
         if not items:
             return []
 
-        self._check_embedding_api_health()
-        texts = [text for text, _ in items]
-        embeddings = await self._embed_batch(texts)
-        now = time.time()
+        try:
+            self._check_embedding_api_health()
+            texts = [text for text, _ in items]
+            embeddings = await self._embed_batch(texts)
+            now = time.time()
 
-        rows = await asyncio.to_thread(
-            self._insert_entries, chat_id, items, now, embeddings
-        )
+            rows = await asyncio.to_thread(
+                self._insert_entries, chat_id, items, now, embeddings
+            )
 
-        log.debug("Batch-saved %d vector memories chat=%s", len(rows), chat_id)
-        return rows
+            log.debug("Batch-saved %d vector memories chat=%s", len(rows), chat_id)
+
+            # Opportunistically flush queued retries on success
+            if self._pending_retries:
+                asyncio.ensure_future(self._retry_pending_saves())
+
+            return rows
+        except Exception as exc:
+            self._mark_embedding_api_unhealthy()
+            log_noncritical(
+                NonCriticalCategory.EMBEDDING,
+                "Embedding API unreachable during save_batch(chat=%s, %d items); "
+                "queuing for retry: %s",
+                chat_id, len(items), exc,
+                logger=log,
+                level=logging.WARNING,
+            )
+            for text, category in items:
+                self._queue_for_retry(chat_id, text, category)
+            return []
 
     def _insert_entry(
         self,
@@ -676,16 +799,32 @@ class VectorMemory(SqliteHelper):
         return row_ids
 
     async def search(self, chat_id: str, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Semantic search within a chat's memories."""
+        """Semantic search within a chat's memories.
+
+        If the embedding API is unreachable, returns an empty list instead
+        of propagating the exception — search failure must never break the
+        caller's control flow.
+        """
         assert self._db is not None
 
         if not query.strip():
             return []
 
-        self._check_embedding_api_health()
-        query_vec = _serialize_f32(await self._embed(query))
+        try:
+            self._check_embedding_api_health()
+            query_vec = _serialize_f32(await self._embed(query))
 
-        return await asyncio.to_thread(self._search_sync, chat_id, query_vec, limit)
+            return await asyncio.to_thread(self._search_sync, chat_id, query_vec, limit)
+        except Exception as exc:
+            self._mark_embedding_api_unhealthy()
+            log_noncritical(
+                NonCriticalCategory.EMBEDDING,
+                "Embedding API unreachable during search(chat=%s); returning empty: %s",
+                chat_id, exc,
+                logger=log,
+                level=logging.WARNING,
+            )
+            return []
 
     def _search_sync(self, chat_id: str, query_vec: bytes, limit: int) -> List[Dict[str, Any]]:
         """Synchronous DB search using the per-thread pooled read connection.
