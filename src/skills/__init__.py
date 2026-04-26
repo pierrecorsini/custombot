@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from src.core.instruction_loader import InstructionLoader
     from src.core.project_context import ProjectContextLoader
     from src.db import Database
-    from src.llm import LLMClient
+    from src.llm_provider import LLMProvider
     from src.project.store import ProjectStore
     from src.routing import RoutingEngine
     from src.vector_memory import VectorMemory
@@ -81,7 +81,7 @@ class SkillRegistry:
         self.__dict__.pop("tool_definitions", None)
         log.debug("Registered skill: %s", skill.name)
 
-    def wire_llm_clients(self, llm: "LLMClient") -> None:
+    def wire_llm_clients(self, llm: "LLMProvider") -> None:
         """Inject the LLM client into all skills that declare a need."""
         wired = 0
         for skill in self._skills.values():

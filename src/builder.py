@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from src.core.instruction_loader import InstructionLoader
     from src.core.project_context import ProjectContextLoader
     from src.db import Database
-    from src.llm import LLMClient, TokenUsage
+    from src.llm_provider import LLMProvider, TokenUsage
     from src.memory import Memory
     from src.message_queue import MessageQueue
     from src.monitoring.performance import SessionMetrics
@@ -68,7 +68,7 @@ class BotComponents:
     project_store: ProjectStore
     token_usage: TokenUsage
     message_queue: MessageQueue
-    llm: LLMClient
+    llm: LLMProvider
     dedup: DeduplicationService
     component_durations: dict[str, float] = field(default_factory=dict)
 
@@ -89,7 +89,7 @@ class BuilderContext:
     db: Database | None = None
     dedup: DeduplicationService | None = None
     token_usage: TokenUsage | None = None
-    llm: LLMClient | None = None
+    llm: LLMProvider | None = None
     memory: Memory | None = None
     vector_memory: VectorMemory | None = None
     project_store: ProjectStore | None = None
@@ -183,7 +183,8 @@ async def _step_database(ctx: BuilderContext) -> str | None:
 
 async def _step_llm_client(ctx: BuilderContext) -> str | None:
     """Create the LLM client and token-usage tracker."""
-    from src.llm import LLMClient, TokenUsage
+    from src.llm import LLMClient
+    from src.llm_provider import TokenUsage
 
     token_usage = TokenUsage()
     llm = LLMClient(ctx.config.llm, log_llm=ctx.config.log_llm, token_usage=token_usage)
@@ -210,7 +211,7 @@ async def _step_vector_memory(ctx: BuilderContext) -> str | None:
     try:
         vm = VectorMemory(
             db_path=str(ctx.workspace / ".data" / "vector_memory.db"),
-            openai_client=ctx.llm._client,  # type: ignore[union-attr]
+            openai_client=ctx.llm.openai_client,  # type: ignore[union-attr]
             embedding_model=ctx.config.llm.embedding_model,
             embedding_dimensions=ctx.config.llm.embedding_dimensions,
         )

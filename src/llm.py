@@ -10,8 +10,6 @@ Just set base_url + api_key in config.json.
 from __future__ import annotations
 
 import logging
-import threading
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import httpx
@@ -33,9 +31,9 @@ from src.constants import (
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.exceptions import ErrorCode, LLMError
 from src.llm_error_classifier import classify_llm_error
+from src.llm_provider import TokenUsage
 from src.logging import get_correlation_id
 from src.security.url_sanitizer import sanitize_url_for_logging
-from src.utils import BoundedOrderedDict
 from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.retry import retry_with_backoff
 from src.utils.type_guards import is_llm_config
@@ -49,71 +47,9 @@ log = logging.getLogger(__name__)
 _classify_llm_error = classify_llm_error
 
 
-@dataclass(slots=True)
-class TokenUsage:
-    """Token usage statistics for LLM API calls."""
-
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    request_count: int = 0
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    # Per-chat token tracking — BoundedOrderedDict with half-eviction policy.
-    _per_chat: BoundedOrderedDict[str, dict[str, int]] = field(
-        default_factory=lambda: BoundedOrderedDict(max_size=1000, eviction="half"),
-        repr=False,
-    )
-
-    def to_dict(self) -> Dict[str, int]:
-        """Convert to dictionary for serialization."""
-        return {
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_tokens": self.total_tokens,
-            "request_count": self.request_count,
-        }
-
-    def add(self, prompt: int, completion: int) -> None:
-        """Add token usage from a single request (thread-safe)."""
-        with self._lock:
-            self.prompt_tokens += prompt
-            self.completion_tokens += completion
-            self.total_tokens += prompt + completion
-            self.request_count += 1
-
-    def add_for_chat(self, chat_id: str, prompt: int, completion: int) -> None:
-        """Add per-chat token usage (thread-safe, bounded LRU with half-eviction)."""
-        with self._lock:
-            self.prompt_tokens += prompt
-            self.completion_tokens += completion
-            self.total_tokens += prompt + completion
-            self.request_count += 1
-            if chat_id in self._per_chat:
-                entry = self._per_chat[chat_id]
-                entry["prompt"] += prompt
-                entry["completion"] += completion
-                entry["total"] += prompt + completion
-                # Move to end for LRU ordering
-                self._per_chat[chat_id] = entry
-            else:
-                self._per_chat[chat_id] = {
-                    "prompt": prompt,
-                    "completion": completion,
-                    "total": prompt + completion,
-                }
-
-    def get_top_chats(self, n: int = 10) -> list[dict[str, Any]]:
-        """Return top-N chats by total token usage, descending."""
-        with self._lock:
-            sorted_chats = sorted(
-                self._per_chat.items(),
-                key=lambda item: item[1]["total"],
-                reverse=True,
-            )
-            return [
-                {"chat_id": cid, **stats}
-                for cid, stats in sorted_chats[:n]
-            ]
+# Re-export TokenUsage from its canonical location for backward compatibility.
+# Consumers that imported ``from src.llm import TokenUsage`` will continue to work.
+__all__ = ["LLMClient", "TokenUsage"]
 
 
 class LLMClient:
@@ -571,6 +507,15 @@ class LLMClient:
     def circuit_breaker(self) -> CircuitBreaker:
         """Expose the circuit breaker for health checks and diagnostics."""
         return self._circuit_breaker
+
+    @property
+    def openai_client(self) -> AsyncOpenAI:
+        """Underlying OpenAI client for embeddings / models.list().
+
+        Used by VectorMemory to obtain an embeddings client without
+        coupling to LLMClient internals via ``_client``.
+        """
+        return self._client
 
     async def close(self) -> None:
         """Close the underlying httpx connection pool for clean shutdown."""

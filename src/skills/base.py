@@ -28,7 +28,7 @@ from src.constants import DEFAULT_SKILL_TIMEOUT
 from src.exceptions import SkillError
 
 if TYPE_CHECKING:
-    from src.llm import LLMClient
+    from src.llm_provider import LLMProvider
     from src.utils.protocols import Skill
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -226,7 +226,7 @@ class BaseSkill(ABC):
         """Return True if this skill requires an LLM client to execute."""
         return False
 
-    def wire_llm(self, llm: "LLMClient") -> None:
+    def wire_llm(self, llm: "LLMProvider") -> None:
         """Inject the shared LLM client. Override alongside needs_llm()."""
         pass
 

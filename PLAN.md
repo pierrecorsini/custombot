@@ -4,7 +4,7 @@
 
 - [x] Extract `Bot.__init__` into a factory/builder pattern — `Bot.__init__` accepts 12+ constructor parameters; wrap construction in `BotBuilder` to enforce required deps and eliminate `# type: ignore[arg-type]` suppression across `builder.py`
 - [x] Replace bare `except Exception: pass` patterns with structured error handling — audit all 15+ instances of silent exception swallowing (especially in `bot.py` event emission, `memory.py` `_track_cache_event`, `vector_memory.py`) and replace with explicit error codes or re-raise where appropriate
-- [ ] Introduce a `Protocol`-based `LLMProvider` interface — `LLMClient` is tightly coupled to the OpenAI SDK's `AsyncOpenAI`; abstracting behind a protocol would allow testing without mocking `openai` internals and make it easier to support non-OpenAI-compatible providers natively
+- [x] Introduce a `Protocol`-based `LLMProvider` interface — `LLMClient` is tightly coupled to the OpenAI SDK's `AsyncOpenAI`; abstracting behind a protocol would allow testing without mocking `openai` internals and make it easier to support non-OpenAI-compatible providers natively
 - [ ] Consolidate the three separate lock strategies (`threading.Lock` in `rate_limiter.py`/`vector_memory.py`, `asyncio.Lock` in `db.py`/`message_queue.py`, `asyncio.Lock` lazy-init in `event_bus.py`/`shutdown.py`) into a documented locking policy module with helper mixins to prevent future misuse
 - [ ] Split `bot.py` (1256+ lines) into focused modules — extract `ReActLoop`, `PreflightChecker`, and `CrashRecovery` into `src/bot/` subpackage to improve navigability and reduce merge conflicts
 

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from src.channels.base import BaseChannel
     from src.db import Database
     from src.health import HealthServer
-    from src.llm import LLMClient
+    from src.llm_provider import LLMProvider
     from src.message_queue import MessageQueue
     from src.project.store import ProjectStore
     from src.scheduler import TaskScheduler
@@ -234,7 +234,7 @@ async def perform_shutdown(
     vector_memory: Optional["VectorMemory"],
     project_store: "ProjectStore",
     message_queue: "MessageQueue",
-    llm: "LLMClient",
+    llm: "LLMProvider",
     session_metrics: dict,
     log: logging.Logger,
     verbose: bool = False,

@@ -39,6 +39,7 @@ from src.channels.base import IncomingMessage, SendMediaCallback
 
 if TYPE_CHECKING:
     from src.channels.base import BaseChannel
+    from src.llm_provider import LLMProvider
 from src.constants import (
     DEFAULT_CHAT_RATE_LIMIT,
     MAX_LRU_CACHE_SIZE,
@@ -70,7 +71,6 @@ from src.core.tool_formatter import (
 )
 from src.db import Database
 from src.exceptions import ErrorCode, LLMError
-from src.llm import LLMClient
 from src.logging import clear_correlation_id, get_correlation_id, set_correlation_id
 from src.message_queue import MessageQueue
 from src.monitoring import PerformanceMetrics, SessionMetrics, get_metrics_collector
@@ -166,7 +166,7 @@ class Bot:
         self,
         config: BotConfig,
         db: Database,
-        llm: LLMClient,
+        llm: LLMProvider,
         memory: MemoryProtocol,
         skills: SkillRegistry,
         routing: RoutingEngine | None = None,
