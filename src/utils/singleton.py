@@ -22,8 +22,9 @@ Usage:
 from __future__ import annotations
 
 import functools
-import threading
 from typing import Any, Callable, Optional, TypeVar, cast
+
+from src.utils.locking import ThreadLock
 
 T = TypeVar("T")
 
@@ -32,7 +33,7 @@ T = TypeVar("T")
 # ─────────────────────────────────────────────────────────────────────────────
 
 _singleton_registry: dict[type, Any] = {}
-_registry_lock = threading.Lock()
+_registry_lock = ThreadLock()
 
 
 def get_or_create_singleton(
@@ -79,7 +80,7 @@ def singleton(cls: type[T]) -> type[T]:
     Wraps a class so that only one instance is ever created,
     regardless of how many times the class is instantiated.
 
-    Thread safety is ensured via threading.Lock.
+    Thread safety is ensured via ThreadLock (see src.utils.locking policy).
 
     Args:
         cls: The class to make a singleton
@@ -99,7 +100,7 @@ def singleton(cls: type[T]) -> type[T]:
         assert db1 is db2
     """
     _instance: Optional[T] = None
-    _lock = threading.Lock()
+    _lock = ThreadLock()
 
     @functools.wraps(cls)
     def wrapper(*args: Any, **kwargs: Any) -> T:
@@ -119,7 +120,7 @@ class SingletonMeta(type):
     Metaclass for thread-safe singleton classes.
 
     Classes using this metaclass will only ever have one instance.
-    Thread safety is ensured via threading.Lock.
+    Thread safety is ensured via ThreadLock (see src.utils.locking policy).
 
     Example:
         class MyService(metaclass=SingletonMeta):
@@ -133,7 +134,7 @@ class SingletonMeta(type):
     """
 
     _instances: dict[type, Any] = {}
-    _lock = threading.Lock()
+    _lock = ThreadLock()
 
     def __call__(cls, *args: Any, **kwargs: Any) -> Any:
         if cls not in cls._instances:
@@ -173,7 +174,7 @@ def create_singleton_getter(
         limiter = get_rate_limiter()
     """
     _instance: Optional[T] = None
-    _lock = threading.Lock()
+    _lock = ThreadLock()
 
     def get_instance(*args: Any, **kwargs: Any) -> T:
         nonlocal _instance

@@ -23,10 +23,11 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import enum
 import logging
 import time
+
+from src.utils.locking import AsyncLock
 
 log = logging.getLogger(__name__)
 
@@ -47,8 +48,8 @@ class CircuitBreaker:
     transitions to HALF_OPEN and allows a single probe call.  A successful
     probe closes the breaker; a failed probe re-opens it.
 
-    Thread-safety: uses ``asyncio.Lock`` — safe for single-event-loop use
-    (matches the rest of the CustomBot runtime model).
+    Thread-safety: uses ``AsyncLock`` (see src.utils.locking) — safe for
+    single-event-loop use and lazy-initialised for pre-loop construction.
     """
 
     def __init__(
@@ -61,7 +62,7 @@ class CircuitBreaker:
         self._state: CircuitState = CircuitState.CLOSED
         self._failure_count: int = 0
         self._last_failure_time: float = 0.0
-        self._lock = asyncio.Lock()
+        self._lock = AsyncLock()
 
     @property
     def state(self) -> CircuitState:

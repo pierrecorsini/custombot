@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-import threading
 from pathlib import Path
 from typing import Optional
+
+from src.utils.locking import ThreadLock
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ class SqliteHelper:
         class MyStore(SqliteHelper):
             def __init__(self, db_path: str):
                 self._db_path = Path(db_path)
-                self._lock = threading.Lock()
+                self._lock = ThreadLock()
                 super().__init__()
 
             def connect(self):
@@ -87,7 +88,7 @@ class SqliteHelper:
 
     _db: Optional[sqlite3.Connection] = None
     _db_path: Path
-    _lock: threading.Lock
+    _lock: ThreadLock
 
     def _open_connection(
         self,

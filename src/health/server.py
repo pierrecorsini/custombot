@@ -21,7 +21,7 @@ import logging
 import os
 import re
 import time
-from threading import Lock
+from src.utils.locking import ThreadLock
 from typing import TYPE_CHECKING, Any, Optional
 
 from src.core.errors import NonCriticalCategory, log_noncritical
@@ -83,7 +83,7 @@ class _IPLimiter:
         self._trackers: BoundedOrderedDict[str, SlidingWindowTracker] = (
             BoundedOrderedDict(max_size=max_ips, eviction="half")
         )
-        self._lock = Lock()
+        self._lock = ThreadLock()
 
     def _get_tracker(self, ip: str) -> SlidingWindowTracker:
         with self._lock:

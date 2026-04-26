@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.core.errors import NonCriticalCategory, log_noncritical
+from src.utils.locking import AsyncLock
 from src.utils.singleton import get_or_create_singleton, reset_singleton
 
 log = logging.getLogger(__name__)
@@ -129,15 +130,10 @@ class EventBus:
         self._handlers: dict[str, list[EventHandler]] = {}
         self._max_handlers_per_event = max_handlers_per_event
         self._closed = False
-        self._lock: asyncio.Lock | None = None  # lazy-initialized
+        # Lazy-initialised via AsyncLock — see src.utils.locking policy
+        self._lock = AsyncLock()
         self._emission_counts: dict[str, int] = {}
         self._handler_invocation_counts: dict[str, int] = {}
-
-    def _get_lock(self) -> asyncio.Lock:
-        """Lazy-initialize the asyncio lock on first use."""
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        return self._lock
 
     # ── Subscribe / Unsubscribe ──────────────────────────────────────────
 

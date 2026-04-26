@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import logging
 import shutil
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
+
+from src.utils.locking import ThreadLock
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ DISK_SPACE_CACHE_TTL: int = 30
 
 # Thread-safe cache: resolved_path → (timestamp, total, used, free)
 _disk_cache: dict[str, tuple[float, int, int, int]] = {}
-_disk_cache_lock = threading.Lock()
+_disk_cache_lock = ThreadLock()
 
 
 @dataclass

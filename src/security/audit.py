@@ -11,11 +11,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from src.utils.locking import ThreadLock
 
 log = logging.getLogger("security.audit")
 
@@ -60,9 +61,9 @@ class SkillAuditLogger:
 
         timestamp, chat_id, skill_name, args_hash, allowed, result_summary
 
-    Thread-safe via ``threading.Lock``.  Rotates when the current file
-    exceeds ``MAX_FILE_SIZE_BYTES``, keeping up to ``MAX_ROTATED_FILES``
-    historical copies.
+    Thread-safe via ``ThreadLock`` (see src.utils.locking).  Rotates when the
+    current file exceeds ``MAX_FILE_SIZE_BYTES``, keeping up to
+    ``MAX_ROTATED_FILES`` historical copies.
     """
 
     MAX_FILE_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB
@@ -72,7 +73,7 @@ class SkillAuditLogger:
         self._dir = Path(log_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "audit.jsonl"
-        self._lock = threading.Lock()
+        self._lock = ThreadLock()
 
     # ── public API ───────────────────────────────────────────────────────
 

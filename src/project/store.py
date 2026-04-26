@@ -16,12 +16,12 @@ import json
 import logging
 import re
 import sqlite3
-import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.db.sqlite_utils import SqliteHelper
+from src.utils.locking import ThreadLock
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class ProjectStore(SqliteHelper):
 
     def __init__(self, db_path: str) -> None:
         self._db_path = Path(db_path)
-        self._lock = threading.Lock()
+        self._lock = ThreadLock()
 
     def connect(self) -> None:
         self._open_connection()

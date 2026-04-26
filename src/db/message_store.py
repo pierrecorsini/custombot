@@ -61,6 +61,7 @@ from src.utils import (
     json_dumps,
     safe_json_parse,
 )
+from src.utils.locking import AsyncLock
 from src.utils.path import sanitize_path_component as _sanitize_chat_id_for_path
 
 log = logging.getLogger(__name__)
@@ -114,18 +115,18 @@ class MessageStore:
         self._last_index_save: float = 0.0
         self._index_save_interval: float = 5.0  # seconds
 
-        # Lazy-initialised index lock
-        self._index_lock: asyncio.Lock | None = None
+        # Lazy-initialised index lock — AsyncLock defers asyncio.Lock creation
+        # until first use, avoiding event-loop binding issues at construction
+        # time (see src.utils.locking policy).
+        self._index_lock = AsyncLock()
 
         # Recovery tracking
         self._last_recovery: Optional[RecoveryResult] = None
 
     # ── index lock ────────────────────────────────────────────────────────────
 
-    def _get_index_lock(self) -> asyncio.Lock:
-        """Return the index lock, creating it on first use."""
-        if self._index_lock is None:
-            self._index_lock = asyncio.Lock()
+    def _get_index_lock(self) -> AsyncLock:
+        """Return the index lock (AsyncLock — lazy-initialised asyncio.Lock)."""
         return self._index_lock
 
     # ── message file path ─────────────────────────────────────────────────────

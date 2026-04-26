@@ -16,6 +16,7 @@ import sys
 import time
 
 from src.constants import DEFAULT_SHUTDOWN_TIMEOUT, SHUTDOWN_LOG_INTERVAL
+from src.utils.locking import AsyncLock
 
 
 class GracefulShutdown:
@@ -39,20 +40,10 @@ class GracefulShutdown:
         self._in_flight_count = 0
         self._in_flight_ops: dict[int, str] = {}
         self._next_op_id = 0
-        self._in_flight_lock: asyncio.Lock | None = None
+        # Lazy-initialised via AsyncLock — see src.utils.locking policy
+        self._in_flight_lock = AsyncLock()
         self._accepting_messages = True
         self._log = logging.getLogger(__name__)
-
-    def _get_lock(self) -> asyncio.Lock:
-        """Lazy-initialised asyncio.Lock for in-flight operation tracking.
-
-        Cannot be created in ``__init__`` because ``asyncio.Lock()``
-        may bind to a stale or wrong event loop on Windows with
-        ``ProactorEventLoop``.  Initialised on first use instead.
-        """
-        if self._in_flight_lock is None:
-            self._in_flight_lock = asyncio.Lock()
-        return self._in_flight_lock
 
     @property
     def is_shutting_down(self) -> bool:
@@ -85,7 +76,7 @@ class GracefulShutdown:
         """
         if self.is_shutting_down:
             return None
-        async with self._get_lock():
+        async with self._in_flight_lock:
             if self.is_shutting_down:
                 return None
             self._in_flight_count += 1
@@ -96,7 +87,7 @@ class GracefulShutdown:
 
     async def exit_operation(self, op_id: int | None = None) -> None:
         """Register completion of an in-flight operation."""
-        async with self._get_lock():
+        async with self._in_flight_lock:
             self._in_flight_count = max(0, self._in_flight_count - 1)
             if op_id is not None:
                 self._in_flight_ops.pop(op_id, None)
@@ -116,7 +107,7 @@ class GracefulShutdown:
         logged_initial = False
 
         while True:
-            async with self._get_lock():
+            async with self._in_flight_lock:
                 count = self._in_flight_count
                 ops_snapshot = dict(self._in_flight_ops)
 

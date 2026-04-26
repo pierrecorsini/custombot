@@ -7,10 +7,11 @@ Implements sliding window rate limiting to prevent abuse and resource exhaustion
   - Configurable via environment variables
   - Clear error messages when rate limited
 
-Lock model: Uses threading.Lock (not asyncio.Lock) because rate checks
+Lock model: Uses ThreadLock (from src.utils.locking) because rate checks
 are called from both sync (skill execution) and async (message pipeline)
-contexts. threading.Lock works in both; asyncio.Lock would require an
-event loop and can't be held across await boundaries in mixed code.
+contexts.  ThreadLock wraps threading.Lock, which works in both; asyncio.Lock
+would require an event loop and can't be held across await boundaries in
+mixed code.  See src.utils.locking for the full locking policy.
 
 Usage:
     from src.rate_limiter import RateLimiter
@@ -27,9 +28,9 @@ import os
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from threading import Lock
 from typing import Dict, FrozenSet, Optional, Tuple
 
+from src.utils.locking import ThreadLock
 from src.utils.singleton import get_or_create_singleton, reset_singleton
 
 log = logging.getLogger(__name__)
@@ -177,7 +178,7 @@ class SlidingWindowTracker:
         self._window_size = window_size_seconds
         self._max_limit = max_limit
         self._timestamps: deque[float] = deque()
-        self._lock = Lock()
+        self._lock = ThreadLock()
 
     def _prune_old_entries(self, now: float) -> None:
         """Remove entries older than the window size (O(1) amortized)."""
@@ -271,7 +272,7 @@ class RateLimiter:
         self._message_rate_limiters: OrderedDict[str, SlidingWindowTracker] = OrderedDict()
 
         # Lock for managing the limiters dictionaries
-        self._limiters_lock = Lock()
+        self._limiters_lock = ThreadLock()
 
     def _get_or_create_chat_limiter(self, chat_id: str) -> SlidingWindowTracker:
         """Get or create a rate limiter for a chat (LRU: move to end on access)."""

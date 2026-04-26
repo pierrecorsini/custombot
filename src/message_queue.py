@@ -14,12 +14,11 @@ Queue states:
     - completed: Message was successfully processed
     - stale: Message timed out (crash recovery candidate)
 
-Lock model: Uses asyncio.Lock for file I/O (same pattern as db.py).
-The lock is lazily initialised on first use (see ``_get_lock()``) to
-avoid binding to an event loop at construction time. All queue operations
-are async and wrapped in await asyncio.to_thread() for the actual disk
-writes. asyncio.Lock ensures coroutine-safe access without blocking the
-event loop.
+Lock model: Uses AsyncLock (from src.utils.locking) for file I/O (same pattern as db.py).
+AsyncLock provides lazy-initialised asyncio.Lock that is safe to create before the
+event loop is running (Python 3.10+ / Windows ProactorEventLoop compatibility).
+All queue operations are async and wrapped in await asyncio.to_thread() for the
+actual disk writes.
 """
 
 from __future__ import annotations
@@ -35,6 +34,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from src.constants import MAX_QUEUED_TEXT_LENGTH
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.utils import JsonParseMode, json_dumps, safe_json_parse
+from src.utils.locking import AsyncLock
 
 if TYPE_CHECKING:
     from src.channels.base import IncomingMessage
@@ -174,23 +174,12 @@ class MessageQueue:
         self._completed_since_compact: int = 0
         self._compact_threshold: int = 20  # compact after this many completions
 
-        # Lock for thread-safe operations (lazy-initialised to avoid binding
-        # to an event loop that may not be running at construction time,
-        # e.g. during test fixture setup on Windows with ProactorEventLoop).
-        self._lock: asyncio.Lock | None = None
+        # Lock for thread-safe operations.  AsyncLock defers asyncio.Lock
+        # creation until first use, avoiding event-loop binding issues at
+        # construction time (see src.utils.locking policy).
+        self._lock = AsyncLock()
 
         self._initialized = False
-
-    def _get_lock(self) -> asyncio.Lock:
-        """Return the asyncio lock, creating it on first use.
-
-        Mirrors the pattern in ``channels.base._get_safe_mode_lock()``.
-        ``asyncio.Lock()`` must be created inside a running event loop on
-        Python 3.10+, so we defer creation until the first actual use.
-        """
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        return self._lock
 
     async def connect(self) -> None:
         """
@@ -224,7 +213,7 @@ class MessageQueue:
             - Persists pending messages to disk
             - Sets _initialized flag to False
         """
-        async with self._get_lock():
+        async with self._lock:
             await self._persist_pending()
 
         self._initialized = False
@@ -278,7 +267,7 @@ class MessageQueue:
                 len(queued.text),
             )
 
-        async with self._get_lock():
+        async with self._lock:
             self._pending[queued.message_id] = queued
             await self._append_to_queue(queued)
 
@@ -308,7 +297,7 @@ class MessageQueue:
             - Appends completion marker to queue file
             - Periodically compacts the queue file (full rewrite)
         """
-        async with self._get_lock():
+        async with self._lock:
             if message_id not in self._pending:
                 log.warning(
                     "Attempted to complete unknown message %s",
@@ -353,7 +342,7 @@ class MessageQueue:
         cutoff_time = time.time() - timeout
         stale_messages: List[QueuedMessage] = []
 
-        async with self._get_lock():
+        async with self._lock:
             for msg_id, msg in list(self._pending.items()):
                 if msg.updated_at < cutoff_time:
                     stale_messages.append(msg)
@@ -389,7 +378,7 @@ class MessageQueue:
         Returns:
             Count of pending messages.
         """
-        async with self._get_lock():
+        async with self._lock:
             return len(self._pending)
 
     async def get_pending_for_chat(self, chat_id: str) -> List[QueuedMessage]:
@@ -402,7 +391,7 @@ class MessageQueue:
         Returns:
             List of pending messages for the chat.
         """
-        async with self._get_lock():
+        async with self._lock:
             return [msg for msg in self._pending.values() if msg.chat_id == chat_id]
 
     # ── persistence helpers ───────────────────────────────────────────────────

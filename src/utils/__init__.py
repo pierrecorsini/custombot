@@ -79,7 +79,7 @@ class LRULockCache:
         _cache: OrderedDict storing key -> asyncio.Lock mappings
         _ref_counts: Dict tracking how many references are outstanding per key
         _max_size: Maximum number of locks to retain
-        _lock: Async lock for thread-safe cache operations
+        _lock: AsyncLock for thread-safe cache operations (see src.utils.locking)
     """
 
     __slots__ = ("_cache", "_max_size", "_lock", "_ref_counts")
@@ -93,15 +93,12 @@ class LRULockCache:
         """
         self._cache: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._max_size = max_size
-        # Lazy-initialised: asyncio.Lock() requires a running event loop (Python 3.10+).
-        self._lock: asyncio.Lock | None = None
-        self._ref_counts: dict[str, int] = {}
+        # AsyncLock defers asyncio.Lock creation until first use — see
+        # src.utils.locking policy.
+        from src.utils.locking import AsyncLock
 
-    def _get_lock(self) -> asyncio.Lock:
-        """Return the internal lock, creating it on first use."""
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        return self._lock
+        self._lock = AsyncLock()
+        self._ref_counts: dict[str, int] = {}
 
     async def get_or_create(self, key: str) -> asyncio.Lock:
         """
@@ -121,7 +118,7 @@ class LRULockCache:
         Returns:
             The asyncio.Lock for the given key.
         """
-        async with self._get_lock():
+        async with self._lock:
             if key in self._cache:
                 self._cache.move_to_end(key)
                 self._ref_counts[key] = self._ref_counts.get(key, 0) + 1

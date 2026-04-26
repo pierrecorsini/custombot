@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from src.config import Config
     from src.utils.protocols import Channel
 
+from src.utils.locking import AsyncLock
+
 log = logging.getLogger(__name__)
 
 
@@ -259,7 +261,10 @@ MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
 SendMediaCallback = Callable[[str, Path, str], Awaitable[None]]
 
 
-_safe_mode_lock: asyncio.Lock | None = None
+# Module-level lock for safe-mode serialisation.  AsyncLock defers the
+# actual asyncio.Lock creation until first acquire(), so it is safe to
+# create at import time — see src.utils.locking policy.
+_safe_mode_lock = AsyncLock()
 
 
 def _redact_chat_id(chat_id: str) -> str:
@@ -279,18 +284,6 @@ def _redact_chat_id(chat_id: str) -> str:
     return chat_id[:4] + "..." + chat_id[-4:]
 
 
-def _get_safe_mode_lock() -> asyncio.Lock:
-    """Lazy-initialised asyncio.Lock for safe-mode serialisation.
-
-    Cannot be created at module level because asyncio.Lock() requires
-    a running event loop on Python 3.10+.
-    """
-    global _safe_mode_lock
-    if _safe_mode_lock is None:
-        _safe_mode_lock = asyncio.Lock()
-    return _safe_mode_lock
-
-
 class BaseChannel(ABC):
     """
     Abstract async channel with optional safe mode.
@@ -299,9 +292,9 @@ class BaseChannel(ABC):
     the user for Y/N confirmation before sending. Channels only need
     to implement _send_message(); send_message() is handled here.
 
-    A module-level asyncio.Lock serialises all safe-mode prompts so
-    that parallel message processing never interleaves preview output
-    or Y/N prompts on the terminal.
+    A module-level AsyncLock (from src.utils.locking) serialises all
+    safe-mode prompts so that parallel message processing never
+    interleaves preview output or Y/N prompts on the terminal.
     """
 
     def __init__(self, safe_mode: bool = False, load_history: bool = False) -> None:
@@ -387,7 +380,7 @@ class BaseChannel(ABC):
         if self._safe_mode:
             preview = text[:120] + "..." if len(text) > 120 else text
             display_id = _redact_chat_id(chat_id)
-            async with _get_safe_mode_lock():
+            async with _safe_mode_lock:
                 print(f"\n📤 Outgoing to {display_id}:")
                 print(f"   {preview}")
                 if not await _confirm_send(chat_id, display_id):

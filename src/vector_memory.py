@@ -32,6 +32,7 @@ from src.db.sqlite_utils import SqliteHelper
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.exceptions import DiskSpaceError
 from src.utils import BoundedOrderedDict, DEFAULT_MIN_DISK_SPACE, check_disk_space
+from src.utils.locking import ThreadLock
 from src.utils.retry import retry_with_backoff
 
 # TTL for the embedding API health cache.  When the embeddings endpoint is
@@ -88,8 +89,8 @@ class VectorMemory(SqliteHelper):
         embedding_dimensions: int = 1536,
     ) -> None:
         self._db_path = Path(db_path)
-        self._write_lock = threading.Lock()
-        self._cache_lock = threading.Lock()
+        self._write_lock = ThreadLock()
+        self._cache_lock = ThreadLock()
         # Alias for SqliteHelper mixin methods (_execute, _commit, etc.)
         self._lock = self._write_lock
         self._client = openai_client
@@ -105,7 +106,7 @@ class VectorMemory(SqliteHelper):
         # ~5ms sqlite-vec extension loading overhead on every read.
         self._thread_local = threading.local()
         self._read_connections: list[sqlite3.Connection] = []
-        self._read_pool_lock = threading.Lock()
+        self._read_pool_lock = ThreadLock()
         # Embedding API health cache — avoids repeated full-timeout waits when
         # the endpoint is down.  Protected by _cache_lock (already used for
         # the embed LRU cache, so no additional lock needed).

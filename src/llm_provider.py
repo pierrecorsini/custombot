@@ -19,9 +19,10 @@ Usage::
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Protocol, runtime_checkable
+
+from src.utils.locking import ThreadLock
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
@@ -47,7 +48,7 @@ class TokenUsage:
     completion_tokens: int = 0
     total_tokens: int = 0
     request_count: int = 0
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _lock: ThreadLock = field(default_factory=ThreadLock, repr=False)
     # Per-chat token tracking — bounded LRU with half-eviction policy.
     _per_chat: dict[str, dict[str, int]] = field(
         default_factory=lambda: _make_per_chat_map(),

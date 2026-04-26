@@ -9,11 +9,11 @@ Storage structure:
             ├── <chat_id_1>.jsonl   # Messages (JSONL = one JSON per line)
             └── <chat_id_2>.jsonl
 
-Lock model: Uses asyncio.Lock for all file I/O because all operations run
-inside async contexts (async with lock / await asyncio.to_thread(...)).
-This ensures only one coroutine accesses a chat's file at a time without
-blocking the event loop. Never use threading.Lock here — it would block
-the event loop while waiting for the lock.
+Lock model: Uses AsyncLock (from src.utils.locking) for all file I/O because
+all operations run inside async contexts (async with lock / await
+asyncio.to_thread(...)).  This ensures only one coroutine accesses a chat's
+file at a time without blocking the event loop.  See src.utils.locking for
+the full locking policy.
 
 Metrics: All write and read operations (save_message, get_recent_messages,
 _save_chats) are instrumented with latency tracking via PerformanceMetrics.
@@ -48,6 +48,7 @@ from src.constants import (
     MAX_LRU_CACHE_SIZE,
 )
 from src.utils.circuit_breaker import CircuitBreaker
+from src.utils.locking import AsyncLock
 from src.db.compression import CompressionService
 from src.db.db_index import RecoveryResult
 from src.db.db_integrity import (
@@ -155,9 +156,9 @@ class Database:
         self._last_chats_save: float = 0.0
         self._chats_save_interval: float = 5.0  # seconds
 
-        # Locks for thread safety (lazy-initialised to avoid requiring
-        # a running event loop at construction time).
-        self._chats_lock: asyncio.Lock | None = None
+        # Locks for thread safety.  AsyncLock defers asyncio.Lock creation
+        # until first use — see src.utils.locking policy.
+        self._chats_lock = AsyncLock()
         self._message_locks = LRULockCache(max_size=MAX_LRU_CACHE_SIZE)
 
         # Bounded pool of open file handles for message JSONL appends.
@@ -218,12 +219,6 @@ class Database:
         )
 
     # ── lock accessors ────────────────────────────────────────────────────
-
-    def _get_chats_lock(self) -> asyncio.Lock:
-        """Return the chats lock, creating it on first use."""
-        if self._chats_lock is None:
-            self._chats_lock = asyncio.Lock()
-        return self._chats_lock
 
     async def _get_message_lock(self, chat_id: str) -> asyncio.Lock:
         """Get or create a lock for a specific chat's messages."""
@@ -623,7 +618,7 @@ class Database:
         now = time.time()
 
         async def _upsert():
-            async with self._get_chats_lock():
+            async with self._chats_lock:
                 if chat_id in self._chats:
                     self._chats[chat_id]["last_active"] = now
                     if name:
@@ -650,7 +645,7 @@ class Database:
 
     async def flush_chats(self) -> None:
         """Force-flush dirty chat metadata to disk."""
-        async with self._get_chats_lock():
+        async with self._chats_lock:
             if self._chats_dirty:
                 await self._save_chats()
                 self._last_chats_save = time.time()
@@ -658,7 +653,7 @@ class Database:
 
     async def list_chats(self) -> List[dict]:
         """List all chats sorted by last_active (most recent first)."""
-        async with self._get_chats_lock():
+        async with self._chats_lock:
             chats = [
                 {
                     "chat_id": chat_id,

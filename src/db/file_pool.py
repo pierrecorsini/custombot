@@ -4,17 +4,17 @@ src/db/file_pool.py — Bounded LRU pool of append-mode file handles.
 Prevents OS file-descriptor exhaustion under extreme concurrency by reusing
 open file handles across writes instead of open/close per operation.
 
-Thread-safe via ``threading.Lock`` because file I/O runs inside
-``asyncio.to_thread()`` workers (no event loop available in those threads).
+Thread-safe via ``ThreadLock`` (see src.utils.locking) because file I/O runs
+inside ``asyncio.to_thread()`` workers (no event loop available in those threads).
 """
 
 from __future__ import annotations
 
 import logging
-import threading
 from collections import OrderedDict
 
 from src.core.errors import NonCriticalCategory, log_noncritical
+from src.utils.locking import ThreadLock
 from pathlib import Path
 from typing import IO
 
@@ -36,7 +36,7 @@ class FileHandlePool:
     def __init__(self, max_size: int = MAX_FILE_HANDLES) -> None:
         self._max_size = max_size
         self._handles: OrderedDict[str, IO[str]] = OrderedDict()
-        self._lock = threading.Lock()
+        self._lock = ThreadLock()
 
     def get_or_open(self, path: Path) -> IO[str]:
         """Return an open append-mode handle for *path*, creating one if needed.
