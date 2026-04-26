@@ -4,6 +4,10 @@ src/db/sqlite_utils.py — Shared SQLite connection utilities.
 Provides consistent connection setup (PRAGMAs, thread safety)
 for all SQLite-backed modules (ProjectStore, VectorMemory, etc.).
 
+Includes retry-with-backoff and circuit-breaker protection for
+transient ``sqlite3.OperationalError`` (database is locked / busy)
+in :class:`SqliteHelper` write methods.
+
 Usage:
     from src.db.sqlite_utils import get_sqlite_connection
 
@@ -13,11 +17,20 @@ Usage:
 
 from __future__ import annotations
 
+import enum
 import logging
+import random
 import sqlite3
+import time
 from pathlib import Path
 from typing import Optional
 
+from src.constants import (
+    SQLITE_WRITE_CIRCUIT_COOLDOWN_SECONDS,
+    SQLITE_WRITE_CIRCUIT_FAILURE_THRESHOLD,
+    SQLITE_WRITE_MAX_RETRIES,
+    SQLITE_WRITE_RETRY_INITIAL_DELAY,
+)
 from src.utils.locking import ThreadLock
 
 log = logging.getLogger(__name__)
@@ -66,12 +79,136 @@ def get_sqlite_connection(
     return conn
 
 
+# ── Sync Circuit Breaker ───────────────────────────────────────────────
+
+
+class _SyncCircuitState(str, enum.Enum):
+    """Circuit breaker states (synchronous variant)."""
+
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+class _SyncCircuitBreaker:
+    """Thread-safe synchronous circuit breaker for SQLite operations.
+
+    After *failure_threshold* consecutive failures the breaker opens and
+    rejects all calls for *cooldown_seconds*.  After the cooldown it
+    transitions to HALF_OPEN and allows a single probe call.  A successful
+    probe closes the breaker; a failed probe re-opens it.
+
+    Uses ``threading.Lock`` (via ``ThreadLock``) for thread safety — safe
+    for use in synchronous ``SqliteHelper`` methods.
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = SQLITE_WRITE_CIRCUIT_FAILURE_THRESHOLD,
+        cooldown_seconds: float = SQLITE_WRITE_CIRCUIT_COOLDOWN_SECONDS,
+    ) -> None:
+        self._failure_threshold = failure_threshold
+        self._cooldown_seconds = cooldown_seconds
+        self._state: _SyncCircuitState = _SyncCircuitState.CLOSED
+        self._failure_count: int = 0
+        self._last_failure_time: float = 0.0
+        self._lock = ThreadLock()
+
+    @property
+    def state(self) -> _SyncCircuitState:
+        """Current breaker state (for diagnostics / health endpoints)."""
+        return self._state
+
+    @property
+    def failure_count(self) -> int:
+        """Current consecutive failure count."""
+        return self._failure_count
+
+    def is_open(self) -> bool:
+        """Return ``True`` when the breaker is OPEN and should reject calls.
+
+        Side-effect: transitions from OPEN → HALF_OPEN once the cooldown
+        elapses, so the *next* call is allowed as a probe.
+        """
+        with self._lock:
+            if self._state == _SyncCircuitState.CLOSED:
+                return False
+            if self._state == _SyncCircuitState.HALF_OPEN:
+                return False
+            # OPEN — check cooldown
+            elapsed = time.monotonic() - self._last_failure_time
+            if elapsed >= self._cooldown_seconds:
+                self._state = _SyncCircuitState.HALF_OPEN
+                log.info(
+                    "SQLite circuit breaker transitioned to HALF_OPEN after %.1fs cooldown",
+                    elapsed,
+                )
+                return False
+            return True
+
+    def record_success(self) -> None:
+        """Record a successful call.  Closes the breaker from HALF_OPEN."""
+        with self._lock:
+            if self._state == _SyncCircuitState.HALF_OPEN:
+                self._state = _SyncCircuitState.CLOSED
+                self._failure_count = 0
+                log.info("SQLite circuit breaker CLOSED — probe succeeded")
+            elif self._state == _SyncCircuitState.CLOSED:
+                self._failure_count = 0
+
+    def record_failure(self) -> None:
+        """Record a failed call.  Opens the breaker when threshold is hit."""
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.monotonic()
+
+            if self._state == _SyncCircuitState.HALF_OPEN:
+                self._state = _SyncCircuitState.OPEN
+                log.warning("SQLite circuit breaker re-OPENED — probe failed")
+            elif self._failure_count >= self._failure_threshold:
+                self._state = _SyncCircuitState.OPEN
+                log.warning(
+                    "SQLite circuit breaker OPENED — %d consecutive failures (cooldown=%.0fs)",
+                    self._failure_count,
+                    self._cooldown_seconds,
+                )
+
+
+# ── SQLite Transient Error Detection ───────────────────────────────────
+
+# Substrings in sqlite3.OperationalError messages that indicate transient
+# lock contention (retriable) rather than schema/logic errors (permanent).
+_SQLITE_TRANSIENT_PATTERNS = (
+    "database is locked",
+    "database is busy",
+    "database table is locked",
+)
+
+
+def _is_sqlite_transient(error: sqlite3.OperationalError) -> bool:
+    """Return True if the OperationalError is a transient lock-contention failure."""
+    msg = str(error).lower()
+    return any(pattern in msg for pattern in _SQLITE_TRANSIENT_PATTERNS)
+
+
+def _sqlite_delay_with_jitter(base_delay: float) -> float:
+    """Apply ±10% jitter to *base_delay* to prevent thundering herd."""
+    jitter = base_delay * 0.1 * random.uniform(-1, 1)
+    return max(0.0, base_delay + jitter)
+
+
+# ── SqliteHelper ───────────────────────────────────────────────────────
+
+
 class SqliteHelper:
     """
     Mixin for thread-safe SQLite access with standard lifecycle.
 
-    Provides connect(), close(), and thread-safe execute/commit helpers.
-    Subclasses must set self._db_path before calling connect().
+    Provides connect(), close(), and thread-safe execute/commit helpers
+    with automatic retry-with-backoff and circuit-breaker protection for
+    transient ``sqlite3.OperationalError`` (database is locked / busy).
+
+    Subclasses must set ``self._db_path`` before calling ``connect()``.
 
     Usage:
         class MyStore(SqliteHelper):
@@ -89,6 +226,11 @@ class SqliteHelper:
     _db: Optional[sqlite3.Connection] = None
     _db_path: Path
     _lock: ThreadLock
+    _sqlite_breaker: _SyncCircuitBreaker
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self._sqlite_breaker = _SyncCircuitBreaker()
+        super().__init__(*args, **kwargs)
 
     def _open_connection(
         self,
@@ -128,21 +270,85 @@ class SqliteHelper:
             self._db = None
 
     def _execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
-        """Thread-safe DB execute — acquires lock for all DB operations."""
+        """Thread-safe DB execute with retry on transient lock errors."""
         assert self._db is not None
-        with self._lock:
-            return self._db.execute(sql, params)
+        return self._guarded_sqlite(lambda: self._db.execute(sql, params))  # type: ignore[union-attr]
 
     def _commit(self) -> None:
-        """Thread-safe commit."""
+        """Thread-safe commit with retry on transient lock errors."""
         assert self._db is not None
-        with self._lock:
-            self._db.commit()
+        self._guarded_sqlite(lambda: self._db.commit())  # type: ignore[union-attr]
 
     def _execute_and_commit(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
-        """Thread-safe execute + commit in one lock acquisition."""
+        """Thread-safe execute + commit with retry on transient lock errors."""
         assert self._db is not None
-        with self._lock:
-            cur = self._db.execute(sql, params)
-            self._db.commit()
+
+        def _op() -> sqlite3.Cursor:
+            cur = self._db.execute(sql, params)  # type: ignore[union-attr]
+            self._db.commit()  # type: ignore[union-attr]
             return cur
+
+        return self._guarded_sqlite(_op)
+
+    def _guarded_sqlite(self, operation: object) -> object:
+        """Execute a SQLite operation with retry + circuit-breaker protection.
+
+        Retries transient ``sqlite3.OperationalError`` (database is locked /
+        busy) with exponential backoff + jitter.  Only after all retries are
+        exhausted is a failure recorded on the circuit breaker.
+
+        Args:
+            operation: Zero-arg callable performing the SQLite operation.
+
+        Returns:
+            The return value of *operation*.
+
+        Raises:
+            sqlite3.OperationalError: If all retries are exhausted or the
+                error is non-transient (e.g., schema error).
+        """
+        if self._sqlite_breaker.is_open():
+            raise sqlite3.OperationalError(
+                "SQLite write circuit breaker open — operation rejected"
+            )
+
+        delay = SQLITE_WRITE_RETRY_INITIAL_DELAY
+
+        for attempt in range(SQLITE_WRITE_MAX_RETRIES + 1):
+            try:
+                with self._lock:
+                    result = operation()
+                self._sqlite_breaker.record_success()
+                return result
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_transient(exc):
+                    # Schema/logic error — never retry
+                    raise
+
+                if attempt >= SQLITE_WRITE_MAX_RETRIES:
+                    log.warning(
+                        "SQLite retry exhausted after %d attempts: %s",
+                        SQLITE_WRITE_MAX_RETRIES + 1,
+                        exc,
+                    )
+                    self._sqlite_breaker.record_failure()
+                    raise
+
+                actual_delay = _sqlite_delay_with_jitter(delay)
+                log.info(
+                    "Transient SQLite error, retrying attempt %d/%d after %.3fs: %s",
+                    attempt + 1,
+                    SQLITE_WRITE_MAX_RETRIES,
+                    actual_delay,
+                    exc,
+                )
+                time.sleep(actual_delay)
+                delay *= 2
+
+
+__all__ = [
+    "SqliteHelper",
+    "get_sqlite_connection",
+    "_SyncCircuitBreaker",
+    "_SyncCircuitState",
+]

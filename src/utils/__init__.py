@@ -40,9 +40,12 @@ from src.utils.json_utils import (
     JSONDecodeError,
     JsonParseMode,
     JsonParseResult,
+    _HAS_MSGPACK,
     _HAS_ORJSON,
     json_dumps,
     json_loads,
+    msgpack_dumps,
+    msgpack_loads,
     safe_json_parse,
 )
 from src.utils.logging_utils import log_execution
@@ -266,6 +269,9 @@ __all__ = [
     "json_loads",
     "JSONDecodeError",
     "_HAS_ORJSON",
+    "_HAS_MSGPACK",
+    "msgpack_dumps",
+    "msgpack_loads",
     "JsonParseMode",
     "safe_json_parse",
     "JsonParseResult",

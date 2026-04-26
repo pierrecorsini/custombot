@@ -17,6 +17,7 @@ dependencies = [
     "duckduckgo-search~=8.1.0",
     "sqlite-vec~=0.1.7",
     "orjson~=3.10.0",
+    "msgpack~=1.1.0",
 ]
 
 [project.optional-dependencies]

@@ -1,10 +1,35 @@
 """
-json_utils.py — Fast JSON utilities with orjson acceleration.
+json_utils.py — Fast JSON utilities with orjson acceleration and msgpack backend.
 
 Provides high-performance JSON serialization/deserialization using orjson
 when available, with transparent stdlib json fallback. All hot-path JSON
 operations (database, message queue, index) should use json_dumps/json_loads
 from this module.
+
+Also provides a msgpack binary backend for non-human-readable persistence
+where binary encoding is smaller and faster than JSON.  The msgpack backend
+is opt-in — callers explicitly call ``msgpack_dumps`` / ``msgpack_loads``.
+
+Evaluation: msgpack vs orjson for tool-call result payloads
+-----------------------------------------------------------
+Benchmarked on Python 3.13 / Windows (1000 iterations each).
+
+Direct serialization (dict → bytes):
+  small   (~80B):   orjson 0.3µs vs msgpack 5.2µs  — orjson 17x faster
+  medium  (~1.5KB): orjson 0.8µs vs msgpack 5.6µs  — orjson  7x faster
+  large   (~45KB):  orjson 23µs  vs msgpack 21µs    — msgpack 7% faster
+  text-heavy (~45KB): orjson 40µs vs msgpack 20µs   — msgpack 2x faster
+
+Full pipeline (serialize → load → final JSON — the actual data flow):
+  small:   orjson 0.7µs vs msgpack 6.5µs  — orjson 9x faster
+  medium:  orjson 1.9µs vs msgpack 7.4µs  — orjson 4x faster
+  large:   orjson 44µs  vs msgpack 51µs   — orjson 16% faster
+  text-heavy: orjson 66µs vs msgpack 67µs  — tied
+
+Conclusion: orjson wins decisively in the real pipeline because tool results
+must end up as JSON (for LLM API calls and JSONL persistence), making msgpack's
+double-serialization overhead a net negative.  msgpack is not adopted for this
+path.  See ``tests/unit/bench_serialization.py`` for the full benchmark.
 
 Also provides a unified safe_json_parse() with mode-based error handling:
 - LENIENT: Returns parsed value or default on failure (default mode).
@@ -86,6 +111,39 @@ except ImportError:
 
 # Re-export json.JSONDecodeError so callers can catch it without knowing the backend.
 JSONDecodeError = _stdlib_json.JSONDecodeError
+
+
+# ── Binary backend: msgpack for non-human-readable persistence ────────────
+
+try:
+    import msgpack as _msgpack
+
+    _HAS_MSGPACK = True
+
+    def msgpack_dumps(obj: Any) -> bytes:
+        """Serialize *obj* to msgpack bytes.
+
+        Uses ``use_bin_type=True`` so bytes values round-trip correctly.
+        """
+        return _msgpack.packb(obj, use_bin_type=True)
+
+    def msgpack_loads(data: bytes) -> Any:
+        """Deserialize msgpack *data* back to Python objects.
+
+        Uses ``raw=False`` so strings come back as ``str``, not ``bytes``.
+        """
+        return _msgpack.unpackb(data, raw=False)
+
+except ImportError:
+    _HAS_MSGPACK = False
+
+    def msgpack_dumps(obj: Any) -> bytes:  # type: ignore[misc]
+        """Fallback: serialize to JSON bytes when msgpack is not installed."""
+        return json_dumps(obj).encode("utf-8")
+
+    def msgpack_loads(data: bytes) -> Any:  # type: ignore[misc]
+        """Fallback: deserialize from JSON bytes when msgpack is not installed."""
+        return json_loads(data)
 
 
 # ── Parse mode enum ────────────────────────────────────────────────────
@@ -224,4 +282,7 @@ __all__ = [
     "JsonParseMode",
     "safe_json_parse",
     "JsonParseResult",
+    "msgpack_dumps",
+    "msgpack_loads",
+    "_HAS_MSGPACK",
 ]

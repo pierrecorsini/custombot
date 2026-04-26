@@ -42,10 +42,13 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from src.constants import (
     DB_WRITE_CIRCUIT_COOLDOWN_SECONDS,
     DB_WRITE_CIRCUIT_FAILURE_THRESHOLD,
+    DB_WRITE_MAX_RETRIES,
+    DB_WRITE_RETRY_INITIAL_DELAY,
     DEFAULT_DB_TIMEOUT,
     MAX_CHAT_GENERATIONS,
     MAX_FILE_HANDLES,
     MAX_LRU_CACHE_SIZE,
+    MAX_READ_FILE_HANDLES,
 )
 from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.locking import AsyncLock
@@ -68,7 +71,7 @@ from src.db.db_utils import (
     _track_db_write_latency,
     _validate_chat_id,
 )
-from src.db.file_pool import FileHandlePool
+from src.db.file_pool import FileHandlePool, ReadHandlePool
 from src.db.message_store import MessageStore
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.exceptions import DatabaseError, DiskSpaceError, ErrorCode
@@ -164,6 +167,11 @@ class Database:
         # Bounded pool of open file handles for message JSONL appends.
         self._file_pool = FileHandlePool(max_size=MAX_FILE_HANDLES)
 
+        # Bounded pool of read-mode file handles for hot-path message retrieval.
+        # Reuses open handles across get_recent_messages() calls, eliminating
+        # per-read open/close syscalls on the hot path.
+        self._read_pool = ReadHandlePool(max_size=MAX_READ_FILE_HANDLES)
+
         # Cached path resolution: avoids repeated sanitize + validate + Path
         # construction on every DB operation for the same chat_id.
         self._message_file_cache: LRUDict = LRUDict(max_size=MAX_LRU_CACHE_SIZE)
@@ -193,6 +201,7 @@ class Database:
             messages_dir=self._messages_dir,
             index_file=self._dir / "message_index.json",
             file_pool=self._file_pool,
+            read_pool=self._read_pool,
             message_locks=self._message_locks,
             message_file_cache=self._message_file_cache,
             check_disk_space_fn=self._check_disk_space_before_write,
@@ -250,12 +259,18 @@ class Database:
 
     async def _guarded_write(
         self,
-        coro: Any,
+        write_fn: Any,
         timeout: float,
         operation: str,
     ) -> Any:
-        """Execute a write operation with circuit-breaker protection."""
-        if self._write_breaker.is_open():
+        """Execute a write with retry and circuit-breaker protection.
+
+        *write_fn* is a zero-arg async callable (factory) so the write can
+        be retried on transient ``OSError`` (disk-full, lock-contention)
+        with exponential backoff + jitter.  Only after all retries are
+        exhausted is a failure recorded on the circuit breaker.
+        """
+        if await self._write_breaker.is_open():
             log.warning(
                 "DB write circuit breaker OPEN — %s rejected", operation,
                 extra=_db_log_extra(),
@@ -264,13 +279,44 @@ class Database:
                 f"Database write circuit breaker open — {operation} rejected",
                 operation=operation,
             )
-        try:
-            result = await self._run_with_timeout(coro, timeout, operation)
-            self._write_breaker.record_success()
-            return result
-        except Exception:
-            self._write_breaker.record_failure()
-            raise
+
+        from src.utils.retry import calculate_delay_with_jitter
+
+        delay = DB_WRITE_RETRY_INITIAL_DELAY
+
+        for attempt in range(DB_WRITE_MAX_RETRIES + 1):
+            try:
+                result = await self._run_with_timeout(
+                    write_fn(), timeout, operation,
+                )
+                await self._write_breaker.record_success()
+                return result
+            except DatabaseError:
+                await self._write_breaker.record_failure()
+                raise  # timeout — never retry
+            except OSError as exc:
+                if attempt >= DB_WRITE_MAX_RETRIES:
+                    log.warning(
+                        "DB write retry exhausted after %d attempts for %s: %s",
+                        DB_WRITE_MAX_RETRIES + 1,
+                        operation,
+                        exc,
+                        extra=_db_log_extra(),
+                    )
+                    await self._write_breaker.record_failure()
+                    raise
+                actual_delay = calculate_delay_with_jitter(delay)
+                log.info(
+                    "Transient DB write error for %s, retrying attempt %d/%d after %.2fs: %s",
+                    operation,
+                    attempt + 1,
+                    DB_WRITE_MAX_RETRIES,
+                    actual_delay,
+                    exc,
+                    extra=_db_log_extra(),
+                )
+                await asyncio.sleep(actual_delay)
+                delay *= 2
 
     @property
     def write_breaker(self) -> CircuitBreaker:
@@ -494,6 +540,7 @@ class Database:
             self._message_store.index_dirty = False
         # Close all pooled file handles to release OS file descriptors
         self._file_pool.close_all()
+        self._read_pool.close_all()
         self._initialized = False
 
     async def __aenter__(self) -> "Database":
@@ -605,10 +652,24 @@ class Database:
     # ── chats persistence ─────────────────────────────────────────────────
 
     async def _save_chats(self) -> None:
-        """Atomically save chats index to JSON file."""
+        """Atomically save chats index to JSON file.
+
+        Wraps the disk write through ``_guarded_write`` so transient
+        ``OSError`` (disk-full, lock-contention) are retried with
+        exponential backoff before tripping the write circuit breaker.
+        """
         content = json_dumps(self._chats, indent=2, ensure_ascii=False)
         _db_start = time.monotonic()
-        await asyncio.to_thread(self._atomic_write, self._chats_file, content)
+
+        async def _write_chats():
+            await asyncio.to_thread(self._atomic_write, self._chats_file, content)
+
+        await self._guarded_write(
+            _write_chats,
+            timeout=DEFAULT_DB_TIMEOUT,
+            operation="save_chats",
+        )
+
         elapsed = time.monotonic() - _db_start
         _track_db_latency(elapsed)
         _track_db_write_latency(elapsed)
@@ -638,7 +699,7 @@ class Database:
                     self._chats_dirty = False
 
         await self._guarded_write(
-            _upsert(),
+            _upsert,
             timeout=DEFAULT_DB_TIMEOUT,
             operation="upsert_chat",
         )

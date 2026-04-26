@@ -34,7 +34,7 @@ from src.db.db_integrity import (
     validate_all_sync,
     validate_checksum,
 )
-from src.db.file_pool import FileHandlePool
+from src.db.file_pool import FileHandlePool, ReadHandlePool
 from src.db.message_store import MessageStore
 from src.db.compression import CompressionService
 
@@ -46,6 +46,7 @@ __all__ = [
     "MessageStore",
     "CompressionService",
     "FileHandlePool",
+    "ReadHandlePool",
     # Result types
     "ValidationResult",
     "RecoveryResult",

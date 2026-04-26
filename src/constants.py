@@ -314,6 +314,32 @@ DB_WRITE_MAX_RETRIES: int = 2
 DB_WRITE_RETRY_INITIAL_DELAY: float = 0.5
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SQLite Write Retry Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of retry attempts for transient sqlite3.OperationalError
+# ("database is locked", "database is busy") in SqliteHelper write methods.
+# Lock contention is typically brief (milliseconds), so 3 retries with backoff
+# covers the common case without masking persistent issues.
+SQLITE_WRITE_MAX_RETRIES: int = 3
+
+# Initial delay (seconds) before first retry of a transient SQLite write error.
+# Uses exponential backoff with jitter (see calculate_delay_with_jitter).
+# SQLite lock contention usually resolves in < 100ms, but we allow extra
+# margin for concurrent writers under heavy load.
+SQLITE_WRITE_RETRY_INITIAL_DELAY: float = 0.05
+
+# Number of consecutive SQLite write failures before opening the circuit
+# breaker.  Once open, all SQLite writes are fast-failed until the cooldown
+# expires and a probe succeeds.
+SQLITE_WRITE_CIRCUIT_FAILURE_THRESHOLD: int = 5
+
+# Duration (seconds) the SQLite write circuit breaker stays OPEN before
+# transitioning to HALF_OPEN.  Shorter than file-write cooldown because
+# SQLite lock contention typically resolves quickly.
+SQLITE_WRITE_CIRCUIT_COOLDOWN_SECONDS: float = 10.0
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ReAct Loop Retry Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 

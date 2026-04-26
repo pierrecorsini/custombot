@@ -21,8 +21,6 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from src.constants import (
-    DB_WRITE_MAX_RETRIES,
-    DB_WRITE_RETRY_INITIAL_DELAY,
     DEFAULT_DB_TIMEOUT,
     MAX_LRU_CACHE_SIZE,
 )
@@ -47,7 +45,7 @@ from src.db.db_utils import (
     _track_db_write_latency,
     _validate_chat_id,
 )
-from src.db.file_pool import FileHandlePool
+from src.db.file_pool import FileHandlePool, ReadHandlePool
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.exceptions import DatabaseError
 from src.security.prompt_injection import (
@@ -88,6 +86,7 @@ class MessageStore:
         messages_dir: Path,
         index_file: Path,
         file_pool: FileHandlePool,
+        read_pool: ReadHandlePool,
         message_locks: LRULockCache,
         message_file_cache: LRUDict,
         check_disk_space_fn,  # Callable[[Path], None]
@@ -98,6 +97,7 @@ class MessageStore:
         self._messages_dir = messages_dir
         self._index_file = index_file
         self._file_pool = file_pool
+        self._read_pool = read_pool
         self._message_locks = message_locks
         self._message_file_cache = message_file_cache
         self._check_disk_space_before_write = check_disk_space_fn
@@ -288,7 +288,7 @@ class MessageStore:
                 )
 
         await self._guarded_write(
-            _write_message(),
+            _write_message,
             timeout=DEFAULT_DB_TIMEOUT,
             operation="save_message",
         )
@@ -540,15 +540,16 @@ class MessageStore:
     ) -> List[str]:
         """Read the last N lines from a file without reading the entire file.
 
-        For small files (<64KB), reads normally using deque for O(limit) memory.
+        For small files (<64KB), reads using a pooled read handle for O(limit)
+        memory with handle reuse across calls.
         For larger files, uses mmap-based reverse-seek to find line boundaries.
         """
         file_size = file_path.stat().st_size
 
-        # For small files, simple read is faster (avoids seek overhead)
+        # For small files, use the pooled read handle — avoids per-read open/close
         if file_size < 65_536:
-            with file_path.open("r", encoding="utf-8") as f:
-                return [line.rstrip("\r") for line in deque(f, maxlen=limit)]
+            handle = self._read_pool.get_reader(file_path)
+            return [line.rstrip("\r") for line in deque(handle, maxlen=limit)]
 
         target_newlines = limit + 1
         newline_count = 0
@@ -559,7 +560,9 @@ class MessageStore:
             try:
                 mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
             except (OSError, ValueError):
-                return [line.rstrip("\r") for line in deque(f, maxlen=limit)]
+                # Fallback: use pooled read handle instead of opening a new one
+                handle = self._read_pool.get_reader(file_path)
+                return [line.rstrip("\r") for line in deque(handle, maxlen=limit)]
 
             with mm:
                 while pos > 0 and newline_count < target_newlines:
@@ -572,11 +575,11 @@ class MessageStore:
                             file_path,
                             extra=_db_log_extra(),
                         )
-                        with file_path.open("r", encoding="utf-8") as fb:
-                            return [
-                                line.rstrip("\r")
-                                for line in deque(fb, maxlen=limit)
-                            ]
+                        handle = self._read_pool.get_reader(file_path)
+                        return [
+                            line.rstrip("\r")
+                            for line in deque(handle, maxlen=limit)
+                        ]
 
                     region_end = pos
                     region_start = max(0, pos - 8192)

@@ -40,6 +40,13 @@ from src.utils.retry import retry_with_backoff
 # instead of waiting for the full API timeout on every attempt.
 _EMBED_HEALTH_TTL = 60.0
 
+# Debounce window for coalescing individual save() embedding requests into a
+# single batched API call.  Saves that arrive within this window are grouped
+# together, reducing per-request API overhead.
+_BATCH_DEBOUNCE = 0.05  # 50 ms
+# Safety cap on the number of texts sent in a single batched API call.
+_MAX_BATCH_SIZE = 64
+
 log = logging.getLogger(__name__)
 
 # Bump this when the schema changes.  Migrations in _MIGRATIONS below will
@@ -113,6 +120,12 @@ class VectorMemory(SqliteHelper):
         self._embed_api_healthy: bool = True
         self._embed_api_last_check: float = 0.0
 
+        # Batch coalescing: rapid save() calls are queued and flushed together
+        # through _embed_batch() after a short debounce window, reducing the
+        # number of individual embedding API calls.
+        self._pending_saves: list[tuple[str, asyncio.Future[list[float]]]] = []
+        self._flush_handle: asyncio.TimerHandle | None = None
+
     # ── lifecycle ───────────────────────────────────────────────────────
 
     def connect(self) -> None:
@@ -147,6 +160,15 @@ class VectorMemory(SqliteHelper):
         """Release all resources: embed cache, in-flight futures, read pool, and DB connection."""
         with self._cache_lock:
             self._embed_cache = BoundedOrderedDict(max_size=256, eviction="half")
+        # Cancel pending batch flush
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        # Cancel any pending save futures
+        for _, future in self._pending_saves:
+            if not future.done():
+                future.cancel()
+        self._pending_saves.clear()
         # Cancel any pending in-flight embedding futures
         for key, future in list(self._inflight.items()):
             if not future.done():
@@ -394,6 +416,56 @@ class VectorMemory(SqliteHelper):
             # Clean up in-flight entry
             self._inflight.pop(cache_key, None)
 
+    # ── save-batch coalescing ────────────────────────────────────────────
+
+    async def _batched_embed(self, text: str) -> list[float]:
+        """Queue *text* for a batched embedding call with debounce coalescing.
+
+        If other ``save()`` calls arrive within ``_BATCH_DEBOUNCE`` seconds
+        they are grouped into a single ``_embed_batch()`` call, reducing
+        per-request API overhead.
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[list[float]] = loop.create_future()
+        self._pending_saves.append((text, future))
+
+        if self._flush_handle is None:
+            self._flush_handle = loop.call_later(
+                _BATCH_DEBOUNCE,
+                lambda: asyncio.ensure_future(self._flush_pending()),
+            )
+
+        return await future
+
+    async def _flush_pending(self) -> None:
+        """Drain the pending-save queue through ``_embed_batch()``.
+
+        Large batches are chunked to respect ``_MAX_BATCH_SIZE`` so that a
+        single oversized API call doesn't exceed provider limits.
+        """
+        self._flush_handle = None
+
+        if not self._pending_saves:
+            return
+
+        # Atomically drain — new saves arriving during flush go into a fresh list
+        pending = self._pending_saves
+        self._pending_saves = []
+
+        # Process in chunks capped at _MAX_BATCH_SIZE to avoid oversized API calls
+        for start in range(0, len(pending), _MAX_BATCH_SIZE):
+            chunk = pending[start : start + _MAX_BATCH_SIZE]
+            texts = [text for text, _ in chunk]
+            try:
+                embeddings = await self._embed_batch(texts)
+                for (_, future), embedding in zip(chunk, embeddings):
+                    if not future.done():
+                        future.set_result(embedding)
+            except Exception as exc:
+                for _, future in chunk:
+                    if not future.done():
+                        future.set_exception(exc)
+
     # ── batch embeddings ─────────────────────────────────────────────────
 
     @retry_with_backoff(max_retries=2, initial_delay=0.5)
@@ -498,11 +570,16 @@ class VectorMemory(SqliteHelper):
     # ── public API ──────────────────────────────────────────────────────
 
     async def save(self, chat_id: str, text: str, category: str = "") -> int:
-        """Insert a memory entry with its embedding. Returns the row ID."""
+        """Insert a memory entry with its embedding. Returns the row ID.
+
+        Uses batch coalescing: rapid ``save()`` calls are grouped into a
+        single embedding API request via a short debounce window, reducing
+        API overhead when many memories are saved in quick succession.
+        """
         assert self._db is not None
 
         self._check_embedding_api_health()
-        embedding = await self._embed(text)
+        embedding = await self._batched_embed(text)
         now = time.time()
 
         # Run synchronous DB writes in thread pool to avoid blocking the event loop

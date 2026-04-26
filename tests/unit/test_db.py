@@ -30,6 +30,7 @@ from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
 from src.db.db import Database, _FileHandlePool, _sanitize_name
+from src.db.file_pool import ReadHandlePool
 from src.exceptions import DatabaseError
 from src.utils.circuit_breaker import CircuitState
 
@@ -1316,5 +1317,217 @@ class TestFileHandlePool:
         pool.close_all()
 
         assert len(pool._handles) == 0
+        for h in handles:
+            assert h.closed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ReadHandlePool tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestReadHandlePool:
+    """Verify ReadHandlePool LRU eviction, staleness detection, invalidate,
+    and close_all semantics."""
+
+    def test_get_reader_returns_readable_handle(self, tmp_path: Path) -> None:
+        """get_reader returns an open, readable file handle."""
+        f = tmp_path / "messages.jsonl"
+        f.write_text("line1\nline2\n", encoding="utf-8")
+
+        pool = ReadHandlePool(max_size=10)
+        handle = pool.get_reader(f)
+
+        assert not handle.closed
+        content = handle.read()
+        assert "line1" in content
+
+    def test_get_reader_reuses_cached_handle(self, tmp_path: Path) -> None:
+        """Second call for the same path returns the same handle."""
+        f = tmp_path / "messages.jsonl"
+        f.write_text("data\n", encoding="utf-8")
+
+        pool = ReadHandlePool(max_size=10)
+        h1 = pool.get_reader(f)
+        h2 = pool.get_reader(f)
+
+        assert h1 is h2
+        assert len(pool._handles) == 1
+
+    def test_get_reader_seeks_to_start(self, tmp_path: Path) -> None:
+        """Returned handle is always seeked to position 0."""
+        f = tmp_path / "messages.jsonl"
+        f.write_text("a\nb\nc\n", encoding="utf-8")
+
+        pool = ReadHandlePool(max_size=10)
+        h1 = pool.get_reader(f)
+        h1.read()  # consume to end
+
+        h2 = pool.get_reader(f)
+        assert h2.tell() == 0
+        assert h2.read().startswith("a")
+
+    def test_lru_eviction_removes_oldest(self, tmp_path: Path) -> None:
+        """When pool exceeds max_size, least-recently-used handle is evicted."""
+        pool = ReadHandlePool(max_size=3)
+        paths = []
+        for i in range(4):
+            p = tmp_path / f"chat_{i}.jsonl"
+            p.write_text(f"line{i}\n", encoding="utf-8")
+            paths.append(p)
+
+        handles = [pool.get_reader(p) for p in paths]
+
+        assert len(pool._handles) == 3
+        assert handles[0].closed
+        for h in handles[1:]:
+            assert not h.closed
+
+    def test_repeated_access_refreshes_lru(self, tmp_path: Path) -> None:
+        """Accessing a handle moves it to most-recently-used."""
+        pool = ReadHandlePool(max_size=3)
+        paths = []
+        for i in range(3):
+            p = tmp_path / f"chat_{i}.jsonl"
+            p.write_text(f"line{i}\n", encoding="utf-8")
+            paths.append(p)
+        for p in paths:
+            pool.get_reader(p)
+
+        # Refresh paths[0]
+        pool.get_reader(paths[0])
+
+        # Overflow should evict paths[1]
+        overflow = tmp_path / "overflow.jsonl"
+        overflow.write_text("x\n", encoding="utf-8")
+        pool.get_reader(overflow)
+
+        assert str(paths[1]) not in pool._handles
+        assert str(paths[0]) in pool._handles
+
+    def test_stale_closed_handle_reopened(self, tmp_path: Path) -> None:
+        """A closed handle is detected and replaced on next get_reader."""
+        f = tmp_path / "messages.jsonl"
+        f.write_text("original\n", encoding="utf-8")
+
+        pool = ReadHandlePool(max_size=10)
+        h1 = pool.get_reader(f)
+        h1.close()
+
+        h2 = pool.get_reader(f)
+        assert not h2.closed
+        assert h2 is not h1
+        assert len(pool._handles) == 1
+
+    def test_staleness_detection_reopens_on_size_change(
+        self, tmp_path: Path,
+    ) -> None:
+        """Handle is reopened when the file size changes since last open."""
+        f = tmp_path / "messages.jsonl"
+        f.write_text("initial\n", encoding="utf-8")
+
+        pool = ReadHandlePool(max_size=10)
+        h1 = pool.get_reader(f)
+
+        # Grow the file
+        f.write_text("initial\nappended\n", encoding="utf-8")
+
+        h2 = pool.get_reader(f)
+        # Handle should have been reopened to reflect new content
+        content = h2.read()
+        assert "appended" in content
+
+    def test_oserror_triggers_evict_all_and_retry(self, tmp_path: Path) -> None:
+        """On first OSError, pool evicts all handles and retries once."""
+        f = tmp_path / "messages.jsonl"
+        f.write_text("data\n", encoding="utf-8")
+
+        pool = ReadHandlePool(max_size=10)
+        # Pre-populate
+        other = tmp_path / "other.jsonl"
+        other.write_text("x\n", encoding="utf-8")
+        pool.get_reader(other)
+        assert len(pool._handles) == 1
+
+        call_count = 0
+        original_open = Path.open
+
+        def flaky_open(self: Path, *args: object, **kwargs: object) -> object:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OSError("EMFILE")
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(Path, "open", flaky_open)
+            handle = pool.get_reader(f)
+            assert not handle.closed
+            assert call_count == 2
+        finally:
+            monkeypatch.undo()
+
+    def test_oserror_persistent_raises_database_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """If retry also fails, DatabaseError is raised."""
+        f = tmp_path / "messages.jsonl"
+        f.write_text("data\n", encoding="utf-8")
+
+        pool = ReadHandlePool(max_size=10)
+
+        def always_fail(self: Path, *args: object, **kwargs: object) -> None:
+            raise OSError("persistent failure")
+
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(Path, "open", always_fail)
+            with pytest.raises(DatabaseError, match="Failed to open"):
+                pool.get_reader(f)
+        finally:
+            monkeypatch.undo()
+
+    def test_invalidate_closes_specific_handle(self, tmp_path: Path) -> None:
+        """invalidate() removes and closes only the targeted handle."""
+        p1 = tmp_path / "a.jsonl"
+        p2 = tmp_path / "b.jsonl"
+        p1.write_text("a\n", encoding="utf-8")
+        p2.write_text("b\n", encoding="utf-8")
+
+        pool = ReadHandlePool(max_size=10)
+        h1 = pool.get_reader(p1)
+        h2 = pool.get_reader(p2)
+
+        pool.invalidate(p1)
+
+        assert h1.closed
+        assert not h2.closed
+        assert str(p1) not in pool._handles
+        assert str(p2) in pool._handles
+
+    def test_invalidate_nonexistent_path_is_noop(self, tmp_path: Path) -> None:
+        """invalidate() on a path not in the pool does nothing."""
+        f = tmp_path / "exists.jsonl"
+        f.write_text("x\n", encoding="utf-8")
+
+        pool = ReadHandlePool(max_size=10)
+        pool.get_reader(f)
+        pool.invalidate(tmp_path / "ghost.jsonl")
+        assert len(pool._handles) == 1
+
+    def test_close_all_closes_every_handle(self, tmp_path: Path) -> None:
+        """close_all() closes every pooled handle and clears the pool."""
+        pool = ReadHandlePool(max_size=10)
+        handles = []
+        for i in range(5):
+            p = tmp_path / f"chat_{i}.jsonl"
+            p.write_text(f"line{i}\n", encoding="utf-8")
+            handles.append(pool.get_reader(p))
+
+        pool.close_all()
+
+        assert len(pool._handles) == 0
+        assert len(pool._st_sizes) == 0
         for h in handles:
             assert h.closed

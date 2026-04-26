@@ -839,6 +839,214 @@ class TestEmbedCache:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Save-Batch Coalescing (debounce)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSaveBatchCoalescing:
+    """Tests for save() coalescing rapid calls into a single embedding API request."""
+
+    @pytest.mark.asyncio
+    async def test_rapid_saves_use_single_api_call(self, db_path: Path):
+        """Multiple save() calls within the debounce window should use one API call."""
+        call_count = 0
+        client = _make_mock_client()
+        original_create = client.embeddings.create
+
+        async def counting_create(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return await original_create(**kwargs)
+
+        client.embeddings.create = counting_create
+
+        vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm.connect()
+
+        # Fire 5 saves concurrently — they should coalesce into 1 API call
+        await asyncio.gather(*[
+            vm.save("chat1", f"rapid text {i}") for i in range(5)
+        ])
+
+        assert call_count == 1
+        assert vm.count("chat1") == 5
+        vm.close()
+
+    @pytest.mark.asyncio
+    async def test_sequential_saves_use_separate_calls(self, db_path: Path):
+        """Saves spaced beyond the debounce window should use separate API calls."""
+        import src.vector_memory as vm_mod
+
+        original_debounce = vm_mod._BATCH_DEBOUNCE
+        vm_mod._BATCH_DEBOUNCE = 0.0  # Instant flush — no coalescing
+
+        try:
+            call_count = 0
+            client = _make_mock_client()
+            original_create = client.embeddings.create
+
+            async def counting_create(**kwargs):
+                nonlocal call_count
+                call_count += 1
+                return await original_create(**kwargs)
+
+            client.embeddings.create = counting_create
+
+            vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+            vm.connect()
+
+            await vm.save("chat1", "first text")
+            await vm.save("chat1", "second text")
+
+            assert call_count == 2
+            vm.close()
+        finally:
+            vm_mod._BATCH_DEBOUNCE = original_debounce
+
+    @pytest.mark.asyncio
+    async def test_cached_text_skips_api_in_batch(self, db_path: Path):
+        """A save() for already-cached text should not trigger a new API call."""
+        call_count = 0
+        client = _make_mock_client()
+        original_create = client.embeddings.create
+
+        async def counting_create(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return await original_create(**kwargs)
+
+        client.embeddings.create = counting_create
+
+        vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm.connect()
+
+        # First save populates the cache
+        await vm.save("chat1", "cached text")
+        assert call_count == 1
+
+        # Second save of the same text — _embed_batch hits LRU cache
+        await vm.save("chat1", "cached text")
+        assert call_count == 1  # No additional API call
+
+        vm.close()
+
+    @pytest.mark.asyncio
+    async def test_flush_propagates_errors(self, db_path: Path):
+        """If the embedding API fails, all coalesced saves should receive the error."""
+        client = _make_mock_client()
+        client.embeddings.create = AsyncMock(side_effect=RuntimeError("API down"))
+
+        vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm.connect()
+
+        with pytest.raises(RuntimeError, match="API down"):
+            await asyncio.gather(*[
+                vm.save("chat1", f"text {i}") for i in range(3)
+            ])
+
+        vm.close()
+
+    @pytest.mark.asyncio
+    async def test_close_cancels_pending_saves(self, db_path: Path):
+        """Closing VectorMemory should cancel any saves waiting for a batch flush."""
+        client = _make_mock_client()
+        # Make the API call hang indefinitely
+        hang_event = asyncio.Event()
+        original_create = client.embeddings.create
+
+        async def hanging_create(**kwargs):
+            await hang_event.wait()
+            return await original_create(**kwargs)
+
+        client.embeddings.create = hanging_create
+
+        vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm.connect()
+
+        save_task = asyncio.create_task(vm.save("chat1", "pending text"))
+        await asyncio.sleep(0.01)  # Let the save queue up
+
+        vm.close()  # Should cancel the pending save
+        hang_event.set()  # Unblock (won't matter — already cancelled)
+
+        with pytest.raises(asyncio.CancelledError):
+            await save_task
+
+    @pytest.mark.asyncio
+    async def test_new_saves_during_flush_get_next_batch(self, db_path: Path):
+        """Saves arriving during an active flush should start a new batch."""
+        call_count = 0
+        client = _make_mock_client()
+        original_create = client.embeddings.create
+        first_call_done = asyncio.Event()
+
+        async def counting_create(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_call_done.set()
+            return await original_create(**kwargs)
+
+        client.embeddings.create = counting_create
+
+        vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm.connect()
+
+        # Start first batch of saves
+        first_batch = [asyncio.create_task(vm.save("chat1", f"batch1 text {i}")) for i in range(3)]
+
+        # Wait for the first API call and add more saves
+        await first_call_done.wait()
+        second_batch = [asyncio.create_task(vm.save("chat1", f"batch2 text {i}")) for i in range(2)]
+
+        await asyncio.gather(*first_batch, *second_batch)
+
+        assert call_count == 2  # Two separate API calls
+        assert vm.count("chat1") == 5
+        vm.close()
+
+    @pytest.mark.asyncio
+    async def test_large_batch_respects_max_batch_size(self, db_path: Path):
+        """When more saves arrive than _MAX_BATCH_SIZE, they are chunked into
+        multiple API calls and all complete successfully."""
+        import src.vector_memory as vm_mod
+
+        original_max = vm_mod._MAX_BATCH_SIZE
+        vm_mod._MAX_BATCH_SIZE = 5  # Small limit for testing
+
+        try:
+            call_count = 0
+            client = _make_mock_client()
+            original_create = client.embeddings.create
+
+            async def counting_create(**kwargs):
+                nonlocal call_count
+                call_count += 1
+                # Verify no single call exceeds the batch size limit
+                input_texts = kwargs.get("input", [])
+                assert len(input_texts) <= 5, (
+                    f"API call had {len(input_texts)} texts, exceeding limit of 5"
+                )
+                return await original_create(**kwargs)
+
+            client.embeddings.create = counting_create
+
+            vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
+            vm.connect()
+
+            # Fire 12 saves concurrently — should be chunked into 3 API calls (5+5+2)
+            await asyncio.gather(*[
+                vm.save("chat1", f"chunk text {i}") for i in range(12)
+            ])
+
+            assert call_count == 3  # 5 + 5 + 2
+            assert vm.count("chat1") == 12
+            vm.close()
+        finally:
+            vm_mod._MAX_BATCH_SIZE = original_max
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Thread Safety
 # ─────────────────────────────────────────────────────────────────────────────
 
