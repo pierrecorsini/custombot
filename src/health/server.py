@@ -33,6 +33,7 @@ from src.health.checks import (
     check_llm_logs,
     check_neonize,
     check_scheduler,
+    check_vector_memory,
     check_wiring,
     get_token_usage_stats,
 )
@@ -1379,6 +1380,7 @@ class HealthServer:
         workspace_dir: Optional[str] = None,
         shutdown_mgr: Optional["GracefulShutdown"] = None,
         startup_durations: Optional[dict[str, float]] = None,
+        vector_memory: Any = None,
     ) -> None:
         self._db = db
         self._neonize_backend = neonize_backend
@@ -1396,6 +1398,7 @@ class HealthServer:
         self._workspace_dir = workspace_dir
         self._shutdown_mgr = shutdown_mgr
         self._startup_durations = startup_durations
+        self._vector_memory = vector_memory
         self._startup_total_seconds: Optional[float] = None
         self._runner: Optional[Any] = None
         self._site: Optional[Any] = None
@@ -1507,6 +1510,19 @@ class HealthServer:
                     name="scheduler",
                     status=HealthStatus.UNHEALTHY,
                     message=f"Scheduler check failed: {type(e).__name__}",
+                )
+            )
+
+        # VectorMemory degradation status
+        try:
+            components.append(check_vector_memory(self._vector_memory))
+        except Exception as e:
+            log.debug("VectorMemory health check error: %s", e)
+            components.append(
+                ComponentHealth(
+                    name="vector_memory",
+                    status=HealthStatus.DEGRADED,
+                    message=f"VectorMemory check failed: {type(e).__name__}",
                 )
             )
 
@@ -1754,6 +1770,7 @@ class HealthServer:
                     "Failed to include event bus metrics in Prometheus output",
                     logger=log,
                 )
+            return web.Response(
                 text=output,
                 content_type="text/plain",
                 charset="utf-8",

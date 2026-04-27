@@ -308,6 +308,70 @@ def check_readiness(
     return len(reasons) == 0, reasons
 
 
+def check_vector_memory(vector_memory: Any) -> ComponentHealth:
+    """Check VectorMemory health: embedding API reachability and retry queue depth.
+
+    Reports DEGRADED when the embedding API is unreachable or the retry queue
+    exceeds 50% capacity.  Reports UNHEALTHY when VectorMemory is not configured.
+    """
+    from src.vector_memory.health import _MAX_RETRY_QUEUE_SIZE
+
+    if vector_memory is None:
+        return ComponentHealth(
+            name="vector_memory",
+            status=HealthStatus.UNHEALTHY,
+            message="VectorMemory not configured",
+        )
+
+    with vector_memory._cache_lock:
+        api_healthy = vector_memory._embed_api_healthy
+        queue_depth = len(vector_memory._pending_retries)
+
+    queue_capacity = queue_depth / _MAX_RETRY_QUEUE_SIZE
+
+    details: dict[str, Any] = {
+        "embedding_api_healthy": api_healthy,
+        "retry_queue_depth": queue_depth,
+        "retry_queue_capacity": round(queue_capacity, 2),
+    }
+
+    if not api_healthy and queue_capacity > 0.5:
+        return ComponentHealth(
+            name="vector_memory",
+            status=HealthStatus.DEGRADED,
+            message=(
+                f"Embedding API unreachable, retry queue at {queue_depth}/{_MAX_RETRY_QUEUE_SIZE}"
+            ),
+            details=details,
+        )
+
+    if not api_healthy:
+        return ComponentHealth(
+            name="vector_memory",
+            status=HealthStatus.DEGRADED,
+            message="Embedding API unreachable",
+            details=details,
+        )
+
+    if queue_capacity > 0.5:
+        return ComponentHealth(
+            name="vector_memory",
+            status=HealthStatus.DEGRADED,
+            message=f"Retry queue at {queue_depth}/{_MAX_RETRY_QUEUE_SIZE} (>50%)",
+            details=details,
+        )
+
+    msg = "VectorMemory operational"
+    if queue_depth > 0:
+        msg = f"VectorMemory operational ({queue_depth} queued retries)"
+    return ComponentHealth(
+        name="vector_memory",
+        status=HealthStatus.HEALTHY,
+        message=msg,
+        details=details if queue_depth > 0 else None,
+    )
+
+
 def check_scheduler(scheduler: Optional["TaskScheduler"]) -> ComponentHealth:
     """Check task scheduler status: running state, task count, recent failures."""
     if scheduler is None:

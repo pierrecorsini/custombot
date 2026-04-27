@@ -258,6 +258,7 @@ async def _step_health_server(ctx: StartupContext) -> str | None:
             workspace_dir=WORKSPACE_DIR,
             shutdown_mgr=ctx.shutdown_mgr,
             startup_durations=startup_durations,
+            vector_memory=ctx.components.vector_memory,
         )
         await health_server.start(port=health_port)
         ctx.health_server = health_server
