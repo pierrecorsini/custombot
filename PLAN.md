@@ -46,5 +46,5 @@
 ## Documentation & Observability
 
 - [x] Add OpenTelemetry-compatible tracing spans to the message pipeline — current observability is limited to structured logs and performance metrics; adding OTel spans would enable distributed tracing across LLM calls, skill execution, and message delivery
-- [ ] Expose Prometheus-compatible metrics endpoint alongside health check — `PerformanceMetrics` already tracks latencies, queue depth, and error rates; expose these via a `/metrics` endpoint for external monitoring
+- [x] Expose Prometheus-compatible metrics endpoint alongside health check — `PerformanceMetrics` already tracks latencies, queue depth, and error rates; expose these via a `/metrics` endpoint for external monitoring
 - [ ] Add a `--diagnose` CLI command for common troubleshooting — auto-check config validity, LLM connectivity, workspace integrity, and disk space, outputting a structured report to help users self-serve before filing issues
