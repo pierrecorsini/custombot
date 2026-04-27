@@ -166,7 +166,7 @@ class MtimeCache:
             mtime, content = await asyncio.to_thread(
                 _stat_and_read, path, cached_mtime,
             )
-        except Exception as exc:
+        except OSError as exc:
             raise OSError(f"Read failed for {path}: {exc}") from exc
         if mtime is None:
             # File does not exist — remember as missing
