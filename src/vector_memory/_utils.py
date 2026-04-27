@@ -5,9 +5,20 @@ from __future__ import annotations
 import logging
 import struct
 
+import xxhash
+
 from src.core.errors import NonCriticalCategory, log_noncritical
 
 _log = logging.getLogger(__name__)
+
+
+def _cache_key(text: str) -> str:
+    """Return a fast non-cryptographic hash for embedding cache deduplication.
+
+    Uses xxhash.xxh128 (128-bit) which is 10-50× faster than hashlib.sha256
+    on short strings — sufficient for cache key uniqueness with no collision risk.
+    """
+    return xxhash.xxh128(text.encode("utf-8")).hexdigest()
 
 
 def _serialize_f32(vector: list[float]) -> bytes:

@@ -22,3 +22,13 @@ sqlite-vec~=0.1.7
 
 # Fast JSON serialization (hot-path acceleration)
 orjson~=3.10.0
+
+# OpenTelemetry tracing (optional — graceful degradation if not installed)
+opentelemetry-api~=1.30.0
+opentelemetry-sdk~=1.30.0
+
+# File system watching for routing rule auto-reload (inotify/ReadDirectoryChanges)
+watchdog>=4.0.0
+
+# Fast non-cryptographic hashing for embedding cache keys
+xxhash~=3.5.0

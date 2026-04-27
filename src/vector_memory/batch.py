@@ -8,11 +8,10 @@ batched embedding API requests, reducing per-request overhead.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 
 from src.utils.retry import retry_with_backoff
-from src.vector_memory._utils import _track_embed_cache_event
+from src.vector_memory._utils import _cache_key, _track_embed_cache_event
 
 log = logging.getLogger(__name__)
 
@@ -104,7 +103,7 @@ class BatchEmbedMixin:
         key_to_indices: dict[str, list[int]] = {}
 
         for i, text in enumerate(texts):
-            cache_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            cache_key = _cache_key(text)
 
             # 1. Check LRU cache
             with self._cache_lock:

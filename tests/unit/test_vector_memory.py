@@ -18,7 +18,6 @@ Unit tests covering:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import math
 import sqlite3
 import struct
@@ -28,6 +27,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from src.vector_memory._utils import _cache_key
 
 import pytest
 
@@ -80,7 +81,7 @@ def _make_mock_client(embedding_map: dict[str, list[float]] | None = None):
                 if text in embedding_map:
                     vec = embedding_map[text]
                 else:
-                    seed = int(hashlib.sha256(text.encode()).hexdigest(), 16) % (2**31)
+                    seed = int(_cache_key(text), 16) % (2**31)
                     vec = _make_embedding(seed)
                 results.append(MagicMock(embedding=vec))
             resp = MagicMock()
@@ -91,7 +92,7 @@ def _make_mock_client(embedding_map: dict[str, list[float]] | None = None):
             if text in embedding_map:
                 vec = embedding_map[text]
             else:
-                seed = int(hashlib.sha256(text.encode()).hexdigest(), 16) % (2**31)
+                seed = int(_cache_key(text), 16) % (2**31)
                 vec = _make_embedding(seed)
             resp = MagicMock()
             resp.data = [MagicMock(embedding=vec)]
@@ -705,7 +706,7 @@ class TestEmbedCache:
     async def test_cache_populated_after_embed(self, vm: VectorMemory):
         text = "cacheable text"
         await vm._embed(text)
-        cache_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        cache_key = _cache_key(text)
         assert cache_key in vm._embed_cache
 
     @pytest.mark.asyncio
@@ -773,11 +774,11 @@ class TestEmbedCache:
         assert len(vm._embed_cache) == 3
 
         # "text1" should be evicted
-        key1 = hashlib.sha256("text1".encode()).hexdigest()
+        key1 = _cache_key("text1")
         assert key1 not in vm._embed_cache
 
         # "text4" should be present
-        key4 = hashlib.sha256("text4".encode()).hexdigest()
+        key4 = _cache_key("text4")
         assert key4 in vm._embed_cache
 
         vm.close()
@@ -801,8 +802,8 @@ class TestEmbedCache:
         await vm._embed("text4")
         assert len(vm._embed_cache) == 3
 
-        key2 = hashlib.sha256("text2".encode()).hexdigest()
-        key1 = hashlib.sha256("text1".encode()).hexdigest()
+        key2 = _cache_key("text2")
+        key1 = _cache_key("text1")
         assert key2 not in vm._embed_cache  # evicted
         assert key1 in vm._embed_cache  # refreshed, still present
 
@@ -1758,7 +1759,7 @@ class TestEmbedBatchCacheInflight:
 
         await vm._embed_batch(["cleanup_text"])
 
-        key = hashlib.sha256("cleanup_text".encode()).hexdigest()
+        key = _cache_key("cleanup_text")
         assert key not in vm._inflight
 
         vm.close()
@@ -1779,7 +1780,7 @@ class TestEmbedBatchCacheInflight:
         with pytest.raises(RuntimeError):
             await vm._embed_batch(["cleanup_on_error"])
 
-        key = hashlib.sha256("cleanup_on_error".encode()).hexdigest()
+        key = _cache_key("cleanup_on_error")
         assert key not in vm._inflight
 
         vm.close()
@@ -1793,8 +1794,8 @@ class TestEmbedBatchCacheInflight:
 
         await vm._embed_batch(["cache_a", "cache_b", "cache_a"])
 
-        key_a = hashlib.sha256("cache_a".encode()).hexdigest()
-        key_b = hashlib.sha256("cache_b".encode()).hexdigest()
+        key_a = _cache_key("cache_a")
+        key_b = _cache_key("cache_b")
         assert key_a in vm._embed_cache
         assert key_b in vm._embed_cache
 
@@ -1871,7 +1872,7 @@ class TestEmbedBatchCacheInflight:
         assert all(r is not None for r in batch_results)
 
         # "cached" result should match what was pre-warmed
-        cached_key = hashlib.sha256("cached".encode()).hexdigest()
+        cached_key = _cache_key("cached")
         assert batch_results[0] == vm._embed_cache[cached_key]
 
         # "inflight_text" should match the concurrent _embed() result
@@ -2700,7 +2701,7 @@ class TestEmbedBatchApiErrorPropagation:
             await vm._embed_batch(["text_x", "text_y", "text_z"])
 
         for text in ["text_x", "text_y", "text_z"]:
-            key = hashlib.sha256(text.encode()).hexdigest()
+            key = _cache_key(text)
             assert key not in vm._inflight
 
         vm.close()
@@ -2723,7 +2724,7 @@ class TestEmbedBatchApiErrorPropagation:
             await vm._embed_batch(["uncached_a", "uncached_b"])
 
         for text in ["uncached_a", "uncached_b"]:
-            key = hashlib.sha256(text.encode()).hexdigest()
+            key = _cache_key(text)
             assert key not in vm._embed_cache
 
         vm.close()
@@ -2751,7 +2752,7 @@ class TestEmbedBatchApiErrorPropagation:
         # Pre-cache one text
         await vm._embed("pre_cached")
         assert call_count == 1
-        pre_cached_key = hashlib.sha256("pre_cached".encode()).hexdigest()
+        pre_cached_key = _cache_key("pre_cached")
         assert pre_cached_key in vm._embed_cache
         cache_snapshot_before = set(vm._embed_cache.keys())
 
@@ -2760,7 +2761,7 @@ class TestEmbedBatchApiErrorPropagation:
             await vm._embed_batch(["pre_cached", "new_text"])
 
         # Cache should be unchanged — no new entries added
-        new_text_key = hashlib.sha256("new_text".encode()).hexdigest()
+        new_text_key = _cache_key("new_text")
         assert new_text_key not in vm._embed_cache
         assert set(vm._embed_cache.keys()) == cache_snapshot_before
 
@@ -2792,7 +2793,7 @@ class TestEmbedBatchApiErrorPropagation:
             await vm._embed_batch(["retry_text"])
 
         # In-flight should be clean
-        retry_key = hashlib.sha256("retry_text".encode()).hexdigest()
+        retry_key = _cache_key("retry_text")
         assert retry_key not in vm._inflight
         assert retry_key not in vm._embed_cache
 
@@ -2843,12 +2844,12 @@ class TestEmbedBatchApiErrorPropagation:
 
         # Cache should only have the successful texts
         for text in ["fresh_x", "fresh_y", "fresh_z"]:
-            key = hashlib.sha256(text.encode()).hexdigest()
+            key = _cache_key(text)
             assert key in vm._embed_cache
 
         # Failed texts should NOT be in cache
         for text in ["failed_a", "failed_b"]:
-            key = hashlib.sha256(text.encode()).hexdigest()
+            key = _cache_key(text)
             assert key not in vm._embed_cache
 
         vm.close()
@@ -2888,7 +2889,7 @@ class TestEmbedBatchCountValidation:
             if isinstance(inp, list) and len(inp) > 1:
                 # Return only 1 embedding regardless of input count
                 text = inp[0]
-                seed = int(hashlib.sha256(text.encode()).hexdigest(), 16) % (2**31)
+                seed = int(_cache_key(text), 16) % (2**31)
                 vec = _make_embedding(seed)
                 resp = MagicMock()
                 resp.data = [MagicMock(embedding=vec)]
@@ -2945,7 +2946,7 @@ class TestEmbedBatchCountValidation:
             await vm._embed_batch(["aaa", "bbb", "ccc"])
 
         for text in ["aaa", "bbb", "ccc"]:
-            key = hashlib.sha256(text.encode()).hexdigest()
+            key = _cache_key(text)
             assert key not in vm._inflight
 
         vm.close()
@@ -2963,7 +2964,7 @@ class TestEmbedBatchCountValidation:
                 # Return one fewer embedding than requested
                 results = []
                 for text in inp[:-1]:
-                    seed = int(hashlib.sha256(text.encode()).hexdigest(), 16) % (2**31)
+                    seed = int(_cache_key(text), 16) % (2**31)
                     vec = _make_embedding(seed)
                     results.append(MagicMock(embedding=vec))
                 resp = MagicMock()
@@ -2980,7 +2981,7 @@ class TestEmbedBatchCountValidation:
             await vm._embed_batch(["uncached_a", "uncached_b"])
 
         for text in ["uncached_a", "uncached_b"]:
-            key = hashlib.sha256(text.encode()).hexdigest()
+            key = _cache_key(text)
             assert key not in vm._embed_cache
 
         vm.close()

@@ -16,7 +16,6 @@ Embedding cache access is protected by _cache_lock.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import sqlite3
 import threading
@@ -33,7 +32,7 @@ from src.exceptions import DiskSpaceError
 from src.utils import BoundedOrderedDict, DEFAULT_MIN_DISK_SPACE, check_disk_space
 from src.utils.locking import ThreadLock
 from src.utils.retry import retry_with_backoff
-from src.vector_memory._utils import _serialize_f32, _track_embed_cache_event
+from src.vector_memory._utils import _cache_key, _serialize_f32, _track_embed_cache_event
 from src.vector_memory.batch import BatchEmbedMixin
 from src.vector_memory.health import EmbeddingHealthMixin
 
@@ -316,7 +315,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
 
         Cache access is protected by _cache_lock; DB writes use _write_lock.
         """
-        cache_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        cache_key = _cache_key(text)
 
         # 1. Check LRU cache (fast path)
         with self._cache_lock:
