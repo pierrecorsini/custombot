@@ -28,10 +28,19 @@ from typing import Any, Awaitable, Callable, TYPE_CHECKING
 from src.constants import (
     DEFAULT_SCHEDULER_TASK_TIMEOUT,
     MAX_SCHEDULED_PROMPT_LENGTH,
+    SCHEDULER_HMAC_SECRET_ENV,
+    SCHEDULER_HMAC_SIG_EXT,
     SCHEDULER_MAX_RETRIES,
     SCHEDULER_RETRY_INITIAL_DELAY,
 )
 from src.db.db import _validate_chat_id
+from src.security.signing import (
+    get_scheduler_secret,
+    read_signature_file,
+    sign_payload,
+    verify_payload,
+    write_signature_file,
+)
 from src.utils import JSONDecodeError
 from src.utils.path import sanitize_path_component
 from src.utils.retry import is_transient_error
@@ -71,8 +80,8 @@ class TaskScheduler:
         self._task: asyncio.Task | None = None
         # chat_id -> list of task dicts
         self._tasks: dict[str, list[dict[str, Any]]] = {}
-        # callback: (chat_id, prompt_text) -> str response
-        self._on_trigger: Callable[[str, str], Awaitable[str]] | None = None
+        # callback: (chat_id, prompt_text, prompt_hmac | None) -> str | None response
+        self._on_trigger: Callable[[str, str, str | None], Awaitable[str | None]] | None = None
         # send callback: (chat_id, text) -> None
         self._on_send: Callable[[str, str], Awaitable[None]] | None = None
         # workspace root
@@ -94,7 +103,7 @@ class TaskScheduler:
     def configure(
         self,
         workspace: Path,
-        on_trigger: Callable[[str, str], Awaitable[str]] | None = None,
+        on_trigger: Callable[[str, str, str | None], Awaitable[str | None]] | None = None,
         on_send: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> None:
         self._workspace = workspace
@@ -107,7 +116,10 @@ class TaskScheduler:
         """Set the callback for delivering scheduled task results."""
         self._on_send = callback
 
-    def set_on_trigger(self, callback: Callable[[str, str], Awaitable[str | None]]) -> None:
+    def set_on_trigger(
+        self,
+        callback: Callable[[str, str, str | None], Awaitable[str | None]],
+    ) -> None:
         """Set the callback for triggering scheduled task processing."""
         self._on_trigger = callback
 
@@ -266,18 +278,63 @@ class TaskScheduler:
 
     @staticmethod
     def _write_tasks_file(path: Path, data: list[dict[str, Any]]) -> None:
-        """Synchronous helper: mkdir + serialize + write (runs in thread pool)."""
+        """Synchronous helper: mkdir + serialize + write (runs in thread pool).
+
+        When ``SCHEDULER_HMAC_SECRET`` is configured, an HMAC-SHA256
+        signature is written to a sidecar ``.hmac`` file alongside the
+        tasks data.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2))
+        content = json.dumps(data, indent=2)
+        path.write_text(content)
+
+        secret = get_scheduler_secret()
+        if secret is not None:
+            signature = sign_payload(secret, content.encode("utf-8"))
+            write_signature_file(path.with_suffix(path.suffix + SCHEDULER_HMAC_SIG_EXT), signature)
 
     async def _load(self, chat_id: str) -> None:
-        """Load tasks for a chat from disk via thread pool to avoid blocking."""
+        """Load tasks for a chat from disk via thread pool to avoid blocking.
+
+        When ``SCHEDULER_HMAC_SECRET`` is configured, the HMAC signature is
+        verified before parsing.  If verification fails, tasks are **not**
+        loaded and a security audit warning is logged.
+        """
         dest = self._resolve_tasks_path(chat_id)
         if dest is None:
             return
         try:
             raw = await asyncio.to_thread(self._read_tasks_file, dest)
             if raw is not None:
+                # Verify HMAC when a secret is configured.
+                secret = get_scheduler_secret()
+                if secret is not None:
+                    sig_path = dest.with_suffix(dest.suffix + SCHEDULER_HMAC_SIG_EXT)
+                    stored_sig = await asyncio.to_thread(read_signature_file, sig_path)
+                    if stored_sig is None:
+                        log.error(
+                            "Scheduler HMAC verification failed for %s: "
+                            "signature file missing or unreadable",
+                            chat_id,
+                        )
+                        log.warning(
+                            "AUDIT: scheduler_integrity_fail chat_id=%s "
+                            "reason=missing_signature_file",
+                            chat_id,
+                        )
+                        return
+                    if not verify_payload(secret, raw.encode("utf-8"), stored_sig):
+                        log.error(
+                            "Scheduler HMAC verification failed for %s: "
+                            "signature mismatch — possible tampering",
+                            chat_id,
+                        )
+                        log.warning(
+                            "AUDIT: scheduler_integrity_fail chat_id=%s "
+                            "reason=signature_mismatch",
+                            chat_id,
+                        )
+                        return
                 self._tasks[chat_id] = json.loads(raw)
         except (JSONDecodeError, OSError) as exc:
             log.error("Failed to load scheduler tasks for %s: %s", chat_id, exc)
@@ -297,6 +354,14 @@ class TaskScheduler:
             if chat_dir.is_dir():
                 task_file = chat_dir / SCHEDULER_DIR / TASKS_FILE
                 if task_file.exists():
+                    try:
+                        _validate_chat_id(chat_dir.name)
+                    except ValueError:
+                        log.warning(
+                            "Skipping scheduler tasks for invalid chat_id=%r",
+                            chat_dir.name,
+                        )
+                        continue
                     await self._load(chat_dir.name)
 
     # ── scheduling logic ───────────────────────────────────────────────────
@@ -367,11 +432,20 @@ class TaskScheduler:
         Uses exponential backoff with jitter. Only retries on transient
         errors (timeouts, connection failures, rate limits). Permanent
         failures (authentication, invalid prompt) fail immediately.
+
+        The prompt is signed with HMAC-SHA256 (when a secret is configured)
+        and the signature is passed to the callback for integrity verification.
         """
+        # Sign the prompt so the callback can verify it wasn't tampered with.
+        prompt_hmac: str | None = None
+        secret = get_scheduler_secret()
+        if secret:
+            prompt_hmac = sign_payload(secret, prompt.encode("utf-8"))
+
         delay = SCHEDULER_RETRY_INITIAL_DELAY
         for attempt in range(SCHEDULER_MAX_RETRIES + 1):
             try:
-                return await self._on_trigger(chat_id, prompt)  # type: ignore[misc]
+                return await self._on_trigger(chat_id, prompt, prompt_hmac)  # type: ignore[misc]
             except Exception as exc:
                 if not is_transient_error(exc):
                     raise
@@ -513,6 +587,15 @@ class TaskScheduler:
                         return_exceptions=True,
                     )
                     for i, result in enumerate(results):
+                        if isinstance(result, BaseException) and not isinstance(result, Exception):
+                            cid, t = due_tasks[i]
+                            log.critical(
+                                "Scheduled task %s raised BaseException: %s",
+                                t.get("task_id"),
+                                result,
+                                exc_info=(type(result), result, result.__traceback__),
+                            )
+                            raise result
                         if isinstance(result, Exception):
                             cid, t = due_tasks[i]
                             log.error(
