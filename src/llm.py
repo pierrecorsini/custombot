@@ -38,6 +38,7 @@ from src.constants import (
 )
 
 from src.core.errors import NonCriticalCategory, log_noncritical
+from src.core.stream_accumulator import StreamAccumulator
 from src.exceptions import ConfigurationError, ErrorCode, LLMError
 from src.llm_error_classifier import classify_llm_error
 from src.llm_provider import TokenUsage
@@ -386,22 +387,17 @@ class LLMClient:
         """Stream an LLM response, forwarding text deltas via *on_chunk*.
 
         Uses ``stream=True`` to receive token-by-token deltas.  The full
-        response is accumulated and returned as a normal
-        :class:`ChatCompletion` so callers can inspect ``finish_reason``,
-        ``tool_calls``, and ``usage`` exactly like :meth:`chat`.
-
-        The ``on_chunk`` coroutine is called with each accumulated text
-        segment once it exceeds ``STREAM_MIN_CHUNK_CHARS`` characters.
-        This batches small deltas to avoid excessive channel sends.
-
-        Falls back to non-streaming :meth:`chat` when the circuit breaker
-        is open or when the provider is known not to support streaming.
+        response is accumulated via :class:`StreamAccumulator` and returned
+        as a normal :class:`ChatCompletion` so callers can inspect
+        ``finish_reason``, ``tool_calls``, and ``usage`` exactly like
+        :meth:`chat`.
 
         Args:
             messages: Conversation history for the LLM.
             tools: Optional tool definitions.
             timeout: Optional per-request timeout.
             on_chunk: Async callback receiving partial text chunks.
+            chat_id: Optional chat ID for per-chat token tracking.
 
         Returns:
             Fully assembled :class:`ChatCompletion` (identical shape to
@@ -427,138 +423,37 @@ class LLMClient:
             len(messages),
         )
 
-        # Initialise accumulator variables before the try block so the finally
-        # block can safely reference them even if the stream fails immediately.
-        accumulated_content = ""
-        buffered_chunk = ""
-        finish_reason = None
-        tool_calls_data: list[dict] = []
-        usage_data = None
-        role = "assistant"
+        acc = StreamAccumulator(model=self._cfg.model, on_chunk=on_chunk)
 
         try:
             async with self._circuit_protected_call("LLM streaming"):
-
                 stream = await self._client.chat.completions.create(**kwargs)
                 async for event in stream:
-                    if not event.choices:
-                        # Usage-only event at the end of the stream
-                        if hasattr(event, "usage") and event.usage:
-                            usage_data = event.usage
-                        continue
+                    await acc.process_event(event)
 
-                    delta = event.choices[0].delta
+                await acc.flush_remaining()
+                self._track_stream_usage(acc.usage_data, chat_id)
 
-                    # Accumulate text content
-                    if delta.content:
-                        accumulated_content += delta.content
-                        buffered_chunk += delta.content
-
-                        # Flush buffered text to callback when large enough
-                        if on_chunk and len(buffered_chunk) >= STREAM_MIN_CHUNK_CHARS:
-                            await on_chunk(buffered_chunk)
-                            buffered_chunk = ""
-
-                    # Accumulate tool calls (arrive as fragments)
-                    if delta.tool_calls:
-                        for tc_delta in delta.tool_calls:
-                            idx = tc_delta.index
-                            # Extend list to fit index
-                            while len(tool_calls_data) <= idx:
-                                tool_calls_data.append(
-                                    {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
-                                )
-                            entry = tool_calls_data[idx]
-                            if tc_delta.id:
-                                entry["id"] = tc_delta.id
-                            if tc_delta.function:
-                                if tc_delta.function.name:
-                                    entry["function"]["name"] += tc_delta.function.name
-                                if tc_delta.function.arguments:
-                                    entry["function"]["arguments"] += tc_delta.function.arguments
-
-                    if delta.role:
-                        role = delta.role
-
-                    # Capture finish reason from the final event
-                    if event.choices[0].finish_reason:
-                        finish_reason = event.choices[0].finish_reason
-
-                    # Some providers send usage in the last event with choices
-                    if hasattr(event, "usage") and event.usage:
-                        usage_data = event.usage
-
-                # Flush any remaining buffered text
-                if on_chunk and buffered_chunk:
-                    await on_chunk(buffered_chunk)
-
-                # Track token usage from stream summary
-                if usage_data:
-                    if isinstance(usage_data, dict):
-                        prompt_tokens = usage_data.get("prompt_tokens") or 0
-                        completion_tokens = usage_data.get("completion_tokens") or 0
-                    else:
-                        prompt_tokens = usage_data.prompt_tokens or 0
-                        completion_tokens = usage_data.completion_tokens or 0
-                    if chat_id:
-                        self._token_usage.add_for_chat(chat_id, prompt_tokens, completion_tokens)
-                    else:
-                        self._token_usage.add(prompt_tokens, completion_tokens)
-
-                # Reconstruct a ChatCompletion object from accumulated data
-                from openai.types.chat import ChatCompletion as _CC
-                from openai.types.chat.chat_completion import Choice as _Choice
-                from openai.types.chat import ChatCompletionMessage as _Msg
-                from openai.types.chat.chat_completion_message_tool_call import (
-                    ChatCompletionMessageToolCall as _TCToolCall,
-                    Function as _TCFunction,
-                )
-
-                tc_objects = [
-                    _TCToolCall(
-                        id=tc["id"],
-                        type=tc["type"],
-                        function=_TCFunction(name=tc["function"]["name"], arguments=tc["function"]["arguments"]),
-                    )
-                    for tc in tool_calls_data
-                ]
-
-                message = _Msg(
-                    content=accumulated_content or None,
-                    role=role,  # type: ignore[arg-type]
-                    tool_calls=tc_objects or None,
-                    function_call=None,
-                )
-                choice = _Choice(
-                    index=0,
-                    message=message,
-                    finish_reason=finish_reason or "stop",
-                )
-
-                completion = _CC(
-                    id="stream",
-                    choices=[choice],
-                    created=0,
-                    model=self._cfg.model,
-                    object="chat.completion",
-                    usage=usage_data,
-                )
-
-                log.debug("LLM stream completed: finish_reason=%s", finish_reason)
+                completion = acc.build_completion()
+                log.debug("LLM stream completed: finish_reason=%s", acc.finish_reason)
                 return completion
         finally:
-            # Best-effort flush of any remaining buffered text so the user
-            # sees a partial response rather than nothing on stream failure.
-            if on_chunk and buffered_chunk:
-                try:
-                    await on_chunk(buffered_chunk)
-                    buffered_chunk = ""
-                except Exception:
-                    log_noncritical(
-                        NonCriticalCategory.STREAMING,
-                        "Best-effort chunk flush failed in stream finally block",
-                        logger=log,
-                    )
+            await acc.best_effort_flush()
+
+    def _track_stream_usage(self, usage_data: Any, chat_id: Optional[str]) -> None:
+        """Record token usage from stream summary data."""
+        if not usage_data:
+            return
+        if isinstance(usage_data, dict):
+            prompt_tokens = usage_data.get("prompt_tokens") or 0
+            completion_tokens = usage_data.get("completion_tokens") or 0
+        else:
+            prompt_tokens = usage_data.prompt_tokens or 0
+            completion_tokens = usage_data.completion_tokens or 0
+        if chat_id:
+            self._token_usage.add_for_chat(chat_id, prompt_tokens, completion_tokens)
+        else:
+            self._token_usage.add(prompt_tokens, completion_tokens)
 
     @property
     def circuit_breaker(self) -> CircuitBreaker:
