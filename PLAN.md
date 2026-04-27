@@ -92,7 +92,7 @@
 ### DevOps & CI/CD
 
 - [x] Sync `requirements.txt` with `pyproject.toml` — `msgpack~=1.1.0` is declared in `pyproject.toml` dependencies but missing from `requirements.txt`; since the Dockerfile installs from `requirements.txt`, the msgpack package is absent in production images; either sync both files or switch the Dockerfile to install from `pyproject.toml` via `pip install .`
-- [ ] Add pip cache and vulnerability database caching to CI — the security scanning job (`pip-audit`) re-downloads the OSV vulnerability database on every run; cache `~/.cache/pip-audit` and `~/.cache/pip` across runs to cut CI time by ~30-60s per workflow
+- [x] Add pip cache and vulnerability database caching to CI — the security scanning job (`pip-audit`) re-downloads the OSV vulnerability database on every run; cache `~/.cache/pip-audit` and `~/.cache/pip` across runs to cut CI time by ~30-60s per workflow
 - [ ] Add CI step to verify `requirements.txt` and `pyproject.toml` are in sync — the two files maintain the same dependency list independently with no validation; add a CI job that parses both and asserts their dependency sets match (name + version constraint), preventing silent drift
 
 ### Documentation & Observability
