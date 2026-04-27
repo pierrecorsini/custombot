@@ -81,7 +81,7 @@
 - [x] Add security-focused tests for the shell skill (`src/skills/builtin/shell.py`) — the shell skill executes arbitrary commands and is the highest-risk attack surface; test the denylist/allowlist enforcement, command injection patterns (pipe chains, backticks, environment variable expansion), timeout handling, and output truncation
 - [x] Fix `MockChatCompletion.usage` class-level mutable dict in `conftest.py` — line 109 defines `usage` as a class variable (shared across instances), causing potential test pollution if tests mutate it; move to `__init__` alongside `self.choices` so each instance gets its own copy
 - [x] Add benchmark regression tests and integrate into CI — `tests/unit/bench_serialization.py` exists but isn't gated in CI; add `pytest-benchmark` fixtures for critical paths (routing match, embedding cache lookup, JSONL message write, context assembly) and a CI job that fails on >10% regression from a stored baseline
-- [ ] Add tests for channel input validation (`src/channels/validation.py`) — the module sanitizes incoming message fields (sender_id, chat_id, message_id lengths and formats) but has no dedicated test file; add boundary tests for max-length enforcement, special character handling, and the interaction with `MAX_MESSAGE_LENGTH`
+- [x] Add tests for channel input validation (`src/channels/validation.py`) — the module sanitizes incoming message fields (sender_id, chat_id, message_id lengths and formats) but has no dedicated test file; add boundary tests for max-length enforcement, special character handling, and the interaction with `MAX_MESSAGE_LENGTH`
 
 ### Security
 
