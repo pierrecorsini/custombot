@@ -492,14 +492,9 @@ class Database:
         workspace_root = self._dir.parent
         instructions_dir = workspace_root / "instructions"
         template_instructions = Path(__file__).parent.parent / "templates" / "instructions"
-        if template_instructions.is_dir():
-            instructions_dir.mkdir(parents=True, exist_ok=True)
-            for template_file in template_instructions.iterdir():
-                if template_file.is_file():
-                    target = instructions_dir / template_file.name
-                    if not target.exists():
-                        shutil.copy2(template_file, target)
-                        log.info("Seeded instruction template: %s", target.name)
+        await asyncio.to_thread(
+            self._seed_instruction_templates, template_instructions, instructions_dir,
+        )
 
         # Load message ID index (delegated to MessageStore)
         await self._message_store.ensure_message_index()
@@ -533,6 +528,21 @@ class Database:
         self._file_pool.close_all()
         self._read_pool.close_all()
         self._initialized = False
+
+    @staticmethod
+    def _seed_instruction_templates(
+        template_instructions: Path, instructions_dir: Path,
+    ) -> None:
+        """Copy instruction templates to workspace (runs off the event loop)."""
+        if not template_instructions.is_dir():
+            return
+        instructions_dir.mkdir(parents=True, exist_ok=True)
+        for template_file in template_instructions.iterdir():
+            if template_file.is_file():
+                target = instructions_dir / template_file.name
+                if not target.exists():
+                    shutil.copy2(template_file, target)
+                    log.info("Seeded instruction template: %s", target.name)
 
     async def __aenter__(self) -> "Database":
         await self.connect()
