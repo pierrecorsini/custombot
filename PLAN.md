@@ -87,7 +87,7 @@
 
 - [x] Replace hardcoded `api_key="sk-no-key"` sentinel in `LLMClient.__init__` — line 82 falls back to `"sk-no-key"` when no API key is configured, which could accidentally authenticate against providers that accept any non-empty key; use `"not-configured"` or raise a clear `ConfigurationError` at construction time for providers requiring authentication
 - [x] Add `format: "uri"` validation enforcement in `config_schema.py` — the JSON Schema declares `format: "uri"` for `base_url` but the hand-rolled validator doesn't enforce it (no `format` validation); either add RFC 3986 URI validation for `base_url` or replace the custom validator with the `jsonschema` library for proper spec compliance
-- [ ] Add embedding model reachability check to `--diagnose` command — the diagnostic command checks LLM connectivity, workspace integrity, and disk space but doesn't probe the embedding model separately; a misconfigured `embedding_model` or unreachable embeddings endpoint would only surface when users invoke vector memory skills, not at startup diagnostic time
+- [x] Add embedding model reachability check to `--diagnose` command — the diagnostic command checks LLM connectivity, workspace integrity, and disk space but doesn't probe the embedding model separately; a misconfigured `embedding_model` or unreachable embeddings endpoint would only surface when users invoke vector memory skills, not at startup diagnostic time
 
 ### DevOps & CI/CD
 

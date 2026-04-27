@@ -285,6 +285,79 @@ async def check_llm_connectivity(config_path: Path) -> CheckResult:
             await client.close()
 
 
+async def check_embedding_model(config_path: Path) -> CheckResult:
+    """Test embedding API reachability with a single embedding call."""
+    try:
+        from src.config import load_config
+
+        cfg = load_config(config_path)
+    except Exception as exc:
+        return CheckResult(
+            name="Embedding model",
+            passed=False,
+            message=f"Cannot load config: {exc}",
+        )
+
+    api_key = os.environ.get("OPENAI_API_KEY", cfg.llm.api_key)
+    base_url = os.environ.get("OPENAI_BASE_URL", cfg.llm.base_url)
+
+    if not api_key or api_key.startswith("sk-your"):
+        return CheckResult(
+            name="Embedding model",
+            passed=False,
+            message="Skipped — no valid API key",
+        )
+
+    import time
+
+    from openai import AsyncOpenAI
+
+    client = None
+    start = time.perf_counter()
+    try:
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        response = await asyncio.wait_for(
+            client.embeddings.create(
+                model=cfg.llm.embedding_model,
+                input="health",
+            ),
+            timeout=10.0,
+        )
+        latency_ms = (time.perf_counter() - start) * 1000
+        dims = len(response.data[0].embedding) if response.data else 0
+        return CheckResult(
+            name="Embedding model",
+            passed=True,
+            message=f"Embedding API reachable (model={cfg.llm.embedding_model}, dims={dims})",
+            details={"latency_ms": round(latency_ms, 2), "dimensions": dims},
+        )
+    except TimeoutError:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return CheckResult(
+            name="Embedding model",
+            passed=False,
+            message="Embedding API timeout after 10s",
+            details={"latency_ms": round(latency_ms, 2)},
+        )
+    except Exception as exc:
+        latency_ms = (time.perf_counter() - start) * 1000
+        error_msg = str(exc).lower()
+        if "401" in error_msg or "unauthorized" in error_msg or "invalid" in error_msg:
+            return CheckResult(
+                name="Embedding model",
+                passed=False,
+                message="Invalid API credentials",
+            )
+        return CheckResult(
+            name="Embedding model",
+            passed=False,
+            message=f"Failed: {type(exc).__name__}",
+        )
+    finally:
+        if client is not None:
+            await client.close()
+
+
 def check_workspace_dir(config_path: Path) -> CheckResult:
     """Check workspace directory exists and has expected structure."""
     workspace = Path(WORKSPACE_DIR)
@@ -469,6 +542,7 @@ async def run_diagnose(config_path: Path) -> DiagnoseReport:
 
     # Async checks
     report.checks.append(await check_llm_connectivity(config_path))
+    report.checks.append(await check_embedding_model(config_path))
 
     return report
 
