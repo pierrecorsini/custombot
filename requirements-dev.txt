@@ -13,5 +13,8 @@ ruff==0.15.12
 # Property-based testing
 hypothesis==6.152.3
 
+# Benchmark regression testing
+pytest-benchmark==4.0.0
+
 # Security auditing
 pip-audit==2.10.0

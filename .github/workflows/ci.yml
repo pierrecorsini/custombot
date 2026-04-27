@@ -241,6 +241,58 @@ jobs:
         run: pip-audit --desc
 
   # ---------------------------------------------------------------------------
+  # Benchmark regression gate.
+  # Runs pytest-benchmark against critical hot paths and fails on >10%
+  # regression from a stored baseline.  On the first run (no baseline) the
+  # job autosaves a new baseline for future comparisons.
+  # ---------------------------------------------------------------------------
+  benchmark:
+    name: Benchmark Regression
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Restore benchmark baseline
+        uses: actions/cache@v4
+        with:
+          path: .benchmarks
+          key: bench-baseline-${{ runner.os }}-py3.11
+          restore-keys: |
+            bench-baseline-${{ runner.os }}-py3.11
+
+      - name: Run benchmarks
+        run: |
+          pytest tests/unit/bench_regression.py \
+            --benchmark-only \
+            --benchmark-disable-gc \
+            --benchmark-autosave \
+            --benchmark-sort=mean \
+            --benchmark-compare-fail=mean:10% \
+            -v
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: .benchmarks/
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
   # Docker image vulnerability scanning with Trivy.
   # Builds the production image and scans it for OS and library CVEs.
   # Non-blocking initially — once baseline is established, remove
