@@ -105,17 +105,47 @@ class BuilderContext:
 
     def to_bot_components(self) -> BotComponents:
         """Build the immutable result from the populated state."""
+        self._validate_required()
+        # Asserts for type-narrowing (validated above).
+        assert self.bot is not None
+        assert self.db is not None
+        assert self.project_store is not None
+        assert self.token_usage is not None
+        assert self.message_queue is not None
+        assert self.llm is not None
+        assert self.dedup is not None
         return BotComponents(
-            bot=self.bot,  # type: ignore[arg-type]
-            db=self.db,  # type: ignore[arg-type]
+            bot=self.bot,
+            db=self.db,
             vector_memory=self.vector_memory,
-            project_store=self.project_store,  # type: ignore[arg-type]
-            token_usage=self.token_usage,  # type: ignore[arg-type]
-            message_queue=self.message_queue,  # type: ignore[arg-type]
-            llm=self.llm,  # type: ignore[arg-type]
-            dedup=self.dedup,  # type: ignore[arg-type]
+            project_store=self.project_store,
+            token_usage=self.token_usage,
+            message_queue=self.message_queue,
+            llm=self.llm,
+            dedup=self.dedup,
             component_durations=self.component_durations,
         )
+
+    def _validate_required(self) -> None:
+        """Raise if any required component was not populated by a step."""
+        missing = [
+            name
+            for name, val in (
+                ("bot", self.bot),
+                ("db", self.db),
+                ("project_store", self.project_store),
+                ("token_usage", self.token_usage),
+                ("message_queue", self.message_queue),
+                ("llm", self.llm),
+                ("dedup", self.dedup),
+            )
+            if val is None
+        ]
+        if missing:
+            raise RuntimeError(
+                f"BuilderContext incomplete — step(s) did not populate: "
+                f"{', '.join(missing)}"
+            )
 
 
 class BuilderStepFactory(Protocol):
