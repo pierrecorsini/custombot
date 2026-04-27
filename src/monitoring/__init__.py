@@ -59,6 +59,23 @@ from src.monitoring.workspace_monitor import (
     reset_global_workspace_monitor,
 )
 
+# Tracing exports
+from src.monitoring.tracing import (
+    Span,
+    context_assembly_span,
+    get_tracer,
+    get_tracing_status,
+    is_tracing_available,
+    llm_call_span,
+    message_pipeline_span,
+    react_loop_span,
+    record_exception_safe,
+    reset_tracer,
+    set_correlation_id_on_span,
+    skill_execution_span,
+    tool_calls_span,
+)
+
 # Performance metrics exports
 from src.monitoring.performance import (
     DEFAULT_METRICS_LOG_INTERVAL,
@@ -111,4 +128,18 @@ __all__ = [
     "check_workspace_health",
     "get_global_workspace_monitor",
     "reset_global_workspace_monitor",
+    # Tracing
+    "Span",
+    "get_tracer",
+    "get_tracing_status",
+    "is_tracing_available",
+    "reset_tracer",
+    "message_pipeline_span",
+    "react_loop_span",
+    "llm_call_span",
+    "skill_execution_span",
+    "tool_calls_span",
+    "context_assembly_span",
+    "set_correlation_id_on_span",
+    "record_exception_safe",
 ]

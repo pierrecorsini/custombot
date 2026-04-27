@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
+    from opentelemetry.trace import Span as OTelSpan
+
 log = logging.getLogger(__name__)
 
 # ── Availability flag ────────────────────────────────────────────────────
@@ -90,6 +92,15 @@ class _NoOpSpan:
 
     def __exit__(self, *args: object) -> None:
         pass
+
+
+# Type alias for span annotations.  Type checkers resolve this to the
+# ``OTelSpan | _NoOpSpan`` union (via the ``TYPE_CHECKING`` override below);
+# at runtime it is simply ``_NoOpSpan`` so the name is always importable.
+if TYPE_CHECKING:
+    Span = OTelSpan | _NoOpSpan  # type: ignore[assignment]
+else:
+    Span = _NoOpSpan
 
 
 class _NoOpTracer:
@@ -242,7 +253,7 @@ async def message_pipeline_span(
     message_id: str | None = None,
     sender_id: str | None = None,
     channel_type: str | None = None,
-) -> AsyncIterator[Any]:
+) -> AsyncIterator[Span]:
     """Top-level span covering the full message pipeline execution."""
     tracer = get_tracer()
     attrs: dict[str, Any] = {
@@ -275,7 +286,7 @@ def react_loop_span(
     chat_id: str,
     iteration: int,
     max_iterations: int,
-) -> Iterator[Any]:
+) -> Iterator[Span]:
     """Span for a single ReAct loop iteration."""
     tracer = get_tracer()
     attrs: dict[str, Any] = {
@@ -293,7 +304,7 @@ def llm_call_span(
     iteration: int,
     use_streaming: bool,
     tool_count: int | None = None,
-) -> Iterator[Any]:
+) -> Iterator[Span]:
     """Span for an LLM chat-completion call."""
     tracer = get_tracer()
     attrs: dict[str, Any] = {
@@ -315,7 +326,7 @@ def skill_execution_span(
     skill_name: str,
     chat_id: str,
     args_size_bytes: int | None = None,
-) -> Iterator[Any]:
+) -> Iterator[Span]:
     """Span for a single skill execution."""
     tracer = get_tracer()
     attrs: dict[str, Any] = {
@@ -333,7 +344,7 @@ def skill_execution_span(
 def tool_calls_span(
     chat_id: str,
     call_count: int,
-) -> Iterator[Any]:
+) -> Iterator[Span]:
     """Span for a batch of tool calls within one ReAct iteration."""
     tracer = get_tracer()
     attrs: dict[str, Any] = {
@@ -345,7 +356,7 @@ def tool_calls_span(
 
 
 @contextmanager
-def context_assembly_span(chat_id: str, rule_id: str | None = None) -> Iterator[Any]:
+def context_assembly_span(chat_id: str, rule_id: str | None = None) -> Iterator[Span]:
     """Span for the context-assembly phase."""
     tracer = get_tracer()
     attrs: dict[str, Any] = {"messaging.destination": chat_id}
@@ -358,13 +369,13 @@ def context_assembly_span(chat_id: str, rule_id: str | None = None) -> Iterator[
         yield span
 
 
-def set_correlation_id_on_span(span: Any, correlation_id: str | None) -> None:
+def set_correlation_id_on_span(span: Span, correlation_id: str | None) -> None:
     """Attach the application-level correlation ID to the current span."""
     if correlation_id and span.is_recording():
         span.set_attribute("custombot.correlation_id", correlation_id)
 
 
-def record_exception_safe(span: Any, exc: BaseException) -> None:
+def record_exception_safe(span: Span, exc: BaseException) -> None:
     """Record an exception on the span if OTel is available."""
     if _OTEL_AVAILABLE and span.is_recording():
         span.record_exception(exc)
