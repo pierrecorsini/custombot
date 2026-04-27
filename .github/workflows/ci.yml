@@ -71,7 +71,7 @@ jobs:
           pip install mypy==1.20.2
 
       - name: mypy --strict on critical modules
-        run: mypy --strict src/core src/bot.py
+        run: mypy --strict src/core src/bot.py src/channels src/security src/monitoring
 
   test:
     name: Test (Python ${{ matrix.python-version }})
