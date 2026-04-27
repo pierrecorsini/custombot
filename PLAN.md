@@ -24,7 +24,7 @@
 
 ## Test Coverage & Quality
 
-- [ ] Increase coverage from 75% to 80% — target uncovered branches in `bot.py` `_react_loop` error paths, `db.py` `_save_chats` edge cases, and `routing.py` regex compilation failures
+- [x] Increase coverage from 75% to 80% — target uncovered branches in `bot.py` `_react_loop` error paths, `db.py` `_save_chats` edge cases, and `routing.py` regex compilation failures
 - [ ] Add property-based tests for `RoutingEngine.match_with_rule()` — use Hypothesis to generate random `MatchingContext`/`RoutingRule` combinations and verify rule precedence, wildcard matching, and cache correctness invariants
 - [ ] Add integration test for the full ReAct loop with tool calls — current tests mock the LLM; add a test that exercises the real loop with a stub LLM returning tool_calls followed by a final response, verifying message persistence and tool-log assembly end-to-end
 - [ ] Add chaos/stress test for concurrent message processing — verify that per-chat locks, the dedup service, and the message queue behave correctly under concurrent load (10+ chats, interleaved messages, forced failures)
