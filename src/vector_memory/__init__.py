@@ -1,5 +1,5 @@
 """
-vector_memory.py — SQLite-vec backed semantic memory store.
+vector_memory — SQLite-vec backed semantic memory store.
 
 Stores text snippets with their embeddings in a shared SQLite database.
 Each entry is tagged with a chat_id for per-chat isolation via metadata
@@ -19,7 +19,6 @@ import asyncio
 import hashlib
 import logging
 import sqlite3
-import struct
 import threading
 import time
 from pathlib import Path
@@ -34,44 +33,12 @@ from src.exceptions import DiskSpaceError
 from src.utils import BoundedOrderedDict, DEFAULT_MIN_DISK_SPACE, check_disk_space
 from src.utils.locking import ThreadLock
 from src.utils.retry import retry_with_backoff
-
-# TTL for the embedding API health cache.  When the embeddings endpoint is
-# confirmed unreachable, subsequent calls short-circuit for this many seconds
-# instead of waiting for the full API timeout on every attempt.
-_EMBED_HEALTH_TTL = 60.0
-
-# Debounce window for coalescing individual save() embedding requests into a
-# single batched API call.  Saves that arrive within this window are grouped
-# together, reducing per-request API overhead.
-_BATCH_DEBOUNCE = 0.05  # 50 ms
-# Safety cap on the number of texts sent in a single batched API call.
-_MAX_BATCH_SIZE = 64
-# Maximum number of queued retry entries.  Oldest entries are dropped when
-# the cap is exceeded to prevent unbounded memory growth during extended outages.
-_MAX_RETRY_QUEUE_SIZE = 1000
-
-log = logging.getLogger(__name__)
+from src.vector_memory._utils import _serialize_f32, _track_embed_cache_event
+from src.vector_memory.batch import BatchEmbedMixin
+from src.vector_memory.health import EmbeddingHealthMixin
 
 # Bump this when the schema changes.  Migrations in _MIGRATIONS below will
 # bring older databases up to this version incrementally.
-
-
-def _track_embed_cache_event(hit: bool) -> None:
-    """Report an embedding cache hit or miss to the performance metrics collector."""
-    try:
-        from src.monitoring.performance import get_metrics_collector
-
-        if hit:
-            get_metrics_collector().track_embed_cache_hit()
-        else:
-            get_metrics_collector().track_embed_cache_miss()
-    except Exception:
-        log_noncritical(
-            NonCriticalCategory.CACHE_TRACKING,
-            "Failed to track embedding cache %s event",
-            "hit" if hit else "miss",
-            logger=log,
-        )
 _SCHEMA_VERSION = 1
 
 # Ordered list of migrations: (target_version, [sql, ...]).
@@ -82,13 +49,10 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
     # (2, ["ALTER TABLE memory_entries ADD COLUMN tags TEXT DEFAULT ''"]),
 ]
 
-
-def _serialize_f32(vector: list[float]) -> bytes:
-    """Pack a float32 list into binary BLOB for sqlite-vec."""
-    return struct.pack("%sf" % len(vector), *vector)
+log = logging.getLogger(__name__)
 
 
-class VectorMemory(SqliteHelper):
+class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
     """Manages a shared SQLite-vec database for semantic memory."""
 
     def __init__(
@@ -340,110 +304,6 @@ class VectorMemory(SqliteHelper):
         )
         self._db.commit()
 
-    # ── embedding API health ────────────────────────────────────────────
-
-    def _check_embedding_api_health(self) -> None:
-        """Raise immediately if the embedding API was recently confirmed down.
-
-        When the API is unreachable every ``_embed()`` / ``_embed_batch()``
-        call would block for the full HTTP timeout (potentially 120 s).  After
-        a failure we record the timestamp and short-circuit subsequent calls
-        for ``_EMBED_HEALTH_TTL`` seconds so the event loop is not blocked.
-        """
-        with self._cache_lock:
-            if self._embed_api_healthy:
-                return
-            elapsed = time.monotonic() - self._embed_api_last_check
-            if elapsed >= _EMBED_HEALTH_TTL:
-                # TTL expired — allow a fresh probe
-                return
-        remaining = round(_EMBED_HEALTH_TTL - elapsed, 1)
-        raise ConnectionError(
-            f"Embedding API unreachable (last failure {elapsed:.0f}s ago, "
-            f"retrying in ~{remaining}s)"
-        )
-
-    def _mark_embedding_api_healthy(self) -> None:
-        """Record that the embedding API is reachable."""
-        with self._cache_lock:
-            self._embed_api_healthy = True
-            self._embed_api_last_check = time.monotonic()
-
-    def _mark_embedding_api_unhealthy(self) -> None:
-        """Record that the embedding API is unreachable."""
-        with self._cache_lock:
-            self._embed_api_healthy = False
-            self._embed_api_last_check = time.monotonic()
-
-    def _queue_for_retry(
-        self, chat_id: str, text: str, category: str,
-    ) -> None:
-        """Queue a failed save for later retry, capping queue size."""
-        if len(self._pending_retries) >= _MAX_RETRY_QUEUE_SIZE:
-            dropped = self._pending_retries.pop(0)
-            log.warning(
-                "Retry queue full (%d); dropping oldest save for chat=%s",
-                _MAX_RETRY_QUEUE_SIZE, dropped[0],
-            )
-        self._pending_retries.append((chat_id, text, category, time.time()))
-        log.debug(
-            "Queued vector memory save for retry (chat=%s, queue=%d)",
-            chat_id, len(self._pending_retries),
-        )
-
-    async def _retry_pending_saves(self) -> None:
-        """Attempt to flush queued retry saves when the embedding API recovers.
-
-        Called opportunistically after a successful save.  If the first retry
-        fails, the remaining items are re-queued and we back off until the
-        next successful operation.
-        """
-        if not self._pending_retries:
-            return
-
-        # Only attempt retries if the health TTL has expired or API is healthy
-        with self._cache_lock:
-            if not self._embed_api_healthy:
-                elapsed = time.monotonic() - self._embed_api_last_check
-                if elapsed < _EMBED_HEALTH_TTL:
-                    return  # Still in cooldown
-
-        items = self._pending_retries[:]
-        self._pending_retries.clear()
-        retried = 0
-        for chat_id, text, category, queued_at in items:
-            try:
-                self._check_embedding_api_health()
-                embedding = await self._batched_embed(text)
-                now = time.time()
-                await asyncio.to_thread(
-                    self._insert_entry, chat_id, text, category, now, embedding,
-                )
-                retried += 1
-                age = round(now - queued_at, 1)
-                log.debug(
-                    "Retry-saved vector memory chat=%s (queued %.1fs ago)",
-                    chat_id, age,
-                )
-            except Exception as exc:
-                log_noncritical(
-                    NonCriticalCategory.EMBEDDING,
-                    "Retry still failing for vector memory save chat=%s: %s",
-                    chat_id, exc,
-                    logger=log,
-                )
-                # Re-queue this item plus all remaining; API still down
-                remaining = [(chat_id, text, category, queued_at)]
-                idx = items.index((chat_id, text, category, queued_at))
-                remaining.extend(items[idx + 1:])
-                self._pending_retries.extend(remaining)
-                break
-
-        if retried:
-            log.info(
-                "Flushed %d/%d queued vector memory saves", retried, len(items),
-            )
-
     # ── embeddings ──────────────────────────────────────────────────────
 
     @retry_with_backoff(max_retries=2, initial_delay=0.5)
@@ -500,157 +360,6 @@ class VectorMemory(SqliteHelper):
             # Clean up in-flight entry
             self._inflight.pop(cache_key, None)
 
-    # ── save-batch coalescing ────────────────────────────────────────────
-
-    async def _batched_embed(self, text: str) -> list[float]:
-        """Queue *text* for a batched embedding call with debounce coalescing.
-
-        If other ``save()`` calls arrive within ``_BATCH_DEBOUNCE`` seconds
-        they are grouped into a single ``_embed_batch()`` call, reducing
-        per-request API overhead.
-        """
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[list[float]] = loop.create_future()
-        self._pending_saves.append((text, future))
-
-        if self._flush_handle is None:
-            self._flush_handle = loop.call_later(
-                _BATCH_DEBOUNCE,
-                lambda: asyncio.ensure_future(self._flush_pending()),
-            )
-
-        return await future
-
-    async def _flush_pending(self) -> None:
-        """Drain the pending-save queue through ``_embed_batch()``.
-
-        Large batches are chunked to respect ``_MAX_BATCH_SIZE`` so that a
-        single oversized API call doesn't exceed provider limits.
-        """
-        self._flush_handle = None
-
-        if not self._pending_saves:
-            return
-
-        # Atomically drain — new saves arriving during flush go into a fresh list
-        pending = self._pending_saves
-        self._pending_saves = []
-
-        # Process in chunks capped at _MAX_BATCH_SIZE to avoid oversized API calls
-        for start in range(0, len(pending), _MAX_BATCH_SIZE):
-            chunk = pending[start : start + _MAX_BATCH_SIZE]
-            texts = [text for text, _ in chunk]
-            try:
-                embeddings = await self._embed_batch(texts)
-                for (_, future), embedding in zip(chunk, embeddings):
-                    if not future.done():
-                        future.set_result(embedding)
-            except Exception as exc:
-                for _, future in chunk:
-                    if not future.done():
-                        future.set_exception(exc)
-
-    # ── batch embeddings ─────────────────────────────────────────────────
-
-    @retry_with_backoff(max_retries=2, initial_delay=0.5)
-    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts in a single API call.
-
-        Checks the LRU cache and in-flight deduplication for each text first.
-        Only texts that miss both caches are sent to the API in one batched
-        ``embeddings.create(input=[...])`` call, significantly reducing API
-        overhead when multiple memories are saved in quick succession.
-
-        Returns embeddings in the same order as *texts*.
-        """
-        results: list[list[float] | None] = [None] * len(texts)
-        # Map: position index → cache_key for texts that need an API call
-        pending: dict[int, str] = {}
-        # Map: cache_key → position indices (a single text may appear multiple times)
-        key_to_indices: dict[str, list[int]] = {}
-
-        for i, text in enumerate(texts):
-            cache_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-            # 1. Check LRU cache
-            with self._cache_lock:
-                if cache_key in self._embed_cache:
-                    results[i] = self._embed_cache[cache_key]
-                    _track_embed_cache_event(hit=True)
-                    continue
-
-            # 2. Check in-flight dedup
-            if cache_key in self._inflight:
-                results[i] = await self._inflight[cache_key]
-                continue
-
-            # 3. Needs API call — track by cache key
-            _track_embed_cache_event(hit=False)
-            pending[i] = cache_key
-            key_to_indices.setdefault(cache_key, []).append(i)
-
-        if not pending:
-            # All embeddings resolved from cache / in-flight
-            return results  # type: ignore[return-value]
-
-        # 4. Build the batch input: one entry per unique cache key
-        unique_keys = list(key_to_indices.keys())
-        # Use the first position index for each unique key to get the text
-        unique_texts = [texts[key_to_indices[k][0]] for k in unique_keys]
-        # Map position in batch request → cache_key
-        key_for_batch_pos: dict[int, str] = {
-            batch_pos: key for batch_pos, key in enumerate(unique_keys)
-        }
-
-        # Register in-flight futures for deduplication of concurrent callers
-        loop = asyncio.get_running_loop()
-        futures: dict[str, asyncio.Future[list[float]]] = {}
-        for key in unique_keys:
-            future: asyncio.Future[list[float]] = loop.create_future()
-            self._inflight[key] = future
-            futures[key] = future
-
-        try:
-            resp = await self._client.embeddings.create(
-                model=self._embedding_model,
-                input=unique_texts,
-            )
-
-            if len(resp.data) != len(unique_texts):
-                raise ValueError(
-                    f"Embeddings API returned {len(resp.data)} results "
-                    f"for {len(unique_texts)} inputs — possible content "
-                    f"filtering or API error"
-                )
-
-            self._mark_embedding_api_healthy()
-
-            # Populate cache and resolve futures
-            for batch_pos, item in enumerate(resp.data):
-                embedding = item.embedding
-                cache_key = key_for_batch_pos[batch_pos]
-
-                with self._cache_lock:
-                    self._embed_cache[cache_key] = embedding
-
-                futures[cache_key].set_result(embedding)
-
-            # Fill results for all pending positions
-            for idx, cache_key in pending.items():
-                results[idx] = self._embed_cache[cache_key]  # already populated above
-
-            return results  # type: ignore[return-value]
-        except Exception as exc:
-            self._mark_embedding_api_unhealthy()
-            # Propagate error to all waiters
-            for key, future in futures.items():
-                if not future.done():
-                    future.set_exception(exc)
-            raise
-        finally:
-            for key in unique_keys:
-                self._inflight.pop(key, None)
-
     # ── public API ──────────────────────────────────────────────────────
 
     async def save(self, chat_id: str, text: str, category: str = "") -> int:
@@ -686,8 +395,7 @@ class VectorMemory(SqliteHelper):
             self._mark_embedding_api_unhealthy()
             log_noncritical(
                 NonCriticalCategory.EMBEDDING,
-                "Embedding API unreachable during save(chat=%s); queuing for retry: %s",
-                chat_id, exc,
+                f"Embedding API unreachable during save(chat={chat_id}); queuing for retry: {exc}",
                 logger=log,
                 level=logging.WARNING,
             )
@@ -734,9 +442,8 @@ class VectorMemory(SqliteHelper):
             self._mark_embedding_api_unhealthy()
             log_noncritical(
                 NonCriticalCategory.EMBEDDING,
-                "Embedding API unreachable during save_batch(chat=%s, %d items); "
-                "queuing for retry: %s",
-                chat_id, len(items), exc,
+                f"Embedding API unreachable during save_batch(chat={chat_id}, "
+                f"{len(items)} items); queuing for retry: {exc}",
                 logger=log,
                 level=logging.WARNING,
             )
@@ -819,8 +526,7 @@ class VectorMemory(SqliteHelper):
             self._mark_embedding_api_unhealthy()
             log_noncritical(
                 NonCriticalCategory.EMBEDDING,
-                "Embedding API unreachable during search(chat=%s); returning empty: %s",
-                chat_id, exc,
+                f"Embedding API unreachable during search(chat={chat_id}); returning empty: {exc}",
                 logger=log,
                 level=logging.WARNING,
             )
@@ -890,3 +596,6 @@ class VectorMemory(SqliteHelper):
             (chat_id,),
         ).fetchone()
         return row[0] if row else 0
+
+
+__all__ = ["VectorMemory", "_serialize_f32"]

@@ -35,6 +35,7 @@ import pytest
 sqlite_vec = pytest.importorskip("sqlite_vec")
 
 from src.utils import BoundedOrderedDict
+from src.utils.locking import ThreadLock
 from src.vector_memory import VectorMemory, _serialize_f32
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,7 +376,7 @@ class TestSave:
         vm.close()
 
         assert captured_kwargs["model"] == EMBEDDING_MODEL
-        assert captured_kwargs["input"] == "my input text"
+        assert captured_kwargs["input"] == ["my input text"]
 
     @pytest.mark.asyncio
     async def test_multiple_chats_separate_entries(self, vm: VectorMemory):
@@ -494,8 +495,8 @@ class TestSearch:
         await vm.search("chat1", "search query", limit=5)
         vm.close()
 
-        # First call for save, second call for search query
-        assert "stored text" in embed_calls
+        # First call for save (batched — list), second call for search query (direct — string)
+        assert ["stored text"] in embed_calls
         assert "search query" in embed_calls
 
 
@@ -875,10 +876,10 @@ class TestSaveBatchCoalescing:
     @pytest.mark.asyncio
     async def test_sequential_saves_use_separate_calls(self, db_path: Path):
         """Saves spaced beyond the debounce window should use separate API calls."""
-        import src.vector_memory as vm_mod
+        import src.vector_memory.batch as batch_mod
 
-        original_debounce = vm_mod._BATCH_DEBOUNCE
-        vm_mod._BATCH_DEBOUNCE = 0.0  # Instant flush — no coalescing
+        original_debounce = batch_mod._BATCH_DEBOUNCE
+        batch_mod._BATCH_DEBOUNCE = 0.0  # Instant flush — no coalescing
 
         try:
             call_count = 0
@@ -901,7 +902,7 @@ class TestSaveBatchCoalescing:
             assert call_count == 2
             vm.close()
         finally:
-            vm_mod._BATCH_DEBOUNCE = original_debounce
+            batch_mod._BATCH_DEBOUNCE = original_debounce
 
     @pytest.mark.asyncio
     async def test_cached_text_skips_api_in_batch(self, db_path: Path):
@@ -932,17 +933,20 @@ class TestSaveBatchCoalescing:
 
     @pytest.mark.asyncio
     async def test_flush_propagates_errors(self, db_path: Path):
-        """If the embedding API fails, all coalesced saves should receive the error."""
+        """If the embedding API fails, all coalesced saves should return -1 and queue for retry."""
         client = _make_mock_client()
         client.embeddings.create = AsyncMock(side_effect=RuntimeError("API down"))
 
         vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
         vm.connect()
 
-        with pytest.raises(RuntimeError, match="API down"):
-            await asyncio.gather(*[
-                vm.save("chat1", f"text {i}") for i in range(3)
-            ])
+        results = await asyncio.gather(*[
+            vm.save("chat1", f"text {i}") for i in range(3)
+        ])
+
+        # All saves should gracefully return -1 (queued for retry)
+        assert all(r == -1 for r in results)
+        assert len(vm._pending_retries) == 3
 
         vm.close()
 
@@ -1009,10 +1013,10 @@ class TestSaveBatchCoalescing:
     async def test_large_batch_respects_max_batch_size(self, db_path: Path):
         """When more saves arrive than _MAX_BATCH_SIZE, they are chunked into
         multiple API calls and all complete successfully."""
-        import src.vector_memory as vm_mod
+        import src.vector_memory.batch as batch_mod
 
-        original_max = vm_mod._MAX_BATCH_SIZE
-        vm_mod._MAX_BATCH_SIZE = 5  # Small limit for testing
+        original_max = batch_mod._MAX_BATCH_SIZE
+        batch_mod._MAX_BATCH_SIZE = 5  # Small limit for testing
 
         try:
             call_count = 0
@@ -1043,7 +1047,7 @@ class TestSaveBatchCoalescing:
             assert vm.count("chat1") == 12
             vm.close()
         finally:
-            vm_mod._MAX_BATCH_SIZE = original_max
+            batch_mod._MAX_BATCH_SIZE = original_max
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1103,15 +1107,15 @@ class TestThreadSafety:
     def test_lock_is_held_during_list_recent(self, vm: VectorMemory):
         """list_recent no longer needs a lock — WAL allows concurrent reads."""
         # Verify the write lock exists for write operations
-        assert isinstance(vm._write_lock, type(threading.Lock()))
+        assert isinstance(vm._write_lock, ThreadLock)
 
     def test_lock_is_held_during_delete(self, vm: VectorMemory):
         """delete acquires the write lock."""
-        assert isinstance(vm._write_lock, type(threading.Lock()))
+        assert isinstance(vm._write_lock, ThreadLock)
 
     def test_lock_is_held_during_count(self, vm: VectorMemory):
         """count no longer needs a lock — WAL allows concurrent reads."""
-        assert isinstance(vm._write_lock, type(threading.Lock()))
+        assert isinstance(vm._write_lock, ThreadLock)
 
     def test_concurrent_reads_and_writes(self, vm: VectorMemory):
         """Concurrent reads should not block under WAL mode."""

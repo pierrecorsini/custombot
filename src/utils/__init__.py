@@ -353,6 +353,10 @@ class BoundedOrderedDict(Generic[_K, _V]):
             return default
         return entry[0]
 
+    def keys(self):
+        """Return a view of the cache keys (delegates to internal OrderedDict)."""
+        return self._cache.keys()
+
     def clear(self) -> None:
         """Remove all entries."""
         self._cache.clear()
