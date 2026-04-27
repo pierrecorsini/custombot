@@ -4,10 +4,12 @@ main.py — CLI entry point for custombot.
 Commands:
   start     Start the bot (connects to WhatsApp via neonize)
   options   Open configuration editor (TUI)
+  diagnose  Run diagnostic checks and output a report
 
 Usage:
   python main.py start     # Start the bot
   python main.py options   # Edit configuration
+  python main.py diagnose  # Troubleshoot common issues
 """
 
 from __future__ import annotations
@@ -301,6 +303,32 @@ def start(ctx, config_path, health_port, log_llm, safe_mode):
         sys.exit(1)
     except KeyboardInterrupt:
         pass
+
+
+@cli.command()
+@click.option(
+    "--config",
+    "config_path",
+    default=str(CONFIG_PATH),
+    show_default=True,
+    help="Path to config.json",
+)
+def diagnose(config_path):
+    """
+    Run diagnostic checks and output a structured report.
+
+    Checks config validity, LLM connectivity, workspace integrity,
+    disk space, and dependency status. Useful for troubleshooting
+    before filing issues.
+
+    \b
+    Examples:
+        python main.py diagnose
+        python main.py diagnose --config my_config.json
+    """
+    from src.diagnose import run_diagnose_cli
+
+    run_diagnose_cli(Path(config_path))
 
 
 @cli.command()
