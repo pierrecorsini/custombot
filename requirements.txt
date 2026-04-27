@@ -23,6 +23,9 @@ sqlite-vec~=0.1.7
 # Fast JSON serialization (hot-path acceleration)
 orjson~=3.10.0
 
+# Binary serialization for tool-call result payloads
+msgpack~=1.1.0
+
 # OpenTelemetry tracing (optional — graceful degradation if not installed)
 opentelemetry-api~=1.30.0
 opentelemetry-sdk~=1.30.0
