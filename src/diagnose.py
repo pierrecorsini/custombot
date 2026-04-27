@@ -479,6 +479,93 @@ def check_workspace_integrity(config_path: Path) -> CheckResult:
     )
 
 
+def check_orphaned_workspace_dirs(config_path: Path) -> CheckResult:
+    """Scan workspace/whatsapp_data/ for orphaned chat directories.
+
+    An orphaned directory is one where either:
+      - The ``.chat_id`` origin file is missing (incomplete workspace setup),
+      - The corresponding JSONL message file in ``.data/messages/`` is empty
+        or missing (crashed or interrupted session).
+
+    This runs purely against the filesystem — no Database connection needed.
+    """
+    workspace = Path(WORKSPACE_DIR)
+    whatsapp_data = workspace / "whatsapp_data"
+
+    if not workspace.exists() or not whatsapp_data.exists():
+        return CheckResult(
+            name="Orphaned workspace dirs",
+            passed=True,
+            message="Skipped — workspace or whatsapp_data/ not yet created",
+        )
+
+    messages_dir = workspace / ".data" / "messages"
+    orphans: list[str] = []
+    scanned = 0
+
+    try:
+        entries = list(whatsapp_data.iterdir())
+    except OSError as exc:
+        return CheckResult(
+            name="Orphaned workspace dirs",
+            passed=False,
+            message=f"Cannot scan whatsapp_data/: {exc}",
+        )
+
+    for entry in sorted(entries):
+        if not entry.is_dir():
+            continue
+
+        scanned += 1
+        dirname = entry.name
+        issues_for_dir: list[str] = []
+
+        # Check 1: .chat_id origin file must exist
+        origin_file = entry / ".chat_id"
+        if not origin_file.exists():
+            issues_for_dir.append("missing .chat_id")
+
+        # Check 2: Corresponding JSONL should exist and not be empty
+        jsonl_path = messages_dir / f"{dirname}.jsonl"
+        if not jsonl_path.exists():
+            issues_for_dir.append("no corresponding JSONL")
+        elif jsonl_path.stat().st_size == 0:
+            issues_for_dir.append("empty JSONL")
+
+        if issues_for_dir:
+            detail = f"{dirname} ({', '.join(issues_for_dir)})"
+            orphans.append(detail)
+
+    if scanned == 0:
+        return CheckResult(
+            name="Orphaned workspace dirs",
+            passed=True,
+            message="No chat directories to scan",
+        )
+
+    if orphans:
+        # Report as passed=false when orphans are found (actionable)
+        # but cap details at 10 to avoid overwhelming output
+        shown = orphans[:10]
+        return CheckResult(
+            name="Orphaned workspace dirs",
+            passed=False,
+            message=f"{len(orphans)} orphaned director{'y' if len(orphans) == 1 else 'ies'} found "
+                    f"(scanned {scanned})",
+            details={
+                "orphans": shown,
+                "total_orphans": len(orphans),
+                "hint": "Orphaned directories can be safely deleted if the session is no longer needed",
+            },
+        )
+
+    return CheckResult(
+        name="Orphaned workspace dirs",
+        passed=True,
+        message=f"All {scanned} director{'y' if scanned == 1 else 'ies'} healthy",
+    )
+
+
 def check_python_env(config_path: Path) -> CheckResult:
     """Check Python version and platform info."""
     py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -533,6 +620,7 @@ async def run_diagnose(config_path: Path) -> DiagnoseReport:
         check_workspace_dir,
         check_disk_space,
         check_workspace_integrity,
+        check_orphaned_workspace_dirs,
         check_python_env,
         check_dependencies,
     ]

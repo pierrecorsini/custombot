@@ -98,4 +98,4 @@
 ### Documentation & Observability
 
 - [x] Surface VectorMemory degradation status in the health endpoint — the `/health` endpoint reports LLM circuit breaker state and DB write breaker state but doesn't include VectorMemory health (embedding API reachability, retry queue depth); add a `vector_memory` component to the health response with `DEGRADED` status when the embedding API is unreachable or the retry queue exceeds 50% capacity
-- [ ] Add `--diagnose` check for orphaned workspace directories — workspace directories whose `.chat_id` origin files are missing or whose corresponding JSONL is empty indicate crashed or interrupted sessions; the diagnose command should scan `workspace/whatsapp_data/` for orphaned dirs and report them for cleanup
+- [x] Add `--diagnose` check for orphaned workspace directories — workspace directories whose `.chat_id` origin files are missing or whose corresponding JSONL is empty indicate crashed or interrupted sessions; the diagnose command should scan `workspace/whatsapp_data/` for orphaned dirs and report them for cleanup
