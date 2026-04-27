@@ -40,7 +40,7 @@
 
 - [x] Add `ruff` to `pre-commit` hooks — the `.pre-commit-config.yaml` exists but doesn't include `ruff`; adding it would catch lint/format issues before they reach CI
 - [x] Add Docker image vulnerability scanning to CI — the `Dockerfile` is well-structured but the `security` job only runs `pip-audit` on requirements; add `trivy` or `grype` scanning of the built image
-- [ ] Pin `requirements-dev.txt` dependencies — `pytest>=8.0.0` and `mypy>=1.13.0` are unpinned upper bounds; pin exact versions for reproducible CI builds and add `dependabot` coverage for dev dependencies
+- [x] Pin `requirements-dev.txt` dependencies — `pytest>=8.0.0` and `mypy>=1.13.0` are unpinned upper bounds; pin exact versions for reproducible CI builds and add `dependabot` coverage for dev dependencies
 - [ ] Add `mypy --strict` coverage expansion — the CI already has an opt-in strict job for `src/core` and `src/bot.py`; expand to `src/channels/`, `src/security/`, and `src/monitoring/` incrementally
 
 ## Documentation & Observability

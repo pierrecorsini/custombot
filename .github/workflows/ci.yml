@@ -22,7 +22,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install ruff
-        run: pip install ruff>=0.8.0
+        run: pip install ruff==0.15.12
 
       - name: Ruff lint
         run: ruff check src tests main.py
@@ -45,7 +45,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install mypy>=1.13.0
+          pip install mypy==1.20.2
 
       - name: mypy
         run: mypy src main.py
@@ -68,7 +68,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install mypy>=1.13.0
+          pip install mypy==1.20.2
 
       - name: mypy --strict on critical modules
         run: mypy --strict src/core src/bot.py
@@ -104,7 +104,7 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
-          pip install hypothesis>=6.100.0
+          pip install hypothesis==6.152.3
 
       # Coverage Threshold Roadmap:
       #   Phase 9-11: 60% (baseline — locked)
@@ -157,7 +157,7 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
-          pip install hypothesis>=6.100.0
+          pip install hypothesis==6.152.3
 
       - name: Run tests (verbose, JUnit output)
         run: |
@@ -235,7 +235,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install pip-audit
-        run: pip install pip-audit>=0.3.0
+        run: pip install pip-audit==2.10.0
 
       - name: Run pip-audit
         run: pip-audit --desc
