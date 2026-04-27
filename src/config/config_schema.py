@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 from typing import Any, List, Optional, TypedDict
+from urllib.parse import urlparse
 
 # Schema version for future compatibility
 SCHEMA_VERSION = "1.0"
@@ -287,6 +288,15 @@ def _validate_type(value: Any, expected_type: str, path: str) -> Optional[Valida
     return None
 
 
+def _is_valid_uri(value: str) -> bool:
+    """Check whether a string is a valid RFC 3986 URI with a scheme and host."""
+    try:
+        result = urlparse(value)
+        return bool(result.scheme and result.netloc)
+    except Exception:
+        return False
+
+
 def _validate_string_constraints(value: str, schema: dict, path: str) -> List[ValidationError]:
     """Validate string-specific constraints."""
     errors: List[ValidationError] = []
@@ -311,6 +321,16 @@ def _validate_string_constraints(value: str, schema: dict, path: str) -> List[Va
                     "value": value,
                 }
             )
+
+    fmt = schema.get("format")
+    if fmt == "uri" and value and not _is_valid_uri(value):
+        errors.append(
+            {
+                "path": path,
+                "message": f"String is not a valid URI (must include scheme and host, e.g. 'https://api.example.com')",
+                "value": value,
+            }
+        )
 
     return errors
 
