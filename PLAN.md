@@ -28,7 +28,7 @@
 - [x] Add property-based tests for `RoutingEngine.match_with_rule()` — use Hypothesis to generate random `MatchingContext`/`RoutingRule` combinations and verify rule precedence, wildcard matching, and cache correctness invariants
 - [x] Add integration test for the full ReAct loop with tool calls — current tests mock the LLM; add a test that exercises the real loop with a stub LLM returning tool_calls followed by a final response, verifying message persistence and tool-log assembly end-to-end
 - [x] Add chaos/stress test for concurrent message processing — verify that per-chat locks, the dedup service, and the message queue behave correctly under concurrent load (10+ chats, interleaved messages, forced failures)
-- [ ] Add test matrix for Python 3.13 compatibility — CI marks 3.13 as `experimental: true` but doesn't track specific failures; add a dedicated test job that reports 3.13-specific issues
+- [x] Add test matrix for Python 3.13 compatibility — CI marks 3.13 as `experimental: true` but doesn't track specific failures; add a dedicated test job that reports 3.13-specific issues
 
 ## Security
 

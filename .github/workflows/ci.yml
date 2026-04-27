@@ -79,8 +79,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-        experimental: [false, false, true]
+        include:
+          - python-version: "3.11"
+            experimental: false
+          - python-version: "3.12"
+            experimental: false
+          - python-version: "3.13"
+            experimental: true
 
     continue-on-error: ${{ matrix.experimental }}
 
@@ -126,6 +131,93 @@ jobs:
         with:
           name: coverage-report
           path: coverage.xml
+
+  # Dedicated Python 3.13 compatibility report.
+  # Runs the full test suite with verbose output, JUnit XML, and uploads a
+  # structured compatibility report so 3.13-specific failures are tracked
+  # independently of the main matrix job (which is continue-on-error).
+  test-3.13-compat:
+    name: Python 3.13 Compatibility Report
+    runs-on: ubuntu-latest
+    # Non-blocking — the purpose is to surface 3.13-specific issues, not gate PRs.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install hypothesis>=6.100.0
+
+      - name: Run tests (verbose, JUnit output)
+        run: |
+          pytest \
+            -n auto \
+            --cov=src \
+            --cov=main \
+            --cov-report=term-missing \
+            --tb=long \
+            -v \
+            --junitxml=test-results-3.13.xml \
+            2>&1 | tee test-output-3.13.txt
+
+      - name: Generate compatibility summary
+        if: always()
+        run: |
+          echo "## Python 3.13 Compatibility Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Count total / passed / failed / errored / skipped from JUnit XML
+          if [ -f test-results-3.13.xml ]; then
+            TOTAL=$(grep -oP 'tests="\K[^"]+' test-results-3.13.xml | head -1)
+            FAILURES=$(grep -oP 'failures="\K[^"]+' test-results-3.13.xml | head -1)
+            ERRORS=$(grep -oP 'errors="\K[^"]+' test-results-3.13.xml | head -1)
+            SKIPPED=$(grep -oP 'skipped="\K[^"]+' test-results-3.13.xml | head -1)
+            PASSED=$((TOTAL - FAILURES - ERRORS - SKIPPED))
+
+            echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Total  | ${TOTAL:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Passed | ${PASSED:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Failed | ${FAILURES:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Errors | ${ERRORS:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Skipped| ${SKIPPED:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            # List 3.13-specific failures
+            FAILED_TESTS=$(grep -oP 'classname="[^"]*".*name="[^"]*"' test-results-3.13.xml 2>/dev/null || true)
+            if [ -n "$FAILED_TESTS" ]; then
+              echo "### Failed Tests" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              grep -B1 'failure ' test-results-3.13.xml | grep 'testcase' | sed 's/.*name="\([^"]*\)".*/\1/' >> "$GITHUB_STEP_SUMMARY" || true
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "⚠️ No JUnit results file found — tests may have failed to initialise." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_This job runs on every PR to track Python 3.13 compatibility. \`continue-on-error: true\` means it won't block merges._" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload 3.13 test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-3.13-compatibility-report
+          path: |
+            test-results-3.13.xml
+            test-output-3.13.txt
+          retention-days: 30
 
   security:
     name: Dependency Vulnerability Scan
