@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 from openai import AsyncOpenAI
@@ -36,7 +38,7 @@ from src.constants import (
 )
 
 from src.core.errors import NonCriticalCategory, log_noncritical
-from src.exceptions import ErrorCode, LLMError
+from src.exceptions import ConfigurationError, ErrorCode, LLMError
 from src.llm_error_classifier import classify_llm_error
 from src.llm_provider import TokenUsage
 from src.logging import get_correlation_id
@@ -79,7 +81,7 @@ class LLMClient:
             ),
         )
         self._client = AsyncOpenAI(
-            api_key=cfg.api_key or "sk-no-key",  # some local servers ignore it
+            api_key=self._resolve_api_key(cfg),
             base_url=cfg.base_url,
             http_client=self._http_client,
         )
@@ -100,6 +102,24 @@ class LLMClient:
             "LLM client initialized: model=%s, base_url=%s",
             cfg.model,
             sanitize_url_for_logging(cfg.base_url),
+        )
+
+    # ── api key resolution ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _resolve_api_key(cfg: LLMConfig) -> str:
+        """Return the API key or raise for remote providers missing one."""
+        if cfg.api_key:
+            return cfg.api_key
+
+        parsed = urlparse(cfg.base_url)
+        hostname = (parsed.hostname or "").lower()
+        if hostname in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+            return "not-configured"  # local servers typically ignore the key
+
+        raise ConfigurationError(
+            "API key is required for remote LLM providers",
+            config_key="llm.api_key",
         )
 
     # ── health probe ────────────────────────────────────────────────────────
@@ -140,6 +160,52 @@ class LLMClient:
                     )
         finally:
             self._health_probe_task = None
+
+    # ── circuit breaker + error classification context manager ─────────────
+
+    @asynccontextmanager
+    async def _circuit_protected_call(self, label: str = "LLM") -> AsyncIterator[None]:
+        """Context manager that handles circuit breaker checks and error classification.
+
+        Eliminates the duplicated try/except pattern in :meth:`chat` and
+        :meth:`chat_stream`.  On entry it checks the circuit breaker; on
+        normal exit it records success; on exception it records failure,
+        classifies the error, logs it, tracks it in metrics, and re-raises.
+
+        Args:
+            label: Prefix for log messages (e.g. ``"LLM"`` or ``"LLM streaming"``).
+        """
+        if await self._circuit_breaker.is_open():
+            raise LLMError(
+                message="LLM provider is temporarily unavailable (circuit breaker open)",
+                suggestion="Please try again in a minute",
+                error_code=ErrorCode.LLM_CIRCUIT_BREAKER_OPEN,
+            )
+        try:
+            yield
+            await self._circuit_breaker.record_success()
+        except LLMError:
+            await self._circuit_breaker.record_failure()
+            self._ensure_health_probe()
+            raise
+        except Exception as exc:
+            await self._circuit_breaker.record_failure()
+            self._ensure_health_probe()
+            classified = classify_llm_error(exc)
+            log.error(
+                "%s error classified: %s → %s (code=%s)",
+                label,
+                type(exc).__name__,
+                classified.message,
+                classified.error_code.value,
+                exc_info=True,
+            )
+            from src.monitoring.performance import get_metrics_collector
+
+            get_metrics_collector().track_llm_error(
+                classified.error_code.value if classified.error_code else "ERR_9000"
+            )
+            raise classified from exc
 
     # ── public API ─────────────────────────────────────────────────────────
 
@@ -306,37 +372,8 @@ class LLMClient:
             chat_id: Optional chat ID for per-chat token tracking.
         """
         # Circuit breaker: reject immediately when provider is down
-        if await self._circuit_breaker.is_open():
-            raise LLMError(
-                message="LLM provider is temporarily unavailable (circuit breaker open)",
-                suggestion="Please try again in a minute",
-                error_code=ErrorCode.LLM_CIRCUIT_BREAKER_OPEN,
-            )
-
-        try:
-            result = await self._raw_chat(messages, tools=tools, timeout=timeout, chat_id=chat_id)
-            await self._circuit_breaker.record_success()
-            return result
-        except LLMError:
-            await self._circuit_breaker.record_failure()
-            self._ensure_health_probe()
-            raise
-        except Exception as exc:
-            await self._circuit_breaker.record_failure()
-            self._ensure_health_probe()
-            classified = classify_llm_error(exc)
-            log.error(
-                "LLM error classified: %s → %s (code=%s)",
-                type(exc).__name__,
-                classified.message,
-                classified.error_code.value,
-                exc_info=True,
-            )
-            from src.monitoring.performance import get_metrics_collector
-            get_metrics_collector().track_llm_error(
-                classified.error_code.value if classified.error_code else "ERR_9000"
-            )
-            raise classified from exc
+        async with self._circuit_protected_call("LLM"):
+            return await self._raw_chat(messages, tools=tools, timeout=timeout, chat_id=chat_id)
 
     async def chat_stream(
         self,
@@ -370,14 +407,6 @@ class LLMClient:
             Fully assembled :class:`ChatCompletion` (identical shape to
             the non-streaming :meth:`chat` return value).
         """
-        # Circuit breaker: reject immediately when provider is down
-        if await self._circuit_breaker.is_open():
-            raise LLMError(
-                message="LLM provider is temporarily unavailable (circuit breaker open)",
-                suggestion="Please try again in a minute",
-                error_code=ErrorCode.LLM_CIRCUIT_BREAKER_OPEN,
-            )
-
         kwargs: Dict[str, Any] = {
             "model": self._cfg.model,
             "messages": messages,
@@ -408,136 +437,115 @@ class LLMClient:
         role = "assistant"
 
         try:
+            async with self._circuit_protected_call("LLM streaming"):
 
-            stream = await self._client.chat.completions.create(**kwargs)
-            async for event in stream:
-                if not event.choices:
-                    # Usage-only event at the end of the stream
+                stream = await self._client.chat.completions.create(**kwargs)
+                async for event in stream:
+                    if not event.choices:
+                        # Usage-only event at the end of the stream
+                        if hasattr(event, "usage") and event.usage:
+                            usage_data = event.usage
+                        continue
+
+                    delta = event.choices[0].delta
+
+                    # Accumulate text content
+                    if delta.content:
+                        accumulated_content += delta.content
+                        buffered_chunk += delta.content
+
+                        # Flush buffered text to callback when large enough
+                        if on_chunk and len(buffered_chunk) >= STREAM_MIN_CHUNK_CHARS:
+                            await on_chunk(buffered_chunk)
+                            buffered_chunk = ""
+
+                    # Accumulate tool calls (arrive as fragments)
+                    if delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            idx = tc_delta.index
+                            # Extend list to fit index
+                            while len(tool_calls_data) <= idx:
+                                tool_calls_data.append(
+                                    {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                                )
+                            entry = tool_calls_data[idx]
+                            if tc_delta.id:
+                                entry["id"] = tc_delta.id
+                            if tc_delta.function:
+                                if tc_delta.function.name:
+                                    entry["function"]["name"] += tc_delta.function.name
+                                if tc_delta.function.arguments:
+                                    entry["function"]["arguments"] += tc_delta.function.arguments
+
+                    if delta.role:
+                        role = delta.role
+
+                    # Capture finish reason from the final event
+                    if event.choices[0].finish_reason:
+                        finish_reason = event.choices[0].finish_reason
+
+                    # Some providers send usage in the last event with choices
                     if hasattr(event, "usage") and event.usage:
                         usage_data = event.usage
-                    continue
 
-                delta = event.choices[0].delta
+                # Flush any remaining buffered text
+                if on_chunk and buffered_chunk:
+                    await on_chunk(buffered_chunk)
 
-                # Accumulate text content
-                if delta.content:
-                    accumulated_content += delta.content
-                    buffered_chunk += delta.content
+                # Track token usage from stream summary
+                if usage_data:
+                    if isinstance(usage_data, dict):
+                        prompt_tokens = usage_data.get("prompt_tokens") or 0
+                        completion_tokens = usage_data.get("completion_tokens") or 0
+                    else:
+                        prompt_tokens = usage_data.prompt_tokens or 0
+                        completion_tokens = usage_data.completion_tokens or 0
+                    if chat_id:
+                        self._token_usage.add_for_chat(chat_id, prompt_tokens, completion_tokens)
+                    else:
+                        self._token_usage.add(prompt_tokens, completion_tokens)
 
-                    # Flush buffered text to callback when large enough
-                    if on_chunk and len(buffered_chunk) >= STREAM_MIN_CHUNK_CHARS:
-                        await on_chunk(buffered_chunk)
-                        buffered_chunk = ""
-
-                # Accumulate tool calls (arrive as fragments)
-                if delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        idx = tc_delta.index
-                        # Extend list to fit index
-                        while len(tool_calls_data) <= idx:
-                            tool_calls_data.append(
-                                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
-                            )
-                        entry = tool_calls_data[idx]
-                        if tc_delta.id:
-                            entry["id"] = tc_delta.id
-                        if tc_delta.function:
-                            if tc_delta.function.name:
-                                entry["function"]["name"] += tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                entry["function"]["arguments"] += tc_delta.function.arguments
-
-                if delta.role:
-                    role = delta.role
-
-                # Capture finish reason from the final event
-                if event.choices[0].finish_reason:
-                    finish_reason = event.choices[0].finish_reason
-
-                # Some providers send usage in the last event with choices
-                if hasattr(event, "usage") and event.usage:
-                    usage_data = event.usage
-
-            # Flush any remaining buffered text
-            if on_chunk and buffered_chunk:
-                await on_chunk(buffered_chunk)
-
-            # Track token usage from stream summary
-            if usage_data:
-                if isinstance(usage_data, dict):
-                    prompt_tokens = usage_data.get("prompt_tokens") or 0
-                    completion_tokens = usage_data.get("completion_tokens") or 0
-                else:
-                    prompt_tokens = usage_data.prompt_tokens or 0
-                    completion_tokens = usage_data.completion_tokens or 0
-                if chat_id:
-                    self._token_usage.add_for_chat(chat_id, prompt_tokens, completion_tokens)
-                else:
-                    self._token_usage.add(prompt_tokens, completion_tokens)
-
-            # Reconstruct a ChatCompletion object from accumulated data
-            from openai.types.chat import ChatCompletion as _CC
-            from openai.types.chat.chat_completion import Choice as _Choice
-            from openai.types.chat import ChatCompletionMessage as _Msg
-            from openai.types.chat.chat_completion_message_tool_call import (
-                ChatCompletionMessageToolCall as _TCToolCall,
-                Function as _TCFunction,
-            )
-
-            tc_objects = [
-                _TCToolCall(
-                    id=tc["id"],
-                    type=tc["type"],
-                    function=_TCFunction(name=tc["function"]["name"], arguments=tc["function"]["arguments"]),
+                # Reconstruct a ChatCompletion object from accumulated data
+                from openai.types.chat import ChatCompletion as _CC
+                from openai.types.chat.chat_completion import Choice as _Choice
+                from openai.types.chat import ChatCompletionMessage as _Msg
+                from openai.types.chat.chat_completion_message_tool_call import (
+                    ChatCompletionMessageToolCall as _TCToolCall,
+                    Function as _TCFunction,
                 )
-                for tc in tool_calls_data
-            ]
 
-            message = _Msg(
-                content=accumulated_content or None,
-                role=role,  # type: ignore[arg-type]
-                tool_calls=tc_objects or None,
-                function_call=None,
-            )
-            choice = _Choice(
-                index=0,
-                message=message,
-                finish_reason=finish_reason or "stop",
-            )
+                tc_objects = [
+                    _TCToolCall(
+                        id=tc["id"],
+                        type=tc["type"],
+                        function=_TCFunction(name=tc["function"]["name"], arguments=tc["function"]["arguments"]),
+                    )
+                    for tc in tool_calls_data
+                ]
 
-            completion = _CC(
-                id="stream",
-                choices=[choice],
-                created=0,
-                model=self._cfg.model,
-                object="chat.completion",
-                usage=usage_data,
-            )
+                message = _Msg(
+                    content=accumulated_content or None,
+                    role=role,  # type: ignore[arg-type]
+                    tool_calls=tc_objects or None,
+                    function_call=None,
+                )
+                choice = _Choice(
+                    index=0,
+                    message=message,
+                    finish_reason=finish_reason or "stop",
+                )
 
-            await self._circuit_breaker.record_success()
-            log.debug("LLM stream completed: finish_reason=%s", finish_reason)
-            return completion
+                completion = _CC(
+                    id="stream",
+                    choices=[choice],
+                    created=0,
+                    model=self._cfg.model,
+                    object="chat.completion",
+                    usage=usage_data,
+                )
 
-        except LLMError:
-            await self._circuit_breaker.record_failure()
-            self._ensure_health_probe()
-            raise
-        except Exception as exc:
-            await self._circuit_breaker.record_failure()
-            self._ensure_health_probe()
-            classified = classify_llm_error(exc)
-            log.error(
-                "LLM streaming error classified: %s → %s (code=%s)",
-                type(exc).__name__,
-                classified.message,
-                classified.error_code.value,
-                exc_info=True,
-            )
-            from src.monitoring.performance import get_metrics_collector
-            get_metrics_collector().track_llm_error(
-                classified.error_code.value if classified.error_code else "ERR_9000"
-            )
-            raise classified from exc
+                log.debug("LLM stream completed: finish_reason=%s", finish_reason)
+                return completion
         finally:
             # Best-effort flush of any remaining buffered text so the user
             # sees a partial response rather than nothing on stream failure.

@@ -313,10 +313,10 @@ class TestLLMClientInit:
         assert isinstance(client._http_client, httpx.AsyncClient)
 
     @patch("src.llm.AsyncOpenAI")
-    def test_uses_no_key_fallback_when_api_key_empty(self, mock_openai, valid_cfg_no_api_key):
+    def test_uses_not_configured_fallback_for_local_server(self, mock_openai, valid_cfg_no_api_key):
         client = LLMClient(valid_cfg_no_api_key)
         mock_openai.assert_called_once_with(
-            api_key="sk-no-key",
+            api_key="not-configured",
             base_url="http://localhost:11434/v1",
             http_client=client._http_client,
         )
@@ -326,6 +326,18 @@ class TestLLMClientInit:
         """Passing a non-LLMConfig object should raise ValueError."""
         with pytest.raises(ValueError, match="Invalid LLMConfig"):
             LLMClient("not a config")  # type: ignore[arg-type]
+
+    def test_raises_configuration_error_for_remote_without_api_key(self):
+        """Remote provider with no API key should raise ConfigurationError."""
+        from src.exceptions import ConfigurationError
+
+        remote_cfg = LLMConfig(
+            model="gpt-4",
+            base_url="https://api.openai.com/v1",
+            api_key="",
+        )
+        with pytest.raises(ConfigurationError, match="API key is required"):
+            LLMClient(remote_cfg)
 
     @patch("src.llm.AsyncOpenAI")
     def test_raises_on_config_with_empty_model(self, mock_openai):
