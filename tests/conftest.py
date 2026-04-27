@@ -95,6 +95,11 @@ class MockChatCompletion:
 
     def __init__(self) -> None:
         self.choices = [self._make_choice()]
+        self.usage: Dict[str, int] = {
+            "prompt_tokens": 10,
+            "completion_tokens": 20,
+            "total_tokens": 30,
+        }
 
     @staticmethod
     def _make_choice() -> Any:
@@ -105,12 +110,6 @@ class MockChatCompletion:
         choice.finish_reason = "stop"
         choice.message = msg
         return choice
-
-    usage: Dict[str, int] = {
-        "prompt_tokens": 10,
-        "completion_tokens": 20,
-        "total_tokens": 30,
-    }
 
 
 @pytest.fixture
