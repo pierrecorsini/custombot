@@ -30,10 +30,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import shutil
 import time
-from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,7 +43,6 @@ from src.constants import (
     DB_WRITE_MAX_RETRIES,
     DB_WRITE_RETRY_INITIAL_DELAY,
     DEFAULT_DB_TIMEOUT,
-    MAX_CHAT_GENERATIONS,
     MAX_FILE_HANDLES,
     MAX_LRU_CACHE_SIZE,
     MAX_READ_FILE_HANDLES,
@@ -63,26 +60,21 @@ from src.db.db_integrity import (
     validate_checksum,
 )
 from src.db.db_utils import (
-    MAX_MESSAGE_ID_INDEX,
-    _build_jsonl_header,
     _db_log_extra,
-    _sanitize_name,
     _track_db_latency,
     _track_db_write_latency,
     _validate_chat_id,
 )
 from src.db.file_pool import FileHandlePool, ReadHandlePool
+from src.db.generations import GenerationCounter
 from src.db.message_store import MessageStore
-from src.core.errors import NonCriticalCategory, log_noncritical
-from src.exceptions import DatabaseError, DiskSpaceError, ErrorCode
+from src.db.migration import apply_jsonl_migrations, ensure_jsonl_schema
+from src.exceptions import DatabaseError, ErrorCode
 from src.utils import (
-    DEFAULT_MIN_DISK_SPACE,
     JsonParseMode,
     LRUDict,
     LRULockCache,
-    check_disk_space,
     json_dumps,
-    json_loads,
     safe_json_parse,
 )
 from src.utils.path import sanitize_path_component as _sanitize_chat_id_for_path
@@ -95,6 +87,7 @@ log = logging.getLogger(__name__)
 # Also re-export the type alias for legacy code that references the
 # internal _FileHandlePool name.
 from src.db.file_pool import FileHandlePool as _FileHandlePool  # noqa: F401
+from src.db.db_utils import _sanitize_name  # noqa: F401
 
 __all__ = [
     "ValidationResult",
@@ -108,10 +101,6 @@ __all__ = [
 
 
 # ── constants (module-level for backward compat) ──────────────────────────
-
-# JSONL schema version for forward-compatible message format changes.
-_JSONL_SCHEMA_VERSION = 1
-_JSONL_MIGRATIONS: list[tuple[int, list[Any]]] = []
 
 # Maximum messages that can be retrieved in a single query (memory safety)
 MAX_MESSAGE_HISTORY = 500
@@ -179,7 +168,7 @@ class Database:
         self._initialized = False
 
         # Per-chat generation counter for write-conflict detection.
-        self._chat_generations: OrderedDict[str, int] = OrderedDict()
+        self._generation_counter = GenerationCounter()
 
         # Optional vector memory store for embedding compression summaries.
         self._vector_memory: Any = None
@@ -519,7 +508,9 @@ class Database:
         if self._messages_dir.exists():
             for msg_file in self._messages_dir.glob("*.jsonl"):
                 try:
-                    await asyncio.to_thread(self._ensure_jsonl_schema, msg_file)
+                    await asyncio.to_thread(
+                        ensure_jsonl_schema, msg_file, self._file_pool.invalidate,
+                    )
                 except Exception as exc:
                     log.warning(
                         "Failed to migrate JSONL schema for %s: %s",
@@ -554,100 +545,6 @@ class Database:
         exc_tb: Any,
     ) -> None:
         await self.close()
-
-    # ── JSONL schema migration ──────────────────────────────────────────────
-
-    def _ensure_jsonl_schema(self, file_path: Path) -> None:
-        """Ensure a JSONL file has the current schema header."""
-        if not file_path.exists() or file_path.stat().st_size == 0:
-            return
-
-        with file_path.open("r", encoding="utf-8") as f:
-            first_line = f.readline().strip()
-
-        if not first_line:
-            return
-
-        try:
-            parsed = json_loads(first_line)
-        except Exception:
-            log_noncritical(
-                NonCriticalCategory.FILE_PARSING,
-                "Failed to parse JSONL header in %s",
-                logger=log,
-                extra={"file": str(file_path)},
-            )
-            return
-
-        if isinstance(parsed, dict) and parsed.get("type") == "header":
-            version = parsed.get("_version", 0)
-            if version < _JSONL_SCHEMA_VERSION:
-                self._apply_jsonl_migrations(file_path, version)
-            return
-
-        # No header — legacy file, prepend header
-        content = file_path.read_text(encoding="utf-8")
-        self._file_pool.invalidate(file_path)
-        header = _build_jsonl_header()
-        file_path.write_text(header + content, encoding="utf-8")
-        log.info(
-            "Added JSONL schema v%d header to %s",
-            _JSONL_SCHEMA_VERSION,
-            file_path.name,
-        )
-
-    def _apply_jsonl_migrations(self, file_path: Path, current_version: int) -> None:
-        """Apply incremental JSONL schema migrations."""
-        if not _JSONL_MIGRATIONS:
-            return
-
-        content = file_path.read_text(encoding="utf-8")
-        lines = content.splitlines()
-        migrated: list[str] = []
-        header_written = False
-
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                msg = json_loads(line)
-            except Exception:
-                log_noncritical(
-                    NonCriticalCategory.DB_OPERATION,
-                    "Skipping unparseable line during JSONL migration in %s",
-                    logger=log,
-                    extra={"file": str(file_path)},
-                )
-                migrated.append(line)
-                continue
-
-            if msg.get("type") == "header" and not header_written:
-                new_header = json_dumps(
-                    {"_version": _JSONL_SCHEMA_VERSION, "type": "header"}
-                )
-                migrated.append(new_header)
-                header_written = True
-                continue
-
-            for target_ver, fns in _JSONL_MIGRATIONS:
-                if current_version < target_ver:
-                    for fn in fns:
-                        msg = fn(msg)
-
-            migrated.append(json_dumps(msg, ensure_ascii=False))
-
-        if not header_written:
-            header = json_dumps({"_version": _JSONL_SCHEMA_VERSION, "type": "header"})
-            migrated.insert(0, header)
-
-        self._file_pool.invalidate(file_path)
-        file_path.write_text("\n".join(migrated) + "\n", encoding="utf-8")
-        log.info(
-            "Migrated JSONL schema v%d→v%d for %s",
-            current_version,
-            _JSONL_SCHEMA_VERSION,
-            file_path.name,
-        )
 
     # ── chats persistence ─────────────────────────────────────────────────
 
@@ -808,27 +705,33 @@ class Database:
 
     def get_generation(self, chat_id: str) -> int:
         """Return the current generation counter for a chat."""
-        return self._chat_generations.get(chat_id, 0)
+        return self._generation_counter.get(chat_id)
 
     def check_generation(self, chat_id: str, expected: int) -> bool:
         """Return True if the chat's generation still matches *expected*."""
-        return self._chat_generations.get(chat_id, 0) == expected
+        return self._generation_counter.check(chat_id, expected)
 
     def _bump_generation(self, chat_id: str) -> None:
         """Increment the generation counter after a successful write."""
-        self._chat_generations[chat_id] = self._chat_generations.get(chat_id, 0) + 1
-        self._chat_generations.move_to_end(chat_id)
+        self._generation_counter.bump(chat_id)
 
-        if len(self._chat_generations) > MAX_CHAT_GENERATIONS:
-            discard_count = MAX_CHAT_GENERATIONS // 4
-            for _ in range(discard_count):
-                self._chat_generations.popitem(last=False)
-            log.debug(
-                "Trimmed %d entries from _chat_generations (cap=%d)",
-                discard_count,
-                MAX_CHAT_GENERATIONS,
-                extra=_db_log_extra(),
-            )
+    # ── JSONL schema migration (delegates to migration module) ────────────
+
+    def _ensure_jsonl_schema(self, file_path: Path) -> None:
+        """Ensure a JSONL file has the current schema header.
+
+        Delegates to :func:`src.db.migration.ensure_jsonl_schema`.
+        """
+        ensure_jsonl_schema(file_path, invalidate_fn=self._file_pool.invalidate)
+
+    def _apply_jsonl_migrations(self, file_path: Path, current_version: int) -> None:
+        """Apply incremental JSONL schema migrations.
+
+        Delegates to :func:`src.db.migration.apply_jsonl_migrations`.
+        """
+        apply_jsonl_migrations(
+            file_path, current_version, invalidate_fn=self._file_pool.invalidate,
+        )
 
     # ── compression delegation ─────────────────────────────────────────────
 
@@ -885,6 +788,14 @@ class Database:
                 return results
             for msg_file in self._messages_dir.glob("*.jsonl"):
                 chat_id = msg_file.stem
+                try:
+                    _validate_chat_id(chat_id)
+                except ValueError:
+                    log.warning(
+                        "Skipping message file with invalid chat_id stem: %s",
+                        msg_file.name,
+                    )
+                    continue
                 results[chat_id] = await self.repair_message_file(chat_id, backup=True)
             return results
 
