@@ -1980,6 +1980,92 @@ class TestTokenUsageDoubleCountingRegression:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TokenUsage pre-computed leaderboard (PLAN Phase — get_top_chats optimisation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTokenUsageLeaderboard:
+    """Tests for the pre-computed leaderboard that backs get_top_chats().
+
+    The leaderboard is a bisect-sorted list of (total, chat_id) tuples
+    maintained incrementally in add_for_chat(), replacing the previous
+    O(n log n) full-sort on every get_top_chats() call.
+    """
+
+    def test_empty_get_top_chats(self):
+        usage = TokenUsage()
+        assert usage.get_top_chats() == []
+
+    def test_single_chat(self):
+        usage = TokenUsage()
+        usage.add_for_chat("c1", prompt=10, completion=20)
+        top = usage.get_top_chats()
+        assert len(top) == 1
+        assert top[0]["chat_id"] == "c1"
+        assert top[0]["total"] == 30
+
+    def test_multiple_chats_sorted_descending(self):
+        usage = TokenUsage()
+        usage.add_for_chat("low", prompt=1, completion=1)
+        usage.add_for_chat("mid", prompt=10, completion=10)
+        usage.add_for_chat("high", prompt=100, completion=100)
+        top = usage.get_top_chats()
+        assert [t["chat_id"] for t in top] == ["high", "mid", "low"]
+
+    def test_n_limits_results(self):
+        usage = TokenUsage()
+        for i in range(20):
+            usage.add_for_chat(f"c_{i:02d}", prompt=i, completion=0)
+        top = usage.get_top_chats(n=5)
+        assert len(top) == 5
+        # Highest total should be first (c_19 with total=19)
+        assert top[0]["chat_id"] == "c_19"
+        assert top[0]["total"] == 19
+
+    def test_update_existing_chat_reorders_leaderboard(self):
+        usage = TokenUsage()
+        usage.add_for_chat("a", prompt=5, completion=5)  # total=10
+        usage.add_for_chat("b", prompt=1, completion=1)  # total=2
+        assert usage.get_top_chats(1)[0]["chat_id"] == "a"
+
+        # Update "b" to overtake "a"
+        usage.add_for_chat("b", prompt=50, completion=50)  # total=102
+        top = usage.get_top_chats()
+        assert top[0]["chat_id"] == "b"
+        assert top[0]["total"] == 102
+
+    def test_leaderboard_consistent_with_per_chat(self):
+        """Leaderboard results must exactly match _per_chat data."""
+        usage = TokenUsage()
+        usage.add_for_chat("x", prompt=10, completion=20)
+        usage.add_for_chat("y", prompt=5, completion=5)
+        usage.add_for_chat("x", prompt=3, completion=7)  # x: total=40
+
+        top = usage.get_top_chats()
+        assert len(top) == 2
+        assert top[0] == {"chat_id": "x", "prompt": 13, "completion": 27, "total": 40}
+        assert top[1] == {"chat_id": "y", "prompt": 5, "completion": 5, "total": 10}
+
+    def test_leaderboard_no_duplicate_entries(self):
+        """Repeated updates must not leave duplicate entries in the leaderboard."""
+        usage = TokenUsage()
+        for _ in range(10):
+            usage.add_for_chat("solo", prompt=1, completion=1)
+        # Only one chat_id — leaderboard should have exactly one entry.
+        assert len(usage._leaderboard) == 1
+        assert usage.get_top_chats() == [
+            {"chat_id": "solo", "prompt": 10, "completion": 10, "total": 20},
+        ]
+
+    def test_add_only_does_not_affect_leaderboard(self):
+        """add() (no chat_id) must not touch the leaderboard."""
+        usage = TokenUsage()
+        usage.add(prompt=100, completion=200)
+        assert usage.get_top_chats() == []
+        assert usage.total_tokens == 300
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Health probe — health-check-driven LLM failover
 # ─────────────────────────────────────────────────────────────────────────────
 

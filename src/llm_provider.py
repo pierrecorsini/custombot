@@ -19,6 +19,7 @@ Usage::
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
@@ -54,6 +55,9 @@ class TokenUsage:
         default_factory=lambda: _make_per_chat_map(),
         repr=False,
     )
+    # Pre-sorted leaderboard: (total_tokens, chat_id) ascending.
+    # Updated incrementally in add_for_chat() via bisect — O(log n) search.
+    _leaderboard: list[tuple[int, str]] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> Dict[str, int]:
         """Convert to dictionary for serialization."""
@@ -80,6 +84,9 @@ class TokenUsage:
             self.total_tokens += prompt + completion
             self.request_count += 1
             if chat_id in self._per_chat:
+                # Remove stale leaderboard entry before updating total.
+                old_total = self._per_chat[chat_id]["total"]
+                _remove_leaderboard_entry(self._leaderboard, old_total, chat_id)
                 entry = self._per_chat[chat_id]
                 entry["prompt"] += prompt
                 entry["completion"] += completion
@@ -87,24 +94,32 @@ class TokenUsage:
                 # Move to end for LRU ordering
                 self._per_chat[chat_id] = entry
             else:
+                # Evict any stale leaderboard entries left by LRU eviction.
+                _purge_chat_from_leaderboard(self._leaderboard, chat_id)
                 self._per_chat[chat_id] = {
                     "prompt": prompt,
                     "completion": completion,
                     "total": prompt + completion,
                 }
+            # Insert updated entry — bisect maintains ascending order.
+            new_total = self._per_chat[chat_id]["total"]
+            bisect.insort(self._leaderboard, (new_total, chat_id))
 
     def get_top_chats(self, n: int = 10) -> list[dict[str, Any]]:
-        """Return top-N chats by total token usage, descending."""
+        """Return top-N chats by total token usage, descending.
+
+        Reads from the pre-sorted leaderboard (O(n) slice) instead of
+        sorting the entire per-chat dict on every call.
+        Stale entries from LRU eviction are skipped lazily.
+        """
         with self._lock:
-            sorted_chats = sorted(
-                self._per_chat.items(),
-                key=lambda item: item[1]["total"],
-                reverse=True,
-            )
-            return [
-                {"chat_id": cid, **stats}
-                for cid, stats in sorted_chats[:n]
-            ]
+            result: list[dict[str, Any]] = []
+            for _total, chat_id in reversed(self._leaderboard):
+                if chat_id in self._per_chat:
+                    result.append({"chat_id": chat_id, **self._per_chat[chat_id]})
+                    if len(result) == n:
+                        break
+            return result
 
 
 def _make_per_chat_map() -> dict[str, dict[str, int]]:
@@ -119,6 +134,33 @@ def _make_per_chat_map() -> dict[str, dict[str, int]]:
         return BoundedOrderedDict(max_size=1000, eviction="half")  # type: ignore[arg-type]
     except ImportError:
         return {}
+
+
+def _remove_leaderboard_entry(
+    board: list[tuple[int, str]], total: int, chat_id: str,
+) -> None:
+    """Remove ``(total, chat_id)`` from *board* via bisect lookup."""
+    key = (total, chat_id)
+    idx = bisect.bisect_left(board, key)
+    if idx < len(board) and board[idx] == key:
+        board.pop(idx)
+
+
+def _purge_chat_from_leaderboard(
+    board: list[tuple[int, str]], chat_id: str,
+) -> None:
+    """Remove **all** entries for *chat_id* from *board*.
+
+    Used when a previously evicted chat_id is re-added — any stale
+    leaderboard entries from before eviction must be cleared to keep
+    the ranking correct.
+    """
+    i = 0
+    while i < len(board):
+        if board[i][1] == chat_id:
+            board.pop(i)
+        else:
+            i += 1
 
 
 # ── Protocol ─────────────────────────────────────────────────────────────
