@@ -239,3 +239,46 @@ jobs:
 
       - name: Run pip-audit
         run: pip-audit --desc
+
+  # ---------------------------------------------------------------------------
+  # Docker image vulnerability scanning with Trivy.
+  # Builds the production image and scans it for OS and library CVEs.
+  # Non-blocking initially — once baseline is established, remove
+  # continue-on-error and add severity thresholds as needed.
+  # ---------------------------------------------------------------------------
+  docker-scan:
+    name: Docker Image Vulnerability Scan
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t custombot:scan .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: custombot:scan
+          format: table
+          exit-code: 0
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          scanners: vuln
+
+      - name: Run Trivy SARIF report
+        if: always()
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: custombot:scan
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          scanners: vuln
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif

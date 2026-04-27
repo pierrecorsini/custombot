@@ -30,6 +30,19 @@ updates:
     commit-message:
       prefix: "deps(dev)"
 
+  # Docker — track base image updates
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "deps(docker)"
+
   # GitHub Actions
   - package-ecosystem: github-actions
     directory: /
