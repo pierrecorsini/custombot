@@ -48,3 +48,54 @@
 - [x] Add OpenTelemetry-compatible tracing spans to the message pipeline — current observability is limited to structured logs and performance metrics; adding OTel spans would enable distributed tracing across LLM calls, skill execution, and message delivery
 - [x] Expose Prometheus-compatible metrics endpoint alongside health check — `PerformanceMetrics` already tracks latencies, queue depth, and error rates; expose these via a `/metrics` endpoint for external monitoring
 - [x] Add a `--diagnose` CLI command for common troubleshooting — auto-check config validity, LLM connectivity, workspace integrity, and disk space, outputting a structured report to help users self-serve before filing issues
+
+---
+
+## Round 2 — Additional Improvements
+
+### Architecture & Refactoring
+
+- [x] Replace `Application`'s 9 `None`-initialized component properties with a typed state machine or builder — `Application.__init__` sets `_shutdown_mgr`, `_components`, `_scheduler`, `_channel`, `_pipeline`, `_executor`, `_workspace_monitor`, `_config_watcher`, `_health_server` all to `None` with `@property` accessors that raise `RuntimeError` if called too early; a `@dataclass(frozen=True)` `AppState` + explicit phase transitions would catch misuse at construction time rather than at runtime in production
+- [ ] Type the `_react_iteration` span parameter correctly — `react_loop.py` line 221 uses `span: Any` instead of the OTel `Span` type, defeating type-checking on the hot path; import `Span` under `TYPE_CHECKING` from `opentelemetry.trace` and use it so mypy catches attribute errors on span operations
+- [ ] Split `vector_memory.py` (892 lines) into focused sub-modules — extract batch coalescing (`_batched_embed`, `_flush_pending`, `_embed_batch`) into `vector_memory/batch.py` and embedding health + retry queue (`_check_embedding_api_health`, `_mark_embedding_api_*`, `_queue_for_retry`, `_retry_pending_saves`) into `vector_memory/health.py`; the main module would re-export the `VectorMemory` class for backward compatibility
+- [ ] Split `db.py` (915 lines) further — extract JSONL schema migration logic (`_ensure_jsonl_schema`, `_apply_jsonl_migrations`) into `db/migration.py` and generation-counter logic (`_bump_generation`, `get_generation`, `check_generation`) into `db/generations.py`; the `Database` facade would delegate as it already does for `MessageStore` and `CompressionService`
+- [ ] Eliminate `# type: ignore[arg-type]` suppressions in `BuilderContext.to_bot_components()` — the 8 suppressions indicate the type system can't verify steps have populated required `None`-able fields; introduce a `TypedBuilderContext` with `__post_init__` validation or use `@overload` on `to_bot_components()` so that the builder orchestrator only calls it when all fields are known populated
+
+### Performance Optimization
+
+- [ ] Replace `RoutingEngine` polling-based stale detection with OS-native file watching — `_is_stale()` runs `os.scandir()` + `stat()` on every `.md` file every 5 seconds; integrate `watchdog` (already a lightweight pure-Python library) for instant inotify/ReadDirectoryChanges notification with zero polling overhead, falling back to current debounced polling on platforms without native support
+- [ ] Use a faster non-cryptographic hash for `VectorMemory` embedding cache keys — `_embed()` and `_embed_batch()` use `hashlib.sha256()` to deduplicate embedding text, which is cryptographically overkill; replace with `xxhash.xxh128()` (10-50× faster on short strings) or Python's `hash()` with a stable seed for a pure-Python fallback
+- [ ] Move `Database.connect()` template seeding off the event loop — the `shutil.copy2` loop that seeds instruction templates (lines 506-513 of `db.py`) runs synchronously during `connect()`; wrap in `asyncio.to_thread()` to prevent blocking startup when the template directory is large or on slow filesystems
+- [ ] Add a pre-computed leaderboard in `TokenUsage.get_top_chats()` — `get_top_chats()` sorts all tracked chats by token usage on every call (O(n log n)); maintain a `SortedList` or cached top-N that updates incrementally on each `add_for_chat()` call for O(log n) insertion instead of full re-sort
+
+### Error Handling & Resilience
+
+- [ ] Extract duplicated LLM error classification from `LLMClient.chat()` and `chat_stream()` — lines 320-339 and 521-540 are nearly identical (circuit breaker failure recording, error classification, metrics tracking); refactor into a shared async context manager or decorator `@with_circuit_breaker_and_classification` to eliminate the ~20 duplicated lines and ensure both paths stay in sync
+- [ ] Add timeout protection to `Application._shutdown_cleanup()` — individual cleanup steps (config watcher stop, workspace monitor stop) have no timeout and could block shutdown indefinitely; wrap each step in `asyncio.wait_for(coro, timeout=10.0)` so a hung cleanup component doesn't prevent process exit
+- [ ] Stop masking non-OSError exceptions in `MtimeCache.read()` — line 170 wraps ALL exceptions from `asyncio.to_thread()` in `OSError`, which hides programming errors (e.g., `TypeError`, `AttributeError`) as I/O errors; catch only `OSError` and let other exceptions propagate unmodified so bugs surface during development
+- [ ] Add `BaseException` guard in `Scheduler._loop()` gather handling — the existing `isinstance(result, Exception)` check after `asyncio.gather(return_exceptions=True)` doesn't handle `BaseException` subclasses like `SystemExit` or `GeneratorExit` that could escape from misbehaving task callbacks; add explicit handling to log and re-raise these
+
+### Test Coverage & Quality
+
+- [ ] Add unit tests for `ContextAssembler` — `src/core/context_assembler.py` orchestrates 4 async context reads (memory, agents_md, project context, topic cache) and token-budget trimming but has no dedicated tests; create `tests/unit/test_context_assembler.py` covering cache hits/misses, token budget overflow, missing instruction files, and concurrent assembly calls
+- [ ] Add security-focused tests for the shell skill (`src/skills/builtin/shell.py`) — the shell skill executes arbitrary commands and is the highest-risk attack surface; test the denylist/allowlist enforcement, command injection patterns (pipe chains, backticks, environment variable expansion), timeout handling, and output truncation
+- [ ] Fix `MockChatCompletion.usage` class-level mutable dict in `conftest.py` — line 109 defines `usage` as a class variable (shared across instances), causing potential test pollution if tests mutate it; move to `__init__` alongside `self.choices` so each instance gets its own copy
+- [ ] Add benchmark regression tests and integrate into CI — `tests/unit/bench_serialization.py` exists but isn't gated in CI; add `pytest-benchmark` fixtures for critical paths (routing match, embedding cache lookup, JSONL message write, context assembly) and a CI job that fails on >10% regression from a stored baseline
+- [ ] Add tests for channel input validation (`src/channels/validation.py`) — the module sanitizes incoming message fields (sender_id, chat_id, message_id lengths and formats) but has no dedicated test file; add boundary tests for max-length enforcement, special character handling, and the interaction with `MAX_MESSAGE_LENGTH`
+
+### Security
+
+- [ ] Replace hardcoded `api_key="sk-no-key"` sentinel in `LLMClient.__init__` — line 82 falls back to `"sk-no-key"` when no API key is configured, which could accidentally authenticate against providers that accept any non-empty key; use `"not-configured"` or raise a clear `ConfigurationError` at construction time for providers requiring authentication
+- [ ] Add `format: "uri"` validation enforcement in `config_schema.py` — the JSON Schema declares `format: "uri"` for `base_url` but the hand-rolled validator doesn't enforce it (no `format` validation); either add RFC 3986 URI validation for `base_url` or replace the custom validator with the `jsonschema` library for proper spec compliance
+- [ ] Add embedding model reachability check to `--diagnose` command — the diagnostic command checks LLM connectivity, workspace integrity, and disk space but doesn't probe the embedding model separately; a misconfigured `embedding_model` or unreachable embeddings endpoint would only surface when users invoke vector memory skills, not at startup diagnostic time
+
+### DevOps & CI/CD
+
+- [ ] Sync `requirements.txt` with `pyproject.toml` — `msgpack~=1.1.0` is declared in `pyproject.toml` dependencies but missing from `requirements.txt`; since the Dockerfile installs from `requirements.txt`, the msgpack package is absent in production images; either sync both files or switch the Dockerfile to install from `pyproject.toml` via `pip install .`
+- [ ] Add pip cache and vulnerability database caching to CI — the security scanning job (`pip-audit`) re-downloads the OSV vulnerability database on every run; cache `~/.cache/pip-audit` and `~/.cache/pip` across runs to cut CI time by ~30-60s per workflow
+- [ ] Add CI step to verify `requirements.txt` and `pyproject.toml` are in sync — the two files maintain the same dependency list independently with no validation; add a CI job that parses both and asserts their dependency sets match (name + version constraint), preventing silent drift
+
+### Documentation & Observability
+
+- [ ] Surface VectorMemory degradation status in the health endpoint — the `/health` endpoint reports LLM circuit breaker state and DB write breaker state but doesn't include VectorMemory health (embedding API reachability, retry queue depth); add a `vector_memory` component to the health response with `DEGRADED` status when the embedding API is unreachable or the retry queue exceeds 50% capacity
+- [ ] Add `--diagnose` check for orphaned workspace directories — workspace directories whose `.chat_id` origin files are missing or whose corresponding JSONL is empty indicate crashed or interrupted sessions; the diagnose command should scan `workspace/whatsapp_data/` for orphaned dirs and report them for cleanup
