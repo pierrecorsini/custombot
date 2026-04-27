@@ -32,7 +32,7 @@
 
 ## Security
 
-- [ ] Add rate limiting to the health-check HTTP endpoint — the `/health` endpoint in `health.py` is unauthenticated and unrestricted; add IP-based rate limiting to prevent abuse when `--health-port` is exposed
+- [x] Add rate limiting to the health-check HTTP endpoint — the `/health` endpoint in `health.py` is unauthenticated and unrestricted; add IP-based rate limiting to prevent abuse when `--health-port` is exposed
 - [ ] Sanitize `chat_id` values before using them in filesystem paths — `_sanitize_chat_id_for_path()` exists but `Memory._resolve_chat_path()` calls it via `sanitize_path_component()`; audit all code paths to ensure no `chat_id` bypasses sanitization (e.g., from scheduled tasks or recovery)
 - [ ] Add request signing or HMAC verification for scheduled task prompts — `process_scheduled()` accepts arbitrary prompts from the scheduler config; an attacker who can write to the scheduler config could inject malicious prompts that bypass the normal message pipeline's security checks
 
