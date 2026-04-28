@@ -376,6 +376,16 @@ class LLMClient:
         async with self._circuit_protected_call("LLM"):
             return await self._raw_chat(messages, tools=tools, timeout=timeout, chat_id=chat_id)
 
+    @retry_with_backoff(max_retries=3, initial_delay=1.0, max_total_seconds=180)
+    async def _create_stream(self, **kwargs: Any) -> Any:
+        """Create a streaming response with retry on transient handshake failures.
+
+        Only wraps the initial ``create()`` call — stream consumption
+        (iterating events) is **not** retried.  Uses the same retry
+        parameters as :meth:`_raw_chat` for consistency.
+        """
+        return await self._client.chat.completions.create(**kwargs)
+
     async def chat_stream(
         self,
         messages: List[ChatCompletionMessageParam],
@@ -391,6 +401,9 @@ class LLMClient:
         as a normal :class:`ChatCompletion` so callers can inspect
         ``finish_reason``, ``tool_calls``, and ``usage`` exactly like
         :meth:`chat`.
+
+        Transient errors during stream establishment are retried via
+        :meth:`_create_stream`.  Stream consumption is not retried.
 
         Args:
             messages: Conversation history for the LLM.
@@ -427,7 +440,7 @@ class LLMClient:
 
         try:
             async with self._circuit_protected_call("LLM streaming"):
-                stream = await self._client.chat.completions.create(**kwargs)
+                stream = await self._create_stream(**kwargs)
                 async for event in stream:
                     await acc.process_event(event)
 
