@@ -20,7 +20,6 @@ Usage::
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Protocol, Sequence
@@ -28,10 +27,8 @@ from typing import TYPE_CHECKING, Optional, Protocol, Sequence
 from src.config import Config
 from src.constants import WORKSPACE_DIR
 from src.core.errors import NonCriticalCategory, log_noncritical
-from src.utils.dag import topological_sort
+from src.core.orchestrator import StepOrchestrator
 from src.lifecycle import (
-    _log_component_init,
-    _log_component_ready,
     _log_skills_loaded,
 )
 from src.progress import ProgressBar, maybe_spinner_async
@@ -432,7 +429,7 @@ DEFAULT_BUILDER_STEPS: list[BuilderComponentSpec] = [
 # ── Orchestrator ────────────────────────────────────────────────────────
 
 
-class BuilderOrchestrator:
+class BuilderOrchestrator(StepOrchestrator[BuilderContext, BuilderComponentSpec]):
     """Execute a sequence of ``BuilderComponentSpec`` steps in order.
 
     Handles logging, timing, progress-bar advancement, and error
@@ -440,26 +437,17 @@ class BuilderOrchestrator:
     in ``src/core/startup.py``.
     """
 
-    __slots__ = ("_ctx", "_steps")
+    __slots__ = ()
 
     def __init__(
         self,
         ctx: BuilderContext,
         steps: Sequence[BuilderComponentSpec] | None = None,
     ) -> None:
-        self._ctx = ctx
-        self._steps = list(steps) if steps is not None else list(DEFAULT_BUILDER_STEPS)
-
-    def _resolve_order(self) -> list[BuilderComponentSpec]:
-        """Topologically sort steps so every step runs after its dependencies.
-
-        When no ``depends_on`` is declared the original list order is
-        preserved.  Raises ``ValueError`` on circular or missing deps.
-        """
-        return topological_sort(
-            self._steps,
-            key=lambda s: s.name,
-            depends_on=lambda s: s.depends_on,
+        super().__init__(
+            ctx,
+            steps,
+            DEFAULT_BUILDER_STEPS,
             context_label="builder dependency",
         )
 
@@ -470,22 +458,14 @@ class BuilderOrchestrator:
         exception propagates and the caller is responsible for cleaning up
         any partially-initialised components.
         """
-        ctx = self._ctx
         steps = self._resolve_order()
 
         with ProgressBar("Initializing components", total=len(steps)) as progress:
             for spec in steps:
-                _log_component_init(spec.name, "started")
-                t0 = time.monotonic()
-
-                detail = await spec.factory(ctx)
-
-                elapsed = time.monotonic() - t0
-                ctx.component_durations[spec.name] = elapsed
-                _log_component_ready(spec.name, detail)
+                await self._execute_step(spec)
                 progress.advance()
 
-        return ctx.to_bot_components()
+        return self._ctx.to_bot_components()
 
 
 # ── Public entry point ──────────────────────────────────────────────────

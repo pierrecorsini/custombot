@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,12 +35,8 @@ from src.constants import (
     WORKSPACE_CLEANUP_INTERVAL_SECONDS,
     WORKSPACE_DIR,
 )
-from src.utils.dag import topological_sort
-from src.lifecycle import (
-    _log_component_init,
-    _log_component_ready,
-    _log_startup_begin,
-)
+from src.core.orchestrator import StepOrchestrator
+from src.lifecycle import _log_startup_begin
 
 if TYPE_CHECKING:
     from src.app import Application
@@ -384,33 +379,24 @@ DEFAULT_STARTUP_STEPS: list[ComponentSpec] = [
 # ── Orchestrator ────────────────────────────────────────────────────────
 
 
-class StartupOrchestrator:
+class StartupOrchestrator(StepOrchestrator[StartupContext, ComponentSpec]):
     """Execute a sequence of ``ComponentSpec`` steps in order.
 
     Handles logging, timing, and error propagation for each step.
     The pattern mirrors ``message_pipeline.py``'s declarative approach.
     """
 
-    __slots__ = ("_ctx", "_steps")
+    __slots__ = ()
 
     def __init__(
         self,
         ctx: StartupContext,
         steps: Sequence[ComponentSpec] | None = None,
     ) -> None:
-        self._ctx = ctx
-        self._steps = list(steps) if steps is not None else list(DEFAULT_STARTUP_STEPS)
-
-    def _resolve_order(self) -> list[ComponentSpec]:
-        """Topologically sort steps so every step runs after its dependencies.
-
-        When no ``depends_on`` is declared the original list order is
-        preserved.  Raises ``ValueError`` on circular or missing deps.
-        """
-        return topological_sort(
-            self._steps,
-            key=lambda s: s.name,
-            depends_on=lambda s: s.depends_on,
+        super().__init__(
+            ctx,
+            steps,
+            DEFAULT_STARTUP_STEPS,
             context_label="startup dependency",
         )
 
@@ -422,23 +408,13 @@ class StartupOrchestrator:
         any partially-initialised components.
         """
         startup_time = _log_startup_begin(self._ctx.config)
-        ctx = self._ctx
 
         for spec in self._resolve_order():
-            step_begin = time.monotonic()
-            _log_component_init(spec.name, "started")
-
-            detail = await spec.factory(ctx)
-
-            elapsed = time.monotonic() - step_begin
-            ctx.component_durations[spec.name] = elapsed
-
-            _log_component_ready(spec.name, detail)
+            await self._execute_step(spec)
 
             # Track in the initialized-components list unless suppressed
             label = spec.label if spec.label is not None else spec.name
             if label != "__none__":
-                # Support simple format placeholders in label
-                ctx.initialized_components.append(label)
+                self._ctx.initialized_components.append(label)
 
         return startup_time
