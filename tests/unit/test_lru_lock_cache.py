@@ -8,6 +8,9 @@ Covers:
 - Ref-counted but unlocked lock survives eviction
 - Oldest unreferenced entry is evicted first
 - acquire() context manager properly pairs ref counts
+- EvictionPolicy.REJECT_ON_FULL raises when all entries active
+- EvictionPolicy.GROW allows unbounded growth (default)
+- stats() includes eviction_policy
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import asyncio
 
 import pytest
 
+from src.constants import EvictionPolicy
 from src.utils import LRULockCache
 
 
@@ -214,3 +218,153 @@ class TestGetOrCreateReaccess:
         cache.release("chat_1")
 
         assert lock1 is lock2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test active_count and configurable cache size
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestActiveCountAndConfigurableSize:
+    """Verify active_count tracking and configurable cache size."""
+
+    @pytest.mark.asyncio
+    async def test_active_count_tracks_held_locks(self) -> None:
+        """active_count reflects the number of currently held locks."""
+        cache = LRULockCache(max_size=10)
+
+        assert cache.active_count == 0
+
+        async with cache.acquire("A"):
+            assert cache.active_count == 1
+            async with cache.acquire("B"):
+                assert cache.active_count == 2
+
+        assert cache.active_count == 0
+
+    @pytest.mark.asyncio
+    async def test_active_count_with_get_or_create(self) -> None:
+        """active_count tracks refs from get_or_create until release."""
+        cache = LRULockCache(max_size=10)
+
+        await cache.get_or_create("X")
+        assert cache.active_count == 1
+
+        cache.release("X")
+        assert cache.active_count == 0
+
+    @pytest.mark.asyncio
+    async def test_configurable_cache_size_larger_than_default(self) -> None:
+        """Cache respects a custom max_size larger than the default."""
+        cache = LRULockCache(max_size=5)
+
+        # Insert 5 entries and release all
+        for i in range(5):
+            await cache.get_or_create(str(i))
+            cache.release(str(i))
+
+        assert len(cache) == 5
+
+        # Insert 6th — evicts oldest (0)
+        await cache.get_or_create("5")
+        cache.release("5")
+
+        assert len(cache) == 5
+        assert "0" not in cache._cache
+        assert "5" in cache._cache
+
+    @pytest.mark.asyncio
+    async def test_pressure_warning_logged_at_high_utilization(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A pressure warning is logged when cache is full and most entries are active."""
+        cache = LRULockCache(max_size=2)
+
+        # Hold both locks — 2/2 = 100% active (> 80% threshold)
+        async with cache.acquire("A"):
+            async with cache.acquire("B"):
+                # Insert "C" triggers eviction; all entries active → pressure warning
+                with caplog.at_level("WARNING", logger="src.utils"):
+                    await cache.get_or_create("C")
+                    cache.release("C")
+
+                assert any(
+                    "under pressure" in r.message.lower() for r in caplog.records
+                )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test configurable eviction policy
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEvictionPolicy:
+    """Verify configurable eviction policy behavior."""
+
+    @pytest.mark.asyncio
+    async def test_grow_policy_allows_unbounded_growth(self) -> None:
+        """GROW policy (default) allows cache to grow beyond max_size when all held."""
+        cache = LRULockCache(max_size=2, eviction_policy=EvictionPolicy.GROW)
+
+        async with cache.acquire("A"):
+            async with cache.acquire("B"):
+                # All entries in-use; GROW allows insertion
+                await cache.get_or_create("C")
+                cache.release("C")
+
+                assert len(cache) == 3  # grew beyond max_size=2
+
+    @pytest.mark.asyncio
+    async def test_reject_on_full_raises_when_saturated(self) -> None:
+        """REJECT_ON_FULL raises RuntimeError when all cached locks are in-use."""
+        cache = LRULockCache(max_size=2, eviction_policy=EvictionPolicy.REJECT_ON_FULL)
+
+        async with cache.acquire("A"):
+            async with cache.acquire("B"):
+                # All 2 entries are in-use; inserting "C" should raise
+                with pytest.raises(RuntimeError, match="Lock cache saturated"):
+                    await cache.get_or_create("C")
+
+        assert len(cache) == 2  # did not grow
+
+    @pytest.mark.asyncio
+    async def test_reject_on_full_evicts_unreferenced(self) -> None:
+        """REJECT_ON_FULL still evicts unreferenced entries normally."""
+        cache = LRULockCache(max_size=2, eviction_policy=EvictionPolicy.REJECT_ON_FULL)
+
+        # Insert A and B, then release both
+        await cache.get_or_create("A")
+        cache.release("A")
+        await cache.get_or_create("B")
+        cache.release("B")
+
+        # Insert C — should evict A (oldest unreferenced) without error
+        await cache.get_or_create("C")
+        cache.release("C")
+
+        assert "A" not in cache._cache
+        assert "B" in cache._cache
+        assert "C" in cache._cache
+
+    @pytest.mark.asyncio
+    async def test_default_policy_is_grow(self) -> None:
+        """Default eviction policy is GROW (backward compatible)."""
+        cache = LRULockCache(max_size=2)
+
+        async with cache.acquire("A"):
+            async with cache.acquire("B"):
+                # Should NOT raise — default is GROW
+                await cache.get_or_create("C")
+                cache.release("C")
+                assert len(cache) == 3
+
+    @pytest.mark.asyncio
+    async def test_stats_includes_eviction_policy(self) -> None:
+        """stats() includes the configured eviction policy."""
+        cache = LRULockCache(max_size=10, eviction_policy=EvictionPolicy.REJECT_ON_FULL)
+        stats = cache.stats()
+        assert stats["eviction_policy"] == "reject_on_full"
+
+        cache2 = LRULockCache(max_size=10)
+        stats2 = cache2.stats()
+        assert stats2["eviction_policy"] == "grow"
