@@ -20,10 +20,13 @@ import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.constants import HEALTH_DISK_FREE_THRESHOLD_MB, WORKSPACE_DIR
 from src.ui.cli_output import cli as cli_output
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 
 @dataclass
@@ -57,6 +60,95 @@ class DiagnoseReport:
     @property
     def all_passed(self) -> bool:
         return self.failed == 0 and self.total > 0
+
+
+@dataclass
+class _ProbeSuccess:
+    """Internal result type returned by probe callables."""
+
+    message: str
+    details: dict[str, Any] | None = None
+
+
+async def _probe_api_endpoint(
+    config_path: Path,
+    *,
+    check_name: str,
+    probe_fn: Callable[..., Awaitable[_ProbeSuccess]],
+    timeout_label: str,
+    timeout_seconds: float = 10.0,
+) -> CheckResult:
+    """Shared helper for API connectivity probes.
+
+    Handles config loading, credential resolution, OpenAI client lifecycle,
+    timing, timeout handling, and error classification so that individual
+    checks only need to supply the actual API call and a success message.
+    """
+    import time
+
+    from openai import AsyncOpenAI
+
+    try:
+        from src.config import load_config
+
+        cfg = load_config(config_path)
+    except Exception as exc:
+        return CheckResult(
+            name=check_name,
+            passed=False,
+            message=f"Cannot load config: {exc}",
+        )
+
+    api_key = os.environ.get("OPENAI_API_KEY", cfg.llm.api_key)
+    base_url = os.environ.get("OPENAI_BASE_URL", cfg.llm.base_url)
+
+    if not api_key or api_key.startswith("sk-your"):
+        return CheckResult(
+            name=check_name,
+            passed=False,
+            message="Skipped — no valid API key",
+        )
+
+    client: AsyncOpenAI | None = None
+    start = time.perf_counter()
+    try:
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        result = await asyncio.wait_for(probe_fn(client, cfg), timeout=timeout_seconds)
+        latency_ms = (time.perf_counter() - start) * 1000
+        details: dict[str, Any] = {"latency_ms": round(latency_ms, 2)}
+        if result.details:
+            details.update(result.details)
+        return CheckResult(
+            name=check_name,
+            passed=True,
+            message=result.message,
+            details=details,
+        )
+    except TimeoutError:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return CheckResult(
+            name=check_name,
+            passed=False,
+            message=f"{timeout_label} timeout after {timeout_seconds:.0f}s",
+            details={"latency_ms": round(latency_ms, 2)},
+        )
+    except Exception as exc:
+        latency_ms = (time.perf_counter() - start) * 1000
+        error_msg = str(exc).lower()
+        if "401" in error_msg or "unauthorized" in error_msg or "invalid" in error_msg:
+            return CheckResult(
+                name=check_name,
+                passed=False,
+                message="Invalid API credentials",
+            )
+        return CheckResult(
+            name=check_name,
+            passed=False,
+            message=f"Failed: {type(exc).__name__}",
+        )
+    finally:
+        if client is not None:
+            await client.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -221,141 +313,39 @@ def check_api_key(config_path: Path) -> CheckResult:
 
 async def check_llm_connectivity(config_path: Path) -> CheckResult:
     """Test LLM API connectivity with a lightweight models.list() call."""
-    try:
-        from src.config import load_config
 
-        cfg = load_config(config_path)
-    except Exception as exc:
-        return CheckResult(
-            name="LLM connectivity",
-            passed=False,
-            message=f"Cannot load config: {exc}",
-        )
+    async def _probe(client: Any, _cfg: Any) -> _ProbeSuccess:
+        await client.models.list()
+        return _ProbeSuccess(message="LLM API reachable")
 
-    api_key = os.environ.get("OPENAI_API_KEY", cfg.llm.api_key)
-    base_url = os.environ.get("OPENAI_BASE_URL", cfg.llm.base_url)
-
-    if not api_key or api_key.startswith("sk-your"):
-        return CheckResult(
-            name="LLM connectivity",
-            passed=False,
-            message="Skipped — no valid API key",
-        )
-
-    import time
-
-    from openai import AsyncOpenAI
-
-    client = None
-    start = time.perf_counter()
-    try:
-        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-        await asyncio.wait_for(client.models.list(), timeout=10.0)
-        latency_ms = (time.perf_counter() - start) * 1000
-        return CheckResult(
-            name="LLM connectivity",
-            passed=True,
-            message="LLM API reachable",
-            details={"latency_ms": round(latency_ms, 2)},
-        )
-    except TimeoutError:
-        latency_ms = (time.perf_counter() - start) * 1000
-        return CheckResult(
-            name="LLM connectivity",
-            passed=False,
-            message="LLM API timeout after 10s",
-            details={"latency_ms": round(latency_ms, 2)},
-        )
-    except Exception as exc:
-        latency_ms = (time.perf_counter() - start) * 1000
-        error_msg = str(exc).lower()
-        if "401" in error_msg or "unauthorized" in error_msg or "invalid" in error_msg:
-            return CheckResult(
-                name="LLM connectivity",
-                passed=False,
-                message="Invalid API credentials",
-            )
-        return CheckResult(
-            name="LLM connectivity",
-            passed=False,
-            message=f"Failed: {type(exc).__name__}",
-        )
-    finally:
-        if client is not None:
-            await client.close()
+    return await _probe_api_endpoint(
+        config_path,
+        check_name="LLM connectivity",
+        probe_fn=_probe,
+        timeout_label="LLM API",
+    )
 
 
 async def check_embedding_model(config_path: Path) -> CheckResult:
     """Test embedding API reachability with a single embedding call."""
-    try:
-        from src.config import load_config
 
-        cfg = load_config(config_path)
-    except Exception as exc:
-        return CheckResult(
-            name="Embedding model",
-            passed=False,
-            message=f"Cannot load config: {exc}",
+    async def _probe(client: Any, cfg: Any) -> _ProbeSuccess:
+        response = await client.embeddings.create(
+            model=cfg.llm.embedding_model,
+            input="health",
         )
-
-    api_key = os.environ.get("OPENAI_API_KEY", cfg.llm.api_key)
-    base_url = os.environ.get("OPENAI_BASE_URL", cfg.llm.base_url)
-
-    if not api_key or api_key.startswith("sk-your"):
-        return CheckResult(
-            name="Embedding model",
-            passed=False,
-            message="Skipped — no valid API key",
-        )
-
-    import time
-
-    from openai import AsyncOpenAI
-
-    client = None
-    start = time.perf_counter()
-    try:
-        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-        response = await asyncio.wait_for(
-            client.embeddings.create(
-                model=cfg.llm.embedding_model,
-                input="health",
-            ),
-            timeout=10.0,
-        )
-        latency_ms = (time.perf_counter() - start) * 1000
         dims = len(response.data[0].embedding) if response.data else 0
-        return CheckResult(
-            name="Embedding model",
-            passed=True,
+        return _ProbeSuccess(
             message=f"Embedding API reachable (model={cfg.llm.embedding_model}, dims={dims})",
-            details={"latency_ms": round(latency_ms, 2), "dimensions": dims},
+            details={"dimensions": dims},
         )
-    except TimeoutError:
-        latency_ms = (time.perf_counter() - start) * 1000
-        return CheckResult(
-            name="Embedding model",
-            passed=False,
-            message="Embedding API timeout after 10s",
-            details={"latency_ms": round(latency_ms, 2)},
-        )
-    except Exception as exc:
-        latency_ms = (time.perf_counter() - start) * 1000
-        error_msg = str(exc).lower()
-        if "401" in error_msg or "unauthorized" in error_msg or "invalid" in error_msg:
-            return CheckResult(
-                name="Embedding model",
-                passed=False,
-                message="Invalid API credentials",
-            )
-        return CheckResult(
-            name="Embedding model",
-            passed=False,
-            message=f"Failed: {type(exc).__name__}",
-        )
-    finally:
-        if client is not None:
-            await client.close()
+
+    return await _probe_api_endpoint(
+        config_path,
+        check_name="Embedding model",
+        probe_fn=_probe,
+        timeout_label="Embedding API",
+    )
 
 
 def check_workspace_dir(config_path: Path) -> CheckResult:
