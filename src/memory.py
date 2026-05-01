@@ -368,10 +368,10 @@ class Memory:
                         chat_id,
                     )
 
-        except OSError as e:
+        except OSError as exc:
             result.is_corrupted = True
-            result.error_details.append(f"Failed to read memory file: {e}")
-            log.error("Failed to read memory file for chat %s: %s", chat_id, e)
+            result.error_details.append(f"Failed to read memory file: {exc}")
+            log.error("Failed to read memory file for chat %s: %s", chat_id, exc)
 
         return result
 
@@ -401,8 +401,8 @@ class Memory:
             shutil.copy2(path, backup_file)
             log.info("Created memory backup: %s", backup_file)
             return str(backup_file)
-        except OSError as e:
-            log.error("Failed to create memory backup: %s", e)
+        except OSError as exc:
+            log.error("Failed to create memory backup: %s", exc)
             return None
 
     async def abackup_memory_file(self, chat_id: str) -> Optional[str]:
@@ -422,8 +422,8 @@ class Memory:
             await asyncio.to_thread(shutil.copy2, path, backup_file)
             log.info("Created memory backup: %s", backup_file)
             return str(backup_file)
-        except OSError as e:
-            log.error("Failed to create memory backup: %s", e)
+        except OSError as exc:
+            log.error("Failed to create memory backup: %s", exc)
             return None
 
     def repair_memory_file(self, chat_id: str, backup: bool = True) -> MemoryCorruptionResult:
@@ -464,9 +464,9 @@ class Memory:
             result.repaired = True
             log.info("Repaired memory file for chat %s", chat_id)
 
-        except OSError as e:
-            result.error_details.append(f"Failed to repair: {e}")
-            log.error("Failed to repair memory file for chat %s: %s", chat_id, e)
+        except OSError as exc:
+            result.error_details.append(f"Failed to repair: {exc}")
+            log.error("Failed to repair memory file for chat %s: %s", chat_id, exc)
 
         return result
 
@@ -493,9 +493,9 @@ class Memory:
 
             result.repaired = True
             log.info("Repaired memory file for chat %s", chat_id)
-        except OSError as e:
-            result.error_details.append(f"Failed to repair: {e}")
-            log.error("Failed to repair memory file for chat %s: %s", chat_id, e)
+        except OSError as exc:
+            result.error_details.append(f"Failed to repair: {exc}")
+            log.error("Failed to repair memory file for chat %s: %s", chat_id, exc)
 
         return result
 

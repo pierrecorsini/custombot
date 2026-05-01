@@ -148,8 +148,8 @@ def _check_disk_space_before_write(path: Path) -> None:
                 free_mb=round(result.free_mb, 2),
                 required_mb=round(DEFAULT_MIN_DISK_SPACE / (1024 * 1024), 2),
             )
-    except OSError as e:
-        log.warning("Could not verify disk space for %s: %s", path, e)
+    except OSError as exc:
+        log.warning("Could not verify disk space for %s: %s", path, exc)
 
 
 def _atomic_write(file_path: Path, content: str) -> None:

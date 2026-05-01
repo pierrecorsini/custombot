@@ -248,8 +248,8 @@ class ProjectUpdateSkill(_ProjectSkillBase):
                 status=kwargs.get("status"),
                 tags=kwargs.get("tags"),
             )
-        except ValueError as e:
-            return str(e)
+        except ValueError as exc:
+            return str(exc)
         if not updated:
             return f"Project '{pid}' not found."
         return f"Updated project '{updated['name']}' (status: {updated['status']})"
@@ -346,8 +346,8 @@ class KnowledgeAddSkill(_KnowledgeSkillBase):
                 link_to=link_to,
                 link_relation=link_relation,
             )
-        except ValueError as e:
-            return str(e)
+        except ValueError as exc:
+            return str(exc)
 
         link_str = ""
         if link_to:
@@ -467,8 +467,8 @@ class KnowledgeLinkSkill(_ProjectSkillBase):
 
         try:
             link_id = self._store.link_knowledge(from_id, to_id, relation)
-        except ValueError as e:
-            return str(e)
+        except ValueError as exc:
+            return str(exc)
 
         if link_id is None:
             return "Link already exists between those entries."

@@ -245,8 +245,8 @@ class Bot:
             )
         except ImportError:
             log.warning("psutil not installed - memory monitoring disabled")
-        except Exception as e:
-            log.error("Failed to start memory monitoring: %s", e, exc_info=True)
+        except Exception as exc:
+            log.error("Failed to start memory monitoring: %s", exc, exc_info=True)
 
     async def stop_memory_monitoring(self) -> None:
         """Stop memory monitoring for this bot instance."""

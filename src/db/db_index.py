@@ -108,8 +108,8 @@ def scan_message_files(messages_dir: Path) -> Set[str]:
                             ids.add(msg_id)
                     except JSONDecodeError:
                         continue
-        except OSError as e:
-            log.warning("Failed to read message file %s: %s", msg_file.name, e)
+        except OSError as exc:
+            log.warning("Failed to read message file %s: %s", msg_file.name, exc)
             continue
 
     return ids
@@ -136,11 +136,11 @@ def load_index(index_file: Path) -> Optional[Set[str]]:
             return set(data)
         log.warning("message_index.json has invalid format (expected list)")
         return None
-    except JSONDecodeError as e:
-        log.warning("message_index.json is corrupted: %s", e)
+    except JSONDecodeError as exc:
+        log.warning("message_index.json is corrupted: %s", exc)
         return None
-    except OSError as e:
-        log.warning("Failed to read message_index.json: %s", e)
+    except OSError as exc:
+        log.warning("Failed to read message_index.json: %s", exc)
         return None
 
 
@@ -193,8 +193,8 @@ def recover_index(
             )
         else:
             warnings.append("No valid entries could be extracted from corrupted index")
-    except OSError as e:
-        warnings.append(f"Failed to read corrupted index: {e}")
+    except OSError as exc:
+        warnings.append(f"Failed to read corrupted index: {exc}")
 
     # Rebuild from message files
     rebuilt_ids = scan_message_files(messages_dir)

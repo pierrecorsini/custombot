@@ -196,8 +196,8 @@ async def _validate_whatsapp(config: "Config") -> ValidationResult:
             message=message,
             details={"db_path": str(db_path)},
         )
-    except OSError as e:
-        message = f"WhatsApp session db_path not writable: {e}"
+    except OSError as exc:
+        message = f"WhatsApp session db_path not writable: {exc}"
         cli.error(message)
         return ValidationResult(
             channel="whatsapp",
@@ -206,7 +206,7 @@ async def _validate_whatsapp(config: "Config") -> ValidationResult:
             details={
                 "hint": "Ensure the directory for db_path exists and is writable",
                 "db_path": str(db_path),
-                "error": str(e),
+                "error": str(exc),
             },
         )
 

@@ -1450,13 +1450,13 @@ class HealthServer:
                         message="psutil not installed",
                     )
                 )
-            except Exception as e:
-                log.debug("Memory health check error: %s", e)
+            except Exception as exc:
+                log.debug("Memory health check error: %s", exc)
                 components.append(
                     ComponentHealth(
                         name="memory",
                         status=HealthStatus.DEGRADED,
-                        message=f"Memory check error: {type(e).__name__}",
+                        message=f"Memory check error: {type(exc).__name__}",
                     )
                 )
 
@@ -1475,13 +1475,13 @@ class HealthServer:
                         message="Performance metrics not available",
                     )
                 )
-            except Exception as e:
-                log.debug("Performance health check error: %s", e)
+            except Exception as exc:
+                log.debug("Performance health check error: %s", exc)
                 components.append(
                     ComponentHealth(
                         name="performance",
                         status=HealthStatus.DEGRADED,
-                        message=f"Performance check error: {type(e).__name__}",
+                        message=f"Performance check error: {type(exc).__name__}",
                     )
                 )
 
@@ -1490,52 +1490,52 @@ class HealthServer:
             try:
                 wiring_result = self._bot.validate_wiring()
                 components.append(check_wiring(wiring_result))
-            except Exception as e:
-                log.debug("Wiring health check error: %s", e)
+            except Exception as exc:
+                log.debug("Wiring health check error: %s", exc)
                 components.append(
                     ComponentHealth(
                         name="wiring",
                         status=HealthStatus.UNHEALTHY,
-                        message=f"Wiring check failed: {type(e).__name__}",
+                        message=f"Wiring check failed: {type(exc).__name__}",
                     )
                 )
 
         # Scheduler status
         try:
             components.append(check_scheduler(self._scheduler))
-        except Exception as e:
-            log.debug("Scheduler health check error: %s", e)
+        except Exception as exc:
+            log.debug("Scheduler health check error: %s", exc)
             components.append(
                 ComponentHealth(
                     name="scheduler",
                     status=HealthStatus.UNHEALTHY,
-                    message=f"Scheduler check failed: {type(e).__name__}",
+                    message=f"Scheduler check failed: {type(exc).__name__}",
                 )
             )
 
         # VectorMemory degradation status
         try:
             components.append(check_vector_memory(self._vector_memory))
-        except Exception as e:
-            log.debug("VectorMemory health check error: %s", e)
+        except Exception as exc:
+            log.debug("VectorMemory health check error: %s", exc)
             components.append(
                 ComponentHealth(
                     name="vector_memory",
                     status=HealthStatus.DEGRADED,
-                    message=f"VectorMemory check failed: {type(e).__name__}",
+                    message=f"VectorMemory check failed: {type(exc).__name__}",
                 )
             )
 
         # LLM log directory status
         try:
             components.append(check_llm_logs(self._llm_log_dir))
-        except Exception as e:
-            log.debug("LLM logs health check error: %s", e)
+        except Exception as exc:
+            log.debug("LLM logs health check error: %s", exc)
             components.append(
                 ComponentHealth(
                     name="llm_logs",
                     status=HealthStatus.DEGRADED,
-                    message=f"LLM logs check failed: {type(e).__name__}",
+                    message=f"LLM logs check failed: {type(exc).__name__}",
                 )
             )
 
@@ -1543,26 +1543,26 @@ class HealthServer:
         if self._workspace_dir:
             try:
                 components.append(check_disk_usage(self._workspace_dir))
-            except Exception as e:
-                log.debug("Disk usage health check error: %s", e)
+            except Exception as exc:
+                log.debug("Disk usage health check error: %s", exc)
                 components.append(
                     ComponentHealth(
                         name="disk_usage",
                         status=HealthStatus.DEGRADED,
-                        message=f"Disk usage check failed: {type(e).__name__}",
+                        message=f"Disk usage check failed: {type(exc).__name__}",
                     )
                 )
 
             # Filesystem-level free disk space check
             try:
                 components.append(check_disk_space_health(self._workspace_dir))
-            except Exception as e:
-                log.debug("Disk space health check error: %s", e)
+            except Exception as exc:
+                log.debug("Disk space health check error: %s", exc)
                 components.append(
                     ComponentHealth(
                         name="disk_space",
                         status=HealthStatus.DEGRADED,
-                        message=f"Disk space check failed: {type(e).__name__}",
+                        message=f"Disk space check failed: {type(exc).__name__}",
                     )
                 )
 
@@ -1573,8 +1573,8 @@ class HealthServer:
                 ws_result = await check_workspace_health(self._workspace_dir)
                 if "component" in ws_result:
                     components.append(ws_result["component"])
-            except Exception as e:
-                log.debug("Workspace health check error: %s", e)
+            except Exception as exc:
+                log.debug("Workspace health check error: %s", exc)
 
         token_usage = None
         if self._include_token_usage:
@@ -1775,10 +1775,10 @@ class HealthServer:
                 content_type="text/plain",
                 charset="utf-8",
             )
-        except Exception as e:
-            log.error("Metrics endpoint error: %s", e, exc_info=True)
+        except Exception as exc:
+            log.error("Metrics endpoint error: %s", exc, exc_info=True)
             return web.Response(
-                text=f"# Error generating metrics: {type(e).__name__}\n",
+                text=f"# Error generating metrics: {type(exc).__name__}\n",
                 status=500,
                 content_type="text/plain",
                 charset="utf-8",

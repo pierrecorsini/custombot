@@ -1156,8 +1156,8 @@ class PerformanceMetrics:
                 self._log_summary()
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                log.error("Metrics logging error: %s", e, exc_info=True)
+            except Exception as exc:
+                log.error("Metrics logging error: %s", exc, exc_info=True)
 
     def start_periodic_logging(
         self, interval_seconds: float = DEFAULT_METRICS_LOG_INTERVAL
@@ -1276,13 +1276,13 @@ async def check_performance_health() -> dict[str, Any]:
             ),
             "metrics": snapshot.to_dict(),
         }
-    except Exception as e:
-        log.error("Performance health check failed: %s", e, exc_info=True)
+    except Exception as exc:
+        log.error("Performance health check failed: %s", exc, exc_info=True)
         return {
             "component": ComponentHealth(
                 name="performance",
                 status=HealthStatus.DEGRADED,
-                message=f"Performance check error: {type(e).__name__}",
+                message=f"Performance check error: {type(exc).__name__}",
             ),
             "metrics": None,
         }

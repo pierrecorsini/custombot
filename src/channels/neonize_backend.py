@@ -112,8 +112,8 @@ def _parse_jid(chat_id: str) -> tuple[str, str]:
                 if "@" in original:
                     user, server = original.split("@", 1)
                     return user, server if "." in server else "s.whatsapp.net"
-        except (OSError, ValueError) as e:
-            log.debug("Could not read .chat_id metadata for %s: %s", chat_id, e)
+        except (OSError, ValueError) as exc:
+            log.debug("Could not read .chat_id metadata for %s: %s", chat_id, exc)
 
     # Fallback: try '_' as separator
     if "_" in chat_id:
@@ -173,8 +173,8 @@ def _extract_message(ev: Any) -> Optional[dict[str, Any]]:
             "fromMe": from_me,
             "toMe": not is_group and (not from_me or sender_str == chat_str),
         }
-    except Exception as e:
-        log.warning("Failed to extract message: %s", e)
+    except Exception as exc:
+        log.warning("Failed to extract message: %s", exc)
         return None
 
 
@@ -250,8 +250,8 @@ class NeonizeBackend:
         try:
             connected: bool = bool(self._client.is_connected)
             return connected
-        except Exception as e:
-            log.debug("is_connected check failed: %s", e)
+        except Exception as exc:
+            log.debug("is_connected check failed: %s", exc)
             return self._connected
 
     @property
@@ -447,8 +447,8 @@ class NeonizeBackend:
                 state,
                 ChatPresenceMedia.CHAT_PRESENCE_MEDIA_TEXT,
             )
-        except Exception as e:
-            log.debug("Failed to set typing presence: %s", e)
+        except Exception as exc:
+            log.debug("Failed to set typing presence: %s", exc)
 
     async def poll_message(self) -> Optional[dict[str, Any]]:
         """Wait for next message from the queue (async, with timeout)."""
@@ -498,8 +498,8 @@ class NeonizeBackend:
                 await self._reconnect()
                 # Success — reset backoff to base interval
                 self._reconnect_delay = _WATCHDOG_INTERVAL
-            except Exception as e:
-                log.warning("Watchdog reconnect failed: %s", e)
+            except Exception as exc:
+                log.warning("Watchdog reconnect failed: %s", exc)
                 # Exponential backoff with jitter, capped at max
                 delay_with_jitter = calculate_delay_with_jitter(self._reconnect_delay)
                 log.info(
@@ -533,8 +533,8 @@ class NeonizeBackend:
         if self._client is not None:
             try:
                 await asyncio.to_thread(self._client.disconnect)
-            except Exception as e:
-                log.debug("Error disconnecting stale client: %s", e)
+            except Exception as exc:
+                log.debug("Error disconnecting stale client: %s", exc)
             self._client = None
 
         self._connected = False
@@ -600,7 +600,7 @@ class NeonizeBackend:
         if self._client is not None:
             try:
                 await asyncio.to_thread(self._client.disconnect)
-            except Exception as e:
-                log.warning("Error during disconnect: %s", e)
+            except Exception as exc:
+                log.warning("Error during disconnect: %s", exc)
             self._client = None
         self._connected = False

@@ -386,8 +386,8 @@ class Database:
                 else:
                     details["chats_json_valid"] = True
                     details["chats_count"] = len(result.data)
-            except OSError as e:
-                errors.append(f"Failed to read chats.json: {e}")
+            except OSError as exc:
+                errors.append(f"Failed to read chats.json: {exc}")
                 details["chats_json_valid"] = False
         else:
             details["chats_json_valid"] = True
@@ -411,8 +411,8 @@ class Database:
                 else:
                     details["message_index_valid"] = True
                     details["indexed_message_count"] = len(result.data)
-            except OSError as e:
-                warnings.append(f"Failed to read message_index.json (will be rebuilt): {e}")
+            except OSError as exc:
+                warnings.append(f"Failed to read message_index.json (will be rebuilt): {exc}")
                 details["message_index_valid"] = False
         else:
             details["message_index_valid"] = True
@@ -437,8 +437,8 @@ class Database:
                         is_valid, error = validate_checksum(msg)
                         if not is_valid:
                             checksum_errors.append(f"{msg_file.name}:{line_num}")
-                except OSError as e:
-                    corrupted_files.append(f"{msg_file.name}: {e}")
+                except OSError as exc:
+                    corrupted_files.append(f"{msg_file.name}: {exc}")
 
             if corrupted_files:
                 warnings.append(f"Some message files have invalid JSON: {corrupted_files[:3]}")

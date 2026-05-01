@@ -232,8 +232,8 @@ class Application:
         try:
             cli_output.info("Listening...  (Ctrl+C to stop)")
             await self.shutdown_mgr.wait_for_shutdown()
-        except Exception as e:
-            log.error("Unexpected error in main loop: %s", e, exc_info=self._verbose)
+        except Exception as exc:
+            log.error("Unexpected error in main loop: %s", exc, exc_info=self._verbose)
             self._session_metrics.increment_errors()
             from src.monitoring.performance import get_metrics_collector
             get_metrics_collector().track_error()
@@ -448,8 +448,8 @@ class Application:
             log.warning(
                 "Config watcher stop timed out after %.1fs", CLEANUP_STEP_TIMEOUT
             )
-        except Exception as e:
-            log.warning("Error stopping config watcher: %s", e)
+        except Exception as exc:
+            log.warning("Error stopping config watcher: %s", exc)
 
         # Stop workspace monitor before general shutdown
         try:
@@ -460,8 +460,8 @@ class Application:
             log.warning(
                 "Workspace monitor stop timed out after %.1fs", CLEANUP_STEP_TIMEOUT
             )
-        except Exception as e:
-            log.warning("Error stopping workspace monitor: %s", e)
+        except Exception as exc:
+            log.warning("Error stopping workspace monitor: %s", exc)
 
         try:
             await asyncio.wait_for(

@@ -133,8 +133,8 @@ def validate_json_file(
         details[key_count] = len(result.data)
         return True
 
-    except OSError as e:
-        errors.append(f"Failed to read {file_path.name}: {e}")
+    except OSError as exc:
+        errors.append(f"Failed to read {file_path.name}: {exc}")
         details[key_valid] = False
         return False
 
@@ -187,8 +187,8 @@ def validate_message_files(
                 if not is_valid:
                     result["checksum_errors"].append(f"{msg_file.name}:{line_num}")
 
-        except OSError as e:
-            result["corrupted_files"].append(f"{msg_file.name}: {e}")
+        except OSError as exc:
+            result["corrupted_files"].append(f"{msg_file.name}: {exc}")
 
     return result
 

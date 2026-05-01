@@ -261,8 +261,8 @@ class SensitiveDataRedactor:
         try:
             compiled = re.compile(pattern, re.IGNORECASE)
             self._compiled_patterns.append((name, compiled, replacement))
-        except re.error as e:
-            raise ValueError(f"Invalid regex pattern '{name}': {e}") from e
+        except re.error as exc:
+            raise ValueError(f"Invalid regex pattern '{name}': {exc}") from exc
 
     def remove_pattern(self, name: str) -> bool:
         """
@@ -719,12 +719,12 @@ def setup_logging(
                 log_max_bytes,
                 log_backup_count,
             )
-        except (OSError, IOError) as e:
+        except (OSError, IOError) as exc:
             # Log warning but don't fail - console logging will still work
             root_logger.warning(
                 "Failed to configure log file %s: %s. Falling back to console only.",
                 log_file,
-                e,
+                exc,
             )
 
     # Suppress noisy third-party libraries

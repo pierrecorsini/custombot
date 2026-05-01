@@ -187,5 +187,5 @@ class GracefulShutdown:
                     "Registered handler for %s",
                     sig.name if hasattr(sig, "name") else sig,
                 )
-            except (ValueError, OSError) as e:
-                shutdown_manager._log.debug("Could not register handler for signal %s: %s", sig, e)
+            except (ValueError, OSError) as exc:
+                shutdown_manager._log.debug("Could not register handler for signal %s: %s", sig, exc)

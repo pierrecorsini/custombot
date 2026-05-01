@@ -612,8 +612,8 @@ def _load_and_validate_file(path: Path) -> dict:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
         log.debug("Successfully parsed JSON from %s", path)
-    except json.JSONDecodeError as e:
-        log.error("Failed to parse JSON from %s: %s", path, e)
+    except json.JSONDecodeError as exc:
+        log.error("Failed to parse JSON from %s: %s", path, exc)
         raise
 
     deprecation_warnings = _check_deprecated_options(data, path)

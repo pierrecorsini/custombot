@@ -273,15 +273,15 @@ async def perform_shutdown(
     async def _stop_scheduler():
         try:
             await scheduler.stop()
-        except Exception as e:
-            log.warning("Error stopping scheduler: %s", e)
+        except Exception as exc:
+            log.warning("Error stopping scheduler: %s", exc)
 
     async def _stop_health():
         if health_server:
             try:
                 await health_server.stop()
-            except Exception as e:
-                log.warning("Error stopping health server: %s", e)
+            except Exception as exc:
+                log.warning("Error stopping health server: %s", exc)
 
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_stop_scheduler())
@@ -292,8 +292,8 @@ async def perform_shutdown(
     cli_output.dim("  Closing channel connections...")
     try:
         await channel.close()
-    except Exception as e:
-        log.warning("Error closing channel: %s", e)
+    except Exception as exc:
+        log.warning("Error closing channel: %s", exc)
 
     # 5. Close project store, vector memory, message queue, and LLM client in parallel
     _log_cleanup_step(5, total_cleanup_steps, "Closing project store, vector memory, message queue, and LLM")
@@ -302,44 +302,44 @@ async def perform_shutdown(
     def _close_project_store():
         try:
             project_store.close()
-        except Exception as e:
-            log.warning("Error closing project store: %s", e)
+        except Exception as exc:
+            log.warning("Error closing project store: %s", exc)
 
     def _close_vector_memory():
         if vector_memory is None:
             return
         try:
             vector_memory.close()
-        except Exception as e:
-            log.warning("Error closing vector memory: %s", e)
+        except Exception as exc:
+            log.warning("Error closing vector memory: %s", exc)
 
     async def _close_message_queue():
         try:
             await message_queue.close()
-        except Exception as e:
-            log.warning("Error closing message queue: %s", e)
+        except Exception as exc:
+            log.warning("Error closing message queue: %s", exc)
 
     async def _close_llm():
         try:
             await llm.close()
-        except Exception as e:
-            log.warning("Error closing LLM client: %s", e)
+        except Exception as exc:
+            log.warning("Error closing LLM client: %s", exc)
 
     async def _stop_memory_monitoring():
         if bot is None:
             return
         try:
             await bot.stop_memory_monitoring()
-        except Exception as e:
-            log.warning("Error stopping memory monitoring: %s", e)
+        except Exception as exc:
+            log.warning("Error stopping memory monitoring: %s", exc)
 
     def _close_executor():
         if bot is None:
             return
         try:
             bot.close_executor()
-        except Exception as e:
-            log.warning("Error closing tool executor: %s", e)
+        except Exception as exc:
+            log.warning("Error closing tool executor: %s", exc)
 
     await asyncio.gather(
         asyncio.to_thread(_close_project_store),
@@ -355,16 +355,16 @@ async def perform_shutdown(
     if executor is not None:
         try:
             executor.shutdown(wait=False)
-        except Exception as e:
-            log.warning("Error shutting down thread pool executor: %s", e)
+        except Exception as exc:
+            log.warning("Error shutting down thread pool executor: %s", exc)
 
     # 7. Close database (must be last — other closers may still write)
     _log_cleanup_step(7, total_cleanup_steps, "Closing database connections")
     cli_output.dim("  Closing database connections...")
     try:
         await db.close()
-    except Exception as e:
-        log.warning("Error closing database: %s", e)
+    except Exception as exc:
+        log.warning("Error closing database: %s", exc)
 
     _log_shutdown_complete(shutdown_begin_time)
     cli_output.success("Shutdown complete.")

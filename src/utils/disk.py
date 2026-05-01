@@ -162,8 +162,8 @@ def check_disk_space(
 
     try:
         usage = shutil.disk_usage(str(check_path))
-    except OSError as e:
-        log.error("Failed to check disk space for %s: %s", check_path, e)
+    except OSError as exc:
+        log.error("Failed to check disk space for %s: %s", check_path, exc)
         raise
 
     total = usage.total
@@ -228,8 +228,8 @@ def ensure_disk_space(
     Example:
         >>> try:
         ...     ensure_disk_space("/data", min_bytes=500_000_000)
-        ... except OSError as e:
-        ...     print(f"Cannot write: {e}")
+        ... except OSError as exc:
+        ...     print(f"Cannot write: {exc}")
     """
     result = check_disk_space(path, min_bytes)
 

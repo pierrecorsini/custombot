@@ -278,8 +278,8 @@ Always format your response for plain-text WhatsApp rendering. Your message must
                 file_path.name,
                 getattr(result, "message_id", getattr(result, "ID", "?")),
             )
-        except Exception as e:
-            log.error("Failed to send audio to %s: %s", chat_id, e)
+        except Exception as exc:
+            log.error("Failed to send audio to %s: %s", chat_id, exc)
             raise
         finally:
             await self._backend.set_typing(chat_id, composing=False)
@@ -308,8 +308,8 @@ Always format your response for plain-text WhatsApp rendering. Your message must
             )
             mark_sent(chat_id)
             log.info("Sent document to %s (file=%s)", chat_id, file_path.name)
-        except Exception as e:
-            log.error("Failed to send document to %s: %s", chat_id, e)
+        except Exception as exc:
+            log.error("Failed to send document to %s: %s", chat_id, exc)
             raise
         finally:
             await self._backend.set_typing(chat_id, composing=False)

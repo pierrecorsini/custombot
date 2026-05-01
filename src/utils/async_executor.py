@@ -137,20 +137,20 @@ class AsyncExecutor:
                 timed_out=True,
             )
 
-        except FileNotFoundError as e:
+        except FileNotFoundError as exc:
             return ExecutorResult(
                 stdout="",
-                stderr=f"Command not found: {e}",
+                stderr=f"Command not found: {exc}",
                 return_code=-1,
                 success=False,
                 timed_out=False,
             )
 
-        except Exception as e:
-            log.error("AsyncExecutor error: %s: %s", type(e).__name__, e)
+        except Exception as exc:
+            log.error("AsyncExecutor error: %s: %s", type(exc).__name__, exc)
             return ExecutorResult(
                 stdout="",
-                stderr=f"Execution error: {type(e).__name__}: {e}",
+                stderr=f"Execution error: {type(exc).__name__}: {exc}",
                 return_code=-1,
                 success=False,
                 timed_out=False,

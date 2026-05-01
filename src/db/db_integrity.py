@@ -121,9 +121,9 @@ def detect_corruption_sync(msg_file: Path) -> CorruptionResult:
                 if not is_valid:
                     result.checksum_mismatches.append(line_num)
                     result.error_details.append(f"Line {line_num}: {error}")
-            except JSONDecodeError as e:
+            except JSONDecodeError as exc:
                 result.corrupted_lines.append(line_num)
-                result.error_details.append(f"Line {line_num}: JSON parse error - {e}")
+                result.error_details.append(f"Line {line_num}: JSON parse error - {exc}")
 
         result.is_corrupted = bool(result.corrupted_lines or result.checksum_mismatches)
 
@@ -135,10 +135,10 @@ def detect_corruption_sync(msg_file: Path) -> CorruptionResult:
                 len(result.checksum_mismatches),
             )
 
-    except OSError as e:
+    except OSError as exc:
         result.is_corrupted = True
-        result.error_details.append(f"Failed to read file: {e}")
-        log.error("Failed to read message file %s: %s", msg_file.name, e)
+        result.error_details.append(f"Failed to read file: {exc}")
+        log.error("Failed to read message file %s: %s", msg_file.name, exc)
 
     return result
 
@@ -166,8 +166,8 @@ def backup_file_sync(msg_file: Path, data_dir: Path) -> Optional[str]:
         shutil.copy2(msg_file, backup_file)
         log.info("Created backup: %s", backup_file)
         return str(backup_file)
-    except OSError as e:
-        log.error("Failed to create backup: %s", e)
+    except OSError as exc:
+        log.error("Failed to create backup: %s", exc)
         return None
 
 
@@ -216,8 +216,8 @@ def repair_file_sync(
         )
         return True
 
-    except OSError as e:
-        log.error("Failed to repair file %s: %s", msg_file.name, e)
+    except OSError as exc:
+        log.error("Failed to repair file %s: %s", msg_file.name, exc)
         return False
 
 

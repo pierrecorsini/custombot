@@ -286,8 +286,8 @@ class RoutingAddSkill(BaseSkill):
                 f"   • showErrors: `{showErrors}`\n"
                 f"   • Instruction: `{instruction}`"
             )
-        except Exception as e:
-            return f"❌ Error creating routing rule: {e}"
+        except Exception as exc:
+            return f"❌ Error creating routing rule: {exc}"
 
 
 class RoutingDeleteSkill(BaseSkill):
@@ -368,5 +368,5 @@ class RoutingDeleteSkill(BaseSkill):
             self._engine.refresh_rules()
 
             return f"✅ Routing rule `{rule_id}` deleted successfully."
-        except Exception as e:
-            return f"❌ Error deleting routing rule: {e}"
+        except Exception as exc:
+            return f"❌ Error deleting routing rule: {exc}"

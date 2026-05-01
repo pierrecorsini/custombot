@@ -327,6 +327,6 @@ def sanitize_command(workspace_dir: Path, command: str) -> str:
     try:
         validate_command_paths(workspace_dir, command)
         return command
-    except PathSecurityError as e:
-        log.warning("Blocked command with unsafe path: %s (reason: %s)", e.path, e.reason)
-        return f"❌ Security: {e}"
+    except PathSecurityError as exc:
+        log.warning("Blocked command with unsafe path: %s (reason: %s)", exc.path, exc.reason)
+        return f"❌ Security: {exc}"

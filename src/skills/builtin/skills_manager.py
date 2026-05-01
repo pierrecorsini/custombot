@@ -80,8 +80,8 @@ class SkillsFindSkill(BaseSkill):
 
         except FileNotFoundError:
             return "❌ Error: 'npx' command not found. Please install Node.js."
-        except Exception as e:
-            return f"❌ Error searching skills: {e}"
+        except Exception as exc:
+            return f"❌ Error searching skills: {exc}"
 
 
 class SkillsAddSkill(BaseSkill):
@@ -133,8 +133,8 @@ class SkillsAddSkill(BaseSkill):
 
         except FileNotFoundError:
             return "❌ Error: 'npx' command not found. Please install Node.js."
-        except Exception as e:
-            return f"❌ Error installing skill: {e}"
+        except Exception as exc:
+            return f"❌ Error installing skill: {exc}"
 
 
 class SkillsListSkill(BaseSkill):
@@ -293,5 +293,5 @@ class SkillsRemoveSkill(BaseSkill):
         try:
             shutil.rmtree(skill_dir)
             return f"✅ Skill '{name}' removed successfully."
-        except Exception as e:
-            return f"❌ Error removing skill: {e}"
+        except Exception as exc:
+            return f"❌ Error removing skill: {exc}"

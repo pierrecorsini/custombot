@@ -195,8 +195,8 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
                     free_mb=round(result.free_mb, 2),
                     required_mb=round(DEFAULT_MIN_DISK_SPACE / (1024 * 1024), 2),
                 )
-        except OSError as e:
-            log.warning("Could not verify disk space for %s: %s", self._db_path, e)
+        except OSError as exc:
+            log.warning("Could not verify disk space for %s: %s", self._db_path, exc)
 
     # ── read connections ────────────────────────────────────────────────
 

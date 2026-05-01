@@ -264,8 +264,8 @@ async def _step_health_server(ctx: StartupContext) -> str | None:
         ctx.app._health_server = health_server
         ctx.initialized_components.append(f"Health Server (port {health_port})")
         return f"port={health_port}"
-    except Exception as e:
-        log.warning("Failed to start health server on port %d: %s", health_port, e)
+    except Exception as exc:
+        log.warning("Failed to start health server on port %d: %s", health_port, exc)
         ctx.app._health_server = None
         return None
 

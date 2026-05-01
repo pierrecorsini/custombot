@@ -124,8 +124,8 @@ def _is_command_blocked(command: str, extra_denylist: List[str] | None = None) -
             try:
                 if re.search(pattern, cmd_lower, re.IGNORECASE):
                     return f"Command blocked by custom denylist (matches pattern: {pattern})"
-            except re.error as e:
-                log.warning("Invalid denylist regex %r: %s", pattern, e)
+            except re.error as exc:
+                log.warning("Invalid denylist regex %r: %s", pattern, exc)
     return None
 
 
@@ -137,8 +137,8 @@ def _is_command_allowed(command: str, allowlist: List[str] | None = None) -> boo
         try:
             if re.search(pattern, command, re.IGNORECASE):
                 return True
-        except re.error as e:
-            log.warning("Invalid allowlist regex %r: %s", pattern, e)
+        except re.error as exc:
+            log.warning("Invalid allowlist regex %r: %s", pattern, exc)
     return False
 
 
@@ -297,16 +297,16 @@ class ShellSkill(BaseSkill):
         # Security check 3: Validate paths in command (prevent absolute path escapes)
         try:
             validate_command_paths(workspace_dir, command)
-        except PathSecurityError as e:
+        except PathSecurityError as exc:
             _audit_log(
                 "path_escape_blocked",
                 {
-                    "path": str(e.path),
-                    "reason": e.reason,
+                    "path": str(exc.path),
+                    "reason": exc.reason,
                     "command_snippet": command[:100],
                 },
             )
-            return f"❌ Security: {e}"
+            return f"❌ Security: {exc}"
 
         timeout = min(int(timeout), _TIMEOUT)
         workspace_dir.mkdir(parents=True, exist_ok=True)

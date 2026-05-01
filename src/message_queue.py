@@ -510,9 +510,9 @@ class MessageQueue:
 
         try:
             content = self._queue_file.read_text(encoding="utf-8", errors="replace")
-        except Exception as e:
+        except Exception as exc:
             result.is_corrupted = True
-            result.error_details.append(f"Failed to read file: {e}")
+            result.error_details.append(f"Failed to read file: {exc}")
             return result
 
         for line_num, line in enumerate(content.splitlines(), start=1):
@@ -535,9 +535,9 @@ class MessageQueue:
                     result.pending_lines += 1
                 else:
                     result.completed_lines += 1
-            except (KeyError, ValueError) as e:
+            except (KeyError, ValueError) as exc:
                 result.corrupted_lines.append(line_num)
-                result.error_details.append(f"Line {line_num}: {str(e)[:80]}")
+                result.error_details.append(f"Line {line_num}: {str(exc)[:80]}")
 
         result.is_corrupted = bool(result.corrupted_lines)
         return result
@@ -686,8 +686,8 @@ class MessageQueue:
             # partial writes by substituting U+FFFD instead of raising
             # UnicodeDecodeError, which would lose all queued messages.
             content = self._queue_file.read_text(encoding="utf-8", errors="replace")
-        except Exception as e:
-            log.error("Failed to read queue file: %s", e)
+        except Exception as exc:
+            log.error("Failed to read queue file: %s", exc)
             return
 
         for line_idx, line in enumerate(content.splitlines(), start=1):
@@ -708,10 +708,10 @@ class MessageQueue:
                     pending_count += 1
                 else:
                     completed_count += 1
-            except (KeyError, ValueError) as e:
+            except (KeyError, ValueError) as exc:
                 corrupted_count += 1
                 corrupted_line_numbers.append(line_idx)
-                error_details.append(f"Line {line_idx}: {str(e)[:80]}")
+                error_details.append(f"Line {line_idx}: {str(exc)[:80]}")
                 continue
 
         is_corrupted = corrupted_count > 0
@@ -773,15 +773,15 @@ class MessageQueue:
             try:
                 tmp_file.rename(self._queue_file)
                 log.warning("Promoted orphaned temp file to queue file")
-            except Exception as e:
-                log.error("Failed to promote temp file: %s", e)
+            except Exception as exc:
+                log.error("Failed to promote temp file: %s", exc)
         else:
             # Both exist — crash before the unlink step; main is authoritative
             try:
                 tmp_file.unlink()
                 log.info("Removed orphaned temp file (main file is authoritative)")
-            except Exception as e:
-                log.warning("Failed to remove orphaned temp file: %s", e)
+            except Exception as exc:
+                log.warning("Failed to remove orphaned temp file: %s", exc)
 
     async def _backup_corrupted_file(self) -> None:
         """Create a timestamped backup before eviction overwrites corrupted data.
@@ -803,8 +803,8 @@ class MessageQueue:
         try:
             shutil.copy2(self._queue_file, backup_path)
             log.info("Backed up corrupted queue file to %s", backup_path)
-        except Exception as e:
-            log.warning("Failed to backup corrupted queue file: %s", e)
+        except Exception as exc:
+            log.warning("Failed to backup corrupted queue file: %s", exc)
 
     async def _append_to_queue(self, msg: QueuedMessage) -> None:
         """
@@ -827,8 +827,8 @@ class MessageQueue:
             line = json_dumps(msg.to_dict(), ensure_ascii=False) + "\n"
             self._write_buffer.append(line)
             await self._maybe_flush_buffer()
-        except Exception as e:
-            log.error("Failed to append to queue file: %s", e)
+        except Exception as exc:
+            log.error("Failed to append to queue file: %s", exc)
             raise
 
     async def _append_completion(self, message_id: str) -> None:
@@ -855,8 +855,8 @@ class MessageQueue:
             )
             self._write_buffer.append(entry)
             await self._maybe_flush_buffer()
-        except Exception as e:
-            log.error("Failed to append completion to queue file: %s", e)
+        except Exception as exc:
+            log.error("Failed to append completion to queue file: %s", exc)
             # Fall back to full persist on error
             self._write_buffer.clear()
             await self._persist_pending()
@@ -888,8 +888,8 @@ class MessageQueue:
         try:
             await asyncio.to_thread(_write_batch)
             self._last_flush_time = time.monotonic()
-        except Exception as e:
-            log.error("Failed to flush write buffer: %s", e)
+        except Exception as exc:
+            log.error("Failed to flush write buffer: %s", exc)
             raise
 
     async def _flush_loop(self) -> None:
@@ -941,8 +941,8 @@ class MessageQueue:
         try:
             await asyncio.to_thread(_atomic_write)
             log.debug("Persisted %d pending messages", len(messages))
-        except Exception as e:
-            log.error("Failed to persist queue: %s", e)
+        except Exception as exc:
+            log.error("Failed to persist queue: %s", exc)
 
             # Clean up temp file if it exists
             tmp = self._queue_file.with_suffix(".tmp")

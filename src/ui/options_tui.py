@@ -324,8 +324,8 @@ def run_options_tui(config_path: Path = CONFIG_PATH) -> bool:
     try:
         config = load_config(config_path)
         cli.info(f"Loaded configuration from {config_path}")
-    except Exception as e:
-        cli.error(f"Failed to load configuration: {e}")
+    except Exception as exc:
+        cli.error(f"Failed to load configuration: {exc}")
         return False
 
     # Main configuration loop
@@ -350,8 +350,8 @@ def run_options_tui(config_path: Path = CONFIG_PATH) -> bool:
                 save_config(config, config_path)
                 cli.success(f"Configuration saved to {config_path}")
                 return True
-            except Exception as e:
-                cli.error(f"Failed to save configuration: {e}")
+            except Exception as exc:
+                cli.error(f"Failed to save configuration: {exc}")
                 return False
 
     # Should never reach here, but satisfy type checker

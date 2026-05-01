@@ -43,13 +43,13 @@ async def check_database(db: "Database") -> ComponentHealth:
             message=f"Database is accessible ({len(chats)} chats)",
             latency_ms=latency,
         )
-    except Exception as e:
+    except Exception as exc:
         latency = (time.perf_counter() - start) * 1000
-        log.warning("Database health check failed: %s", e)
+        log.warning("Database health check failed: %s", exc)
         return ComponentHealth(
             name="database",
             status=HealthStatus.UNHEALTHY,
-            message=f"Database error: {e}",
+            message=f"Database error: {exc}",
             latency_ms=latency,
         )
 
@@ -79,12 +79,12 @@ async def check_neonize(backend: Optional["NeonizeBackend"]) -> ComponentHealth:
             message="WhatsApp not connected",
             latency_ms=latency,
         )
-    except Exception as e:
+    except Exception as exc:
         latency = (time.perf_counter() - start) * 1000
         return ComponentHealth(
             name="whatsapp",
             status=HealthStatus.UNHEALTHY,
-            message=f"WhatsApp check failed: {type(e).__name__}",
+            message=f"WhatsApp check failed: {type(exc).__name__}",
             latency_ms=latency,
         )
 
@@ -122,9 +122,9 @@ async def check_llm_credentials(
             message="LLM API timeout (credentials may be valid)",
             latency_ms=latency,
         )
-    except Exception as e:
+    except Exception as exc:
         latency = (time.perf_counter() - start) * 1000
-        error_msg = str(e).lower()
+        error_msg = str(exc).lower()
         if "401" in error_msg or "unauthorized" in error_msg or "invalid" in error_msg:
             return ComponentHealth(
                 name="llm",
@@ -132,11 +132,11 @@ async def check_llm_credentials(
                 message="Invalid API credentials",
                 latency_ms=latency,
             )
-        log.debug("LLM health check error: %s", e)
+        log.debug("LLM health check error: %s", exc)
         return ComponentHealth(
             name="llm",
             status=HealthStatus.DEGRADED,
-            message=f"LLM check failed: {type(e).__name__}",
+            message=f"LLM check failed: {type(exc).__name__}",
             latency_ms=latency,
         )
     finally:
@@ -221,11 +221,11 @@ def check_llm_logs(log_dir: Optional[str] = None) -> ComponentHealth:
             status=HealthStatus.HEALTHY,
             message=message,
         )
-    except Exception as e:
+    except Exception as exc:
         return ComponentHealth(
             name="llm_logs",
             status=HealthStatus.DEGRADED,
-            message=f"LLM log check error: {type(e).__name__}",
+            message=f"LLM log check error: {type(exc).__name__}",
         )
 
 

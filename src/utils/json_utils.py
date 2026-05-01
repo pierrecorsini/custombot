@@ -228,10 +228,10 @@ def safe_json_parse(
     # Core parse attempt
     try:
         result = json_loads(data)
-    except JSONDecodeError as e:
-        return _on_parse_error(mode, e, "decode", default, expected_type, log_errors)
-    except Exception as e:
-        return _on_parse_error(mode, e, "read", default, expected_type, log_errors)
+    except JSONDecodeError as exc:
+        return _on_parse_error(mode, exc, "decode", default, expected_type, log_errors)
+    except Exception as exc:
+        return _on_parse_error(mode, exc, "read", default, expected_type, log_errors)
 
     # Type check
     if not isinstance(result, expected_type):

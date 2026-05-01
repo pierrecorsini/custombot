@@ -93,8 +93,8 @@ class WebResearchSkill(BaseSkill):
                 results = await loop.run_in_executor(
                     None, lambda: list(ddgs.text(query, max_results=max_results))
                 )
-        except Exception as e:
-            return f"Search failed: {e}"
+        except Exception as exc:
+            return f"Search failed: {exc}"
 
         if not results:
             return f"No results for: {query}"
@@ -143,8 +143,8 @@ class WebResearchSkill(BaseSkill):
             return f"Failed: {result.error_message or 'Unknown error'}"
         except asyncio.TimeoutError:
             return f"Timeout crawling {url}"
-        except Exception as e:
-            return f"Error crawling {url}: {e}"
+        except Exception as exc:
+            return f"Error crawling {url}: {exc}"
 
     async def _search_and_crawl(self, query: str, max_results: int, selector: str) -> str:
         """Search and then crawl the top results."""

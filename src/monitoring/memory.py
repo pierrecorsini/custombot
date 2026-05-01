@@ -140,8 +140,8 @@ def get_memory_stats(
         for name, getter in cache_tracker.items():
             try:
                 cache_sizes[name] = getter()
-            except Exception as e:
-                log.debug("Failed to get cache size for %s: %s", name, e)
+            except Exception as exc:
+                log.debug("Failed to get cache size for %s: %s", name, exc)
                 cache_sizes[name] = -1
 
     return MemoryStats(
@@ -296,8 +296,8 @@ class MemoryMonitor:
                 if stats.cache_sizes:
                     log.debug("Cache sizes: %s", stats.cache_sizes)
 
-            except Exception as e:
-                log.error("Memory check failed: %s", e, exc_info=True)
+            except Exception as exc:
+                log.error("Memory check failed: %s", exc, exc_info=True)
 
             await asyncio.sleep(interval_seconds)
 
@@ -415,13 +415,13 @@ async def check_memory_health() -> dict[str, Any]:
             ),
             "stats": None,
         }
-    except Exception as e:
-        log.error("Memory health check failed: %s", e, exc_info=True)
+    except Exception as exc:
+        log.error("Memory health check failed: %s", exc, exc_info=True)
         return {
             "component": ComponentHealth(
                 name="memory",
                 status=HealthStatus.DEGRADED,
-                message=f"Memory check error: {type(e).__name__}",
+                message=f"Memory check error: {type(exc).__name__}",
             ),
             "stats": None,
         }
