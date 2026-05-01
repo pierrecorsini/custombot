@@ -396,15 +396,19 @@ class Bot:
             extra={"chat_id": msg.chat_id, "message_id": msg.message_id},
         )
 
-        if await self._dedup.is_inbound_duplicate(msg.message_id):
-            log.debug(
-                "Duplicate message %s from chat %s, skipping",
-                msg.message_id,
-                msg.chat_id,
-                extra={"chat_id": msg.chat_id, "message_id": msg.message_id},
-            )
+        try:
+            if await self._dedup.is_inbound_duplicate(msg.message_id):
+                log.debug(
+                    "Duplicate message %s from chat %s, skipping",
+                    msg.message_id,
+                    msg.chat_id,
+                    extra={"chat_id": msg.chat_id, "message_id": msg.message_id},
+                )
+                clear_correlation_id()
+                return None
+        except Exception:
             clear_correlation_id()
-            return None
+            raise
 
         rate_result = self._rate_limiter.check_message_rate(
             msg.chat_id,
