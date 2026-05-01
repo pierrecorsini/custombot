@@ -45,6 +45,7 @@ from src.security.signing import (
     write_signature_file,
 )
 from src.utils import JSONDecodeError
+from src.utils.background_service import BaseBackgroundService
 from src.utils.path import sanitize_path_component
 from src.utils.retry import is_transient_error
 
@@ -72,15 +73,15 @@ def _utc_offset_hours() -> float:
     return offset.total_seconds() / 3600 if offset else 0
 
 
-class TaskScheduler:
+class TaskScheduler(BaseBackgroundService):
     """Background scheduler that triggers bot actions on schedule."""
 
     # Cache UTC offset — refreshes every hour (only changes on DST transition)
     _UTC_OFFSET_CACHE_SECONDS = 3600
+    _service_name = "Scheduler"
 
     def __init__(self) -> None:
-        self._running = False
-        self._task: asyncio.Task | None = None
+        super().__init__()
         # chat_id -> list of task dicts
         self._tasks: dict[str, list[dict[str, Any]]] = {}
         # callback: (chat_id, prompt_text, prompt_hmac | None) -> str | None response
@@ -129,20 +130,11 @@ class TaskScheduler:
         self._on_trigger = callback
 
     def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._loop())
+        super().start()
         log.info("Scheduler started")
 
     async def stop(self) -> None:
-        self._running = False
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        await super().stop()
         log.info("Scheduler stopped")
 
     def get_status(self) -> dict[str, Any]:
@@ -710,7 +702,7 @@ class TaskScheduler:
         # Next task is further away than TICK_SECONDS — cap at TICK_SECONDS
         return TICK_SECONDS
 
-    async def _loop(self) -> None:
+    async def _run_loop(self) -> None:
         """Background loop: check tasks with adaptive sleep intervals.
 
         Instead of a fixed ``TICK_SECONDS`` sleep, computes the time until

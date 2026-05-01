@@ -30,6 +30,7 @@ from src.db.sqlite_utils import SqliteHelper
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.exceptions import DiskSpaceError
 from src.utils import BoundedOrderedDict, DEFAULT_MIN_DISK_SPACE, check_disk_space
+from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.locking import ThreadLock
 from src.utils.retry import retry_with_backoff
 from src.vector_memory._utils import _cache_key, _serialize_f32, _track_embed_cache_event
@@ -80,11 +81,12 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         self._thread_local = threading.local()
         self._read_connections: list[sqlite3.Connection] = []
         self._read_pool_lock = ThreadLock()
-        # Embedding API health cache — avoids repeated full-timeout waits when
-        # the endpoint is down.  Protected by _cache_lock (already used for
-        # the embed LRU cache, so no additional lock needed).
-        self._embed_api_healthy: bool = True
-        self._embed_api_last_check: float = 0.0
+        # Circuit breaker for embedding API health — avoids repeated full-timeout
+        # waits when the endpoint is down.
+        self._circuit_breaker = CircuitBreaker(
+            failure_threshold=3,
+            cooldown_seconds=60.0,
+        )
 
         # Batch coalescing: rapid save() calls are queued and flushed together
         # through _embed_batch() after a short debounce window, reducing the
@@ -174,12 +176,12 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
             if not resp.data:
                 return False, "Empty response from embedding API"
             actual_dims = len(resp.data[0].embedding)
-            self._mark_embedding_api_healthy()
+            await self._mark_embedding_api_healthy()
             return True, f"dims={actual_dims}"
         except asyncio.TimeoutError:
             return False, f"Timeout after {timeout}s"
         except Exception as exc:
-            self._mark_embedding_api_unhealthy()
+            await self._mark_embedding_api_unhealthy()
             return False, f"{type(exc).__name__}: {exc}"
 
     # ── disk safety ──────────────────────────────────────────────────────
@@ -340,7 +342,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
             )
             embedding = resp.data[0].embedding
 
-            self._mark_embedding_api_healthy()
+            await self._mark_embedding_api_healthy()
 
             # Store in cache (BoundedOrderedDict handles eviction)
             with self._cache_lock:
@@ -350,7 +352,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
             future.set_result(embedding)
             return embedding
         except Exception as exc:
-            self._mark_embedding_api_unhealthy()
+            await self._mark_embedding_api_unhealthy()
             # Propagate error to waiters
             if not future.done():
                 future.set_exception(exc)
@@ -374,7 +376,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         assert self._db is not None
 
         try:
-            self._check_embedding_api_health()
+            await self._check_embedding_api_health()
             embedding = await self._batched_embed(text)
             now = time.time()
 
@@ -391,7 +393,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
 
             return row_id
         except Exception as exc:
-            self._mark_embedding_api_unhealthy()
+            await self._mark_embedding_api_unhealthy()
             log_noncritical(
                 NonCriticalCategory.EMBEDDING,
                 f"Embedding API unreachable during save(chat={chat_id}); queuing for retry: {exc}",
@@ -421,7 +423,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
             return []
 
         try:
-            self._check_embedding_api_health()
+            await self._check_embedding_api_health()
             texts = [text for text, _ in items]
             embeddings = await self._embed_batch(texts)
             now = time.time()
@@ -438,7 +440,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
 
             return rows
         except Exception as exc:
-            self._mark_embedding_api_unhealthy()
+            await self._mark_embedding_api_unhealthy()
             log_noncritical(
                 NonCriticalCategory.EMBEDDING,
                 f"Embedding API unreachable during save_batch(chat={chat_id}, "
@@ -517,12 +519,12 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
             return []
 
         try:
-            self._check_embedding_api_health()
+            await self._check_embedding_api_health()
             query_vec = _serialize_f32(await self._embed(query))
 
             return await asyncio.to_thread(self._search_sync, chat_id, query_vec, limit)
         except Exception as exc:
-            self._mark_embedding_api_unhealthy()
+            await self._mark_embedding_api_unhealthy()
             log_noncritical(
                 NonCriticalCategory.EMBEDDING,
                 f"Embedding API unreachable during search(chat={chat_id}); returning empty: {exc}",
@@ -595,6 +597,33 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
             (chat_id,),
         ).fetchone()
         return row[0] if row else 0
+
+    def health_snapshot(self) -> dict[str, Any]:
+        """Return a snapshot of embedding health for monitoring.
+
+        Thread-safe — acquires ``_cache_lock`` briefly to read state.
+        Returns a dict with:
+            - ``embedding_api_healthy``: whether the circuit breaker is closed
+            - ``retry_queue_depth``: number of pending retry saves
+            - ``retry_queue_capacity``: queue_depth / max_queue_size (0.0–1.0)
+            - ``circuit_breaker_state``: current breaker state string
+        """
+        from src.utils.circuit_breaker import CircuitState
+
+        breaker_state = self._circuit_breaker.state
+        api_healthy = breaker_state == CircuitState.CLOSED
+
+        with self._cache_lock:
+            queue_depth = len(self._pending_retries)
+
+        from src.vector_memory.health import _MAX_RETRY_QUEUE_SIZE
+
+        return {
+            "embedding_api_healthy": api_healthy,
+            "retry_queue_depth": queue_depth,
+            "retry_queue_capacity": round(queue_depth / _MAX_RETRY_QUEUE_SIZE, 2),
+            "circuit_breaker_state": breaker_state.value,
+        }
 
 
 __all__ = ["VectorMemory", "_serialize_f32"]

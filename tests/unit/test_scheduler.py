@@ -275,7 +275,7 @@ class TestLifecycle:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TaskScheduler — add_task (sync)
+# TaskScheduler — add_task (async)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -424,17 +424,19 @@ class TestListTasks:
     def test_empty_for_unknown_chat(self, scheduler: TaskScheduler):
         assert scheduler.list_tasks("unknown") == []
 
-    def test_returns_all_tasks(self, scheduler: TaskScheduler):
-        scheduler.add_task("chat1", _make_task(prompt="a"))
-        scheduler.add_task("chat1", _make_task(prompt="b"))
+    @pytest.mark.asyncio
+    async def test_returns_all_tasks(self, scheduler: TaskScheduler):
+        await scheduler.add_task("chat1", _make_task(prompt="a"))
+        await scheduler.add_task("chat1", _make_task(prompt="b"))
         tasks = scheduler.list_tasks("chat1")
         assert len(tasks) == 2
         prompts = {t["prompt"] for t in tasks}
         assert prompts == {"a", "b"}
 
-    def test_returns_copy(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_returns_copy(self, scheduler: TaskScheduler):
         """list_tasks should return the actual list (not a deep copy)."""
-        scheduler.add_task("chat1", _make_task())
+        await scheduler.add_task("chat1", _make_task())
         tasks = scheduler.list_tasks("chat1")
         assert len(tasks) == 1
 
@@ -447,17 +449,19 @@ class TestListTasks:
 class TestPersistence:
     """Tests for task persistence to disk."""
 
-    def test_sync_persist_creates_directory(self, workspace: Path):
+    @pytest.mark.asyncio
+    async def test_sync_persist_creates_directory(self, workspace: Path):
         s = TaskScheduler()
         s.configure(workspace=workspace, on_trigger=AsyncMock())
-        s.add_task("chat1", _make_task())
+        await s.add_task("chat1", _make_task())
         expected_dir = workspace / "chat1" / SCHEDULER_DIR
         assert expected_dir.is_dir()
 
-    def test_sync_persist_file_content(self, workspace: Path):
+    @pytest.mark.asyncio
+    async def test_sync_persist_file_content(self, workspace: Path):
         s = TaskScheduler()
         s.configure(workspace=workspace, on_trigger=AsyncMock())
-        s.add_task("chat1", _make_task(prompt="check content", label="MyTask"))
+        await s.add_task("chat1", _make_task(prompt="check content", label="MyTask"))
         data = json.loads(_tasks_file(workspace, "chat1").read_text())
         assert data[0]["prompt"] == "check content"
         assert data[0]["label"] == "MyTask"
@@ -517,39 +521,44 @@ class TestPersistence:
 class TestLoadAll:
     """Tests for TaskScheduler.load_all()."""
 
-    def test_loads_multiple_chats(self, workspace: Path):
+    @pytest.mark.asyncio
+    async def test_loads_multiple_chats(self, workspace: Path):
         s = TaskScheduler()
         s.configure(workspace=workspace, on_trigger=AsyncMock())
-        s.add_task("chatA", _make_task(prompt="A"))
-        s.add_task("chatB", _make_task(prompt="B"))
+        await s.add_task("chatA", _make_task(prompt="A"))
+        await s.add_task("chatB", _make_task(prompt="B"))
 
         s2 = TaskScheduler()
         s2.configure(workspace=workspace, on_trigger=AsyncMock())
-        s2.load_all()
+        await s2.load_all()
         assert len(s2.list_tasks("chatA")) == 1
         assert len(s2.list_tasks("chatB")) == 1
 
-    def test_skips_dirs_without_tasks(self, workspace: Path):
+    @pytest.mark.asyncio
+    async def test_skips_dirs_without_tasks(self, workspace: Path):
         (workspace / "chat_no_tasks").mkdir()
         s = TaskScheduler()
         s.configure(workspace=workspace, on_trigger=AsyncMock())
-        s.load_all()  # should not raise
+        await s.load_all()  # should not raise
         assert s.list_tasks("chat_no_tasks") == []
 
-    def test_no_workspace(self):
+    @pytest.mark.asyncio
+    async def test_no_workspace(self):
         s = TaskScheduler()
-        s.load_all()  # should not raise
+        await s.load_all()  # should not raise
 
-    def test_nonexistent_workspace(self, tmp_path: Path):
+    @pytest.mark.asyncio
+    async def test_nonexistent_workspace(self, tmp_path: Path):
         s = TaskScheduler()
         s.configure(workspace=tmp_path / "does_not_exist", on_trigger=AsyncMock())
-        s.load_all()  # should not raise
+        await s.load_all()  # should not raise
 
-    def test_ignores_files_in_workspace_root(self, workspace: Path):
+    @pytest.mark.asyncio
+    async def test_ignores_files_in_workspace_root(self, workspace: Path):
         (workspace / "somefile.txt").write_text("not a chat dir")
         s = TaskScheduler()
         s.configure(workspace=workspace, on_trigger=AsyncMock())
-        s.load_all()  # should not raise
+        await s.load_all()  # should not raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -943,23 +952,23 @@ class TestExecuteTask:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TaskScheduler — _loop
+# TaskScheduler — _run_loop
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class TestLoop:
-    """Tests for the background _loop tick behaviour."""
+    """Tests for the background _run_loop tick behaviour."""
 
     @pytest.mark.asyncio
     async def test_loop_executes_due_tasks(self, scheduler: TaskScheduler, on_trigger: AsyncMock):
         on_trigger.return_value = "done"
         # Add an interval task that is always due (no last_run)
-        scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+        await scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
 
         # Patch TICK_SECONDS temporarily so loop ticks fast
         with patch("src.scheduler.TICK_SECONDS", 0.1):
             scheduler._running = True
-            task = asyncio.create_task(scheduler._loop())
+            task = asyncio.create_task(scheduler._run_loop())
             await asyncio.sleep(0.3)
             scheduler._running = False
             task.cancel()
@@ -974,12 +983,12 @@ class TestLoop:
     async def test_loop_skips_disabled_tasks(self, scheduler: TaskScheduler, on_trigger: AsyncMock):
         on_trigger.return_value = "done"
         task_dict = _make_task(schedule_type="interval", seconds=60)
-        scheduler.add_task("chat1", task_dict)
+        await scheduler.add_task("chat1", task_dict)
         # Disable the task
         scheduler.list_tasks("chat1")[0]["enabled"] = False
 
         with patch("src.scheduler.TICK_SECONDS", 0.1):
-            task = asyncio.create_task(scheduler._loop())
+            task = asyncio.create_task(scheduler._run_loop())
             await asyncio.sleep(0.35)
             task.cancel()
             try:
@@ -1015,7 +1024,7 @@ class TestLoop:
 
         with patch("src.scheduler.TICK_SECONDS", 0.1):
             scheduler._running = True
-            loop_task = asyncio.create_task(scheduler._loop())
+            loop_task = asyncio.create_task(scheduler._run_loop())
             await asyncio.sleep(0.3)
             scheduler._running = False
             loop_task.cancel()
@@ -1055,7 +1064,7 @@ class TestLoop:
 
         with patch("src.scheduler.TICK_SECONDS", 0.1):
             scheduler._running = True
-            loop_task = asyncio.create_task(scheduler._loop())
+            loop_task = asyncio.create_task(scheduler._run_loop())
 
             # Capture per-tick sets
             for _ in range(3):
@@ -1096,17 +1105,19 @@ class TestAdaptiveSleep:
         """No tasks registered → None."""
         assert scheduler._time_to_next_due() is None
 
-    def test_time_to_next_due_interval_task_imminent(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_time_to_next_due_interval_task_imminent(self, scheduler: TaskScheduler):
         """Interval task with no last_run is due immediately → 0."""
-        scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+        await scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
         result = scheduler._time_to_next_due()
         assert result is not None
         assert result == 0.0
 
-    def test_time_to_next_due_interval_task_waiting(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_time_to_next_due_interval_task_waiting(self, scheduler: TaskScheduler):
         """Interval task recently run → remaining time is positive."""
         task_dict = _make_task(schedule_type="interval", seconds=600)
-        scheduler.add_task("chat1", task_dict)
+        await scheduler.add_task("chat1", task_dict)
         # Simulate a recent run
         task_dict["last_run"] = _now().isoformat()
         result = scheduler._time_to_next_due()
@@ -1114,20 +1125,22 @@ class TestAdaptiveSleep:
         # Should be close to 600 seconds minus a small elapsed time
         assert 590 < result <= 600
 
-    def test_time_to_next_due_skips_disabled_tasks(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_time_to_next_due_skips_disabled_tasks(self, scheduler: TaskScheduler):
         """Disabled tasks are excluded from computation."""
         task_dict = _make_task(schedule_type="interval", seconds=60)
-        scheduler.add_task("chat1", task_dict)
+        await scheduler.add_task("chat1", task_dict)
         task_dict["enabled"] = False
         assert scheduler._time_to_next_due() is None
 
-    def test_time_to_next_due_picks_minimum_across_tasks(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_time_to_next_due_picks_minimum_across_tasks(self, scheduler: TaskScheduler):
         """With multiple tasks, returns the soonest time-to-due."""
         # Task A: due immediately (no last_run)
-        scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+        await scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
         # Task B: due in 300s
         task_b = _make_task(schedule_type="interval", seconds=600)
-        scheduler.add_task("chat2", task_b)
+        await scheduler.add_task("chat2", task_b)
         task_b["last_run"] = _now().isoformat()
 
         result = scheduler._time_to_next_due()
@@ -1138,23 +1151,26 @@ class TestAdaptiveSleep:
         """No tasks → SCHEDULER_MAX_SLEEP_SECONDS."""
         assert scheduler._compute_adaptive_sleep() == SCHEDULER_MAX_SLEEP_SECONDS
 
-    def test_compute_adaptive_sleep_task_imminent(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_compute_adaptive_sleep_task_imminent(self, scheduler: TaskScheduler):
         """Task due immediately → SCHEDULER_MIN_SLEEP_SECONDS (floor clamp)."""
-        scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+        await scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
         assert scheduler._compute_adaptive_sleep() == SCHEDULER_MIN_SLEEP_SECONDS
 
-    def test_compute_adaptive_sleep_task_far_away(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_compute_adaptive_sleep_task_far_away(self, scheduler: TaskScheduler):
         """Task due in > TICK_SECONDS → capped at TICK_SECONDS."""
         task_dict = _make_task(schedule_type="interval", seconds=9999)
-        scheduler.add_task("chat1", task_dict)
+        await scheduler.add_task("chat1", task_dict)
         task_dict["last_run"] = _now().isoformat()
         result = scheduler._compute_adaptive_sleep()
         assert result == TICK_SECONDS
 
-    def test_compute_adaptive_sleep_task_soon_but_not_imminent(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_compute_adaptive_sleep_task_soon_but_not_imminent(self, scheduler: TaskScheduler):
         """Task due in 10s (within TICK_SECONDS) → returns actual time-to-due."""
         task_dict = _make_task(schedule_type="interval", seconds=10)
-        scheduler.add_task("chat1", task_dict)
+        await scheduler.add_task("chat1", task_dict)
         # Mark as just run so the next due is ~10s from now
         task_dict["last_run"] = _now().isoformat()
         result = scheduler._compute_adaptive_sleep()
@@ -1172,7 +1188,7 @@ class TestAdaptiveSleep:
 
         with patch("src.scheduler.asyncio.sleep", side_effect=tracking_sleep):
             scheduler._running = True
-            loop_task = asyncio.create_task(scheduler._loop())
+            loop_task = asyncio.create_task(scheduler._run_loop())
             await original_sleep(0.3)
             scheduler._running = False
             loop_task.cancel()
@@ -1191,7 +1207,7 @@ class TestAdaptiveSleep:
         """When a task is due, loop uses minimum sleep duration."""
         on_trigger = scheduler._on_trigger  # type: ignore[attr-defined]
         on_trigger.return_value = "result"
-        scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+        await scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
 
         sleep_durations: list[float] = []
         original_sleep = asyncio.sleep
@@ -1202,7 +1218,7 @@ class TestAdaptiveSleep:
 
         with patch("src.scheduler.asyncio.sleep", side_effect=tracking_sleep):
             scheduler._running = True
-            loop_task = asyncio.create_task(scheduler._loop())
+            loop_task = asyncio.create_task(scheduler._run_loop())
             await original_sleep(0.5)
             scheduler._running = False
             loop_task.cancel()
@@ -1211,18 +1227,19 @@ class TestAdaptiveSleep:
             except asyncio.CancelledError:
                 pass
 
-        # Task is due immediately → first sleep should be SCHEDULER_MIN_SLEEP_SECONDS
+        # Task is due immediately → executes, then sleeps until next due (capped at TICK_SECONDS)
         assert len(sleep_durations) >= 1
-        assert sleep_durations[0] == SCHEDULER_MIN_SLEEP_SECONDS
+        assert sleep_durations[0] == TICK_SECONDS
 
-    def test_time_to_next_due_daily_task(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_time_to_next_due_daily_task(self, scheduler: TaskScheduler):
         """Daily task computes seconds until next target minute."""
         now = datetime(2026, 4, 20, 8, 0, tzinfo=timezone.utc)
         with patch("src.scheduler._now", return_value=now):
             scheduler._cached_utc_offset = 0.0
             scheduler._utc_offset_updated_at = time.monotonic()
             # Target at 09:00 UTC = 3600s from now
-            scheduler.add_task("chat1", _make_task(schedule_type="daily", hour=9, minute=0))
+            await scheduler.add_task("chat1", _make_task(schedule_type="daily", hour=9, minute=0))
             result = scheduler._time_to_next_due()
             assert result is not None
             assert 3590 < result <= 3600
@@ -1269,11 +1286,11 @@ class TestIntegration:
         """Tasks survive a scheduler restart via load_all."""
         s1 = TaskScheduler()
         s1.configure(workspace=workspace, on_trigger=AsyncMock())
-        s1.add_task("chat1", _make_task(prompt="survive restart"))
+        await s1.add_task("chat1", _make_task(prompt="survive restart"))
 
         s2 = TaskScheduler()
         s2.configure(workspace=workspace, on_trigger=AsyncMock())
-        s2.load_all()
+        await s2.load_all()
 
         tasks = s2.list_tasks("chat1")
         assert len(tasks) == 1
@@ -1287,7 +1304,7 @@ class TestIntegration:
         s.configure(workspace=workspace, on_trigger=on_trigger, on_send=AsyncMock())
 
         task = _make_task(prompt="analyze")
-        s.add_task("chat1", task)
+        await s.add_task("chat1", task)
         t = s.list_tasks("chat1")[0]
 
         await s._execute_task("chat1", t)
@@ -1297,7 +1314,7 @@ class TestIntegration:
         # Reload from disk
         s2 = TaskScheduler()
         s2.configure(workspace=workspace, on_trigger=AsyncMock())
-        s2._load("chat1")
+        await s2._load("chat1")
         loaded = s2.list_tasks("chat1")[0]
         assert loaded["last_run"] is not None
         assert loaded["last_result"] == "analysis complete"
@@ -1308,7 +1325,7 @@ class TestIntegration:
     ):
         """Scheduler should not execute tasks that aren't due after start."""
         task = _make_task(schedule_type="interval", seconds=99999)
-        scheduler.add_task("chat1", task)
+        await scheduler.add_task("chat1", task)
         # Set last_run AFTER adding (add_task resets it to None)
         t = scheduler.list_tasks("chat1")[0]
         t["last_run"] = _now().isoformat()  # just ran
@@ -1477,7 +1494,7 @@ class TestExecuteTaskTimeout:
         self, scheduler: TaskScheduler, on_trigger: AsyncMock,
     ):
         """A hanging trigger times out and the task is recorded as failed."""
-        async def hang_forever(chat_id: str, prompt: str) -> str:
+        async def hang_forever(chat_id: str, prompt: str, hmac: str | None = None) -> str:
             await asyncio.sleep(600)
 
         on_trigger.side_effect = hang_forever
@@ -1510,7 +1527,7 @@ class TestExecuteTaskTimeout:
         # First call hangs (slow task), second call succeeds (fast task)
         call_count = 0
 
-        async def selective_hang(chat_id: str, prompt: str) -> str:
+        async def selective_hang(chat_id: str, prompt: str, hmac: str | None = None) -> str:
             nonlocal call_count
             call_count += 1
             if "slow" in prompt:
@@ -1542,7 +1559,7 @@ class TestExecuteTaskTimeout:
 
         call_count = 0
 
-        async def hang_then_succeed(chat_id: str, prompt: str) -> str:
+        async def hang_then_succeed(chat_id: str, prompt: str, hmac: str | None = None) -> str:
             nonlocal call_count
             call_count += 1
             # First invocation hangs; subsequent ones succeed quickly
@@ -1554,15 +1571,16 @@ class TestExecuteTaskTimeout:
 
         with patch("src.scheduler.DEFAULT_SCHEDULER_TASK_TIMEOUT", 0.05):
             with patch("src.scheduler.TICK_SECONDS", 0.1):
-                scheduler._running = True
-                loop_task = asyncio.create_task(scheduler._loop())
-                await asyncio.sleep(0.4)
-                scheduler._running = False
-                loop_task.cancel()
-                try:
-                    await loop_task
-                except asyncio.CancelledError:
-                    pass
+                with patch("src.scheduler.SCHEDULER_MIN_SLEEP_SECONDS", 0.01):
+                    scheduler._running = True
+                    loop_task = asyncio.create_task(scheduler._run_loop())
+                    await asyncio.sleep(0.5)
+                    scheduler._running = False
+                    loop_task.cancel()
+                    try:
+                        await loop_task
+                    except asyncio.CancelledError:
+                        pass
 
         # At least 2 trigger attempts: first times out, second succeeds
         assert on_trigger.await_count >= 2
@@ -2107,25 +2125,17 @@ class TestValidateTask:
 
     # ── integration: add_task rejects invalid tasks ──
 
-    def test_add_task_rejects_missing_prompt(self, scheduler: TaskScheduler):
-        with pytest.raises(ValueError, match="prompt"):
-            scheduler.add_task("chat1", {"schedule": {"type": "interval", "seconds": 60}})
-
-    def test_add_task_rejects_invalid_schedule(self, scheduler: TaskScheduler):
-        with pytest.raises(ValueError, match="schedule"):
-            scheduler.add_task("chat1", {"prompt": "test"})
-
-    def test_add_task_rejects_invalid_type(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_add_task_rejects_invalid_type(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="type"):
-            scheduler.add_task("chat1", {"prompt": "test", "schedule": {"type": "weekly"}})
+            await scheduler.add_task("chat1", {"prompt": "test", "schedule": {"type": "weekly"}})
 
-    def test_add_task_does_not_mutate_on_validation_failure(self, scheduler: TaskScheduler):
+    @pytest.mark.asyncio
+    async def test_add_task_does_not_mutate_on_validation_failure(self, scheduler: TaskScheduler):
         """Invalid task should not be added to internal store."""
         with pytest.raises(ValueError):
-            scheduler.add_task("chat1", {"prompt": "test", "schedule": {"type": "bad"}})
+            await scheduler.add_task("chat1", {"prompt": "test", "schedule": {"type": "bad"}})
         assert scheduler.list_tasks("chat1") == []
-
-    # ── integration: add_task rejects invalid tasks ──
 
     @pytest.mark.asyncio
     async def test_add_task_rejects_missing_prompt(self, scheduler: TaskScheduler):
@@ -2156,9 +2166,10 @@ class TestValidateTask:
 
     # ── integration: valid tasks accepted and persisted correctly ──
 
-    def test_add_task_valid_interval_persisted(self, scheduler: TaskScheduler, workspace: Path):
+    @pytest.mark.asyncio
+    async def test_add_task_valid_interval_persisted(self, scheduler: TaskScheduler, workspace: Path):
         """Valid interval task is accepted, stored internally, and persisted to disk."""
-        task_id = scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=120))
+        task_id = await scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=120))
         assert task_id == "task_001"
         tasks = scheduler.list_tasks("chat1")
         assert len(tasks) == 1
@@ -2173,9 +2184,10 @@ class TestValidateTask:
         assert data[0]["task_id"] == "task_001"
         assert data[0]["enabled"] is True
 
-    def test_add_task_valid_daily_persisted(self, scheduler: TaskScheduler, workspace: Path):
+    @pytest.mark.asyncio
+    async def test_add_task_valid_daily_persisted(self, scheduler: TaskScheduler, workspace: Path):
         """Valid daily task is accepted, stored internally, and persisted to disk."""
-        task_id = scheduler.add_task("chat1", _make_task(schedule_type="daily", hour=14, minute=30))
+        task_id = await scheduler.add_task("chat1", _make_task(schedule_type="daily", hour=14, minute=30))
         assert task_id == "task_001"
         tasks = scheduler.list_tasks("chat1")
         assert len(tasks) == 1
@@ -2188,9 +2200,10 @@ class TestValidateTask:
         assert data[0]["schedule"]["hour"] == 14
         assert data[0]["schedule"]["minute"] == 30
 
-    def test_add_task_valid_cron_persisted(self, scheduler: TaskScheduler, workspace: Path):
+    @pytest.mark.asyncio
+    async def test_add_task_valid_cron_persisted(self, scheduler: TaskScheduler, workspace: Path):
         """Valid cron task is accepted, stored internally, and persisted to disk."""
-        task_id = scheduler.add_task(
+        task_id = await scheduler.add_task(
             "chat1", _make_task(schedule_type="cron", hour=9, minute=0, weekdays=[1, 3, 5])
         )
         assert task_id == "task_001"
@@ -2219,11 +2232,12 @@ class TestValidateTask:
         assert data[0]["schedule"]["hour"] == 7
         assert data[0]["schedule"]["minute"] == 45
 
-    def test_add_task_multiple_valid_types_coexist(self, scheduler: TaskScheduler, workspace: Path):
+    @pytest.mark.asyncio
+    async def test_add_task_multiple_valid_types_coexist(self, scheduler: TaskScheduler, workspace: Path):
         """Multiple valid tasks of different schedule types can coexist for same chat."""
-        id1 = scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=300))
-        id2 = scheduler.add_task("chat1", _make_task(schedule_type="daily", hour=8, minute=0))
-        id3 = scheduler.add_task("chat1", _make_task(schedule_type="cron", hour=12, minute=30))
+        id1 = await scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=300))
+        id2 = await scheduler.add_task("chat1", _make_task(schedule_type="daily", hour=8, minute=0))
+        id3 = await scheduler.add_task("chat1", _make_task(schedule_type="cron", hour=12, minute=30))
         assert id1 != id2 != id3
         tasks = scheduler.list_tasks("chat1")
         assert len(tasks) == 3

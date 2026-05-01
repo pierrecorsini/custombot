@@ -798,7 +798,7 @@ class TestReadFileLinesReverseSeek:
         assert result == self._expected_lines_large(lines, limit)
 
     @given(
-        total_lines=st.integers(min_value=100, max_value=800),
+        total_lines=st.integers(min_value=800, max_value=2000),
         limit=st.integers(min_value=1, max_value=50),
     )
     @_hs
@@ -811,6 +811,9 @@ class TestReadFileLinesReverseSeek:
 
         file_path = tmp_path / "order.jsonl"
         file_path.write_bytes(content.encode("utf-8"))
+
+        # Ensure we're on the reverse-seek path (>64KB)
+        assume(file_path.stat().st_size >= 65_536)
 
         db = Database(str(tmp_path / ".data"))
         result = db._message_store._read_file_lines(file_path, limit=limit)
@@ -1047,11 +1050,11 @@ class TestMessageFilePathCache:
         assert "foo/bar" in db._message_file_cache
         assert "/" not in path.stem
 
-    def test_whitespace_only_sanitized_and_cached(self, db: Database) -> None:
-        """Whitespace-only chat_id is sanitized to underscores and cached."""
-        path = db._message_file("   ")
-        assert path.name.endswith(".jsonl")
-        assert "   " in db._message_file_cache
+    def test_whitespace_only_sanitized_raises_before_caching(self, db: Database) -> None:
+        """Whitespace-only chat_id raises ValueError and is NOT cached."""
+        with pytest.raises(ValueError, match="chat_id"):
+            db._message_file("   ")
+        assert "   " not in db._message_file_cache
 
     def test_valid_chat_id_cached_after_first_call(
         self, db: Database
@@ -2542,12 +2545,14 @@ class TestJsonlSchemaMigrationAdvanced:
             encoding="utf-8",
         )
 
-        # Patch _JSONL_MIGRATIONS to contain a simple no-op migration
+        # Patch _JSONL_MIGRATIONS in the migration module where it's actually used.
+        import src.db.migration as migration_module
         import src.db.db as db_module
 
-        original_migrations = db_module._JSONL_MIGRATIONS
+        original_migrations = migration_module._JSONL_MIGRATIONS
         try:
-            db_module._JSONL_MIGRATIONS = [(1, [lambda msg: msg])]
+            migration_module._JSONL_MIGRATIONS = [(1, [lambda msg: msg])]
+            db_module._JSONL_MIGRATIONS = migration_module._JSONL_MIGRATIONS
 
             db._ensure_jsonl_schema(f)
 
@@ -2561,6 +2566,7 @@ class TestJsonlSchemaMigrationAdvanced:
             msg = json.loads(lines[1])
             assert msg["content"] == "old"
         finally:
+            migration_module._JSONL_MIGRATIONS = original_migrations
             db_module._JSONL_MIGRATIONS = original_migrations
 
     def test_apply_migrations_with_unparseable_line(
@@ -2569,6 +2575,7 @@ class TestJsonlSchemaMigrationAdvanced:
         """_apply_jsonl_migrations skips unparseable lines gracefully (lines 614-622)."""
         from src.db.db import _JSONL_SCHEMA_VERSION
 
+        import src.db.migration as migration_module
         import src.db.db as db_module
 
         data_dir = tmp_path / ".data"
@@ -2580,9 +2587,10 @@ class TestJsonlSchemaMigrationAdvanced:
             encoding="utf-8",
         )
 
-        original_migrations = db_module._JSONL_MIGRATIONS
+        original_migrations = migration_module._JSONL_MIGRATIONS
         try:
-            db_module._JSONL_MIGRATIONS = [(1, [lambda msg: msg])]
+            migration_module._JSONL_MIGRATIONS = [(1, [lambda msg: msg])]
+            db_module._JSONL_MIGRATIONS = migration_module._JSONL_MIGRATIONS
 
             db._apply_jsonl_migrations(f, current_version=0)
 
@@ -2598,6 +2606,7 @@ class TestJsonlSchemaMigrationAdvanced:
             msg = json.loads(lines[2])
             assert msg["content"] == "good"
         finally:
+            migration_module._JSONL_MIGRATIONS = original_migrations
             db_module._JSONL_MIGRATIONS = original_migrations
 
     def test_apply_migrations_no_header_in_file(
@@ -2606,6 +2615,7 @@ class TestJsonlSchemaMigrationAdvanced:
         """_apply_jsonl_migrations inserts header when file has no header line (lines 639-641)."""
         from src.db.db import _JSONL_SCHEMA_VERSION
 
+        import src.db.migration as migration_module
         import src.db.db as db_module
 
         data_dir = tmp_path / ".data"
@@ -2617,9 +2627,10 @@ class TestJsonlSchemaMigrationAdvanced:
             encoding="utf-8",
         )
 
-        original_migrations = db_module._JSONL_MIGRATIONS
+        original_migrations = migration_module._JSONL_MIGRATIONS
         try:
-            db_module._JSONL_MIGRATIONS = [(1, [lambda msg: msg])]
+            migration_module._JSONL_MIGRATIONS = [(1, [lambda msg: msg])]
+            db_module._JSONL_MIGRATIONS = migration_module._JSONL_MIGRATIONS
 
             db._apply_jsonl_migrations(f, current_version=0)
 
@@ -2631,6 +2642,7 @@ class TestJsonlSchemaMigrationAdvanced:
             assert header["_version"] == _JSONL_SCHEMA_VERSION
             assert len(lines) == 3  # header + 2 messages
         finally:
+            migration_module._JSONL_MIGRATIONS = original_migrations
             db_module._JSONL_MIGRATIONS = original_migrations
 
     def test_apply_migrations_empty_migrations_list(

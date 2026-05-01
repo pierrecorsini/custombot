@@ -257,8 +257,7 @@ async def _safe_call(handler: EventHandler, event: Event) -> None:
     except Exception:
         log_noncritical(
             NonCriticalCategory.EVENT_EMISSION,
-            "Error in event handler for '%s'",
-            event.name,
+            f"Error in event handler for '{event.name}'",
             logger=log,
             extra={
                 "event_name": event.name,

@@ -88,6 +88,7 @@ log = logging.getLogger(__name__)
 # internal _FileHandlePool name.
 from src.db.file_pool import FileHandlePool as _FileHandlePool  # noqa: F401
 from src.db.db_utils import _sanitize_name  # noqa: F401
+from src.db.db_utils import _JSONL_SCHEMA_VERSION, _JSONL_MIGRATIONS  # noqa: F401
 
 __all__ = [
     "ValidationResult",

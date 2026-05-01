@@ -9,6 +9,7 @@ and re-processes them through the normal message pipeline.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -65,7 +66,10 @@ async def recover_pending_messages(
         try:
             # Validate sender against current ACL before reprocessing
             if channel is not None and hasattr(channel, "_is_allowed"):
-                sender_id = queued_msg.sender_id or queued_msg.sender_name or ""
+                if hasattr(queued_msg, "sender_id") and isinstance(queued_msg.sender_id, str) and queued_msg.sender_id:
+                    sender_id = queued_msg.sender_id
+                else:
+                    sender_id = queued_msg.sender_name or ""
                 if not channel._is_allowed(sender_id):
                     log.warning(
                         "Skipping recovery of message %s — sender %s not in allowed_numbers",
@@ -84,10 +88,17 @@ async def recover_pending_messages(
                 continue
 
             # Reconstruct IncomingMessage from queued data
+            _sender_id = (
+                queued_msg.sender_id
+                if hasattr(queued_msg, "sender_id") and isinstance(queued_msg.sender_id, str) and queued_msg.sender_id
+                else queued_msg.sender_name or "unknown"
+            )
+            # Sanitize sender_id to meet IncomingMessage validation (alphanumeric, dash, underscore, dot, @)
+            _sender_id = re.sub(r"[^a-zA-Z0-9_\-.@]", "_", _sender_id) or "unknown"
             recovered_msg = IncomingMessage(
                 message_id=queued_msg.message_id,
                 chat_id=queued_msg.chat_id,
-                sender_id=queued_msg.sender_id or "",
+                sender_id=_sender_id,
                 sender_name=queued_msg.sender_name or "",
                 text=queued_msg.text,
                 timestamp=queued_msg.created_at or time.time(),

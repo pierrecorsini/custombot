@@ -38,6 +38,7 @@ from src.config.config import (
     _log_effective_config,
 )
 from src.constants import CONFIG_WATCH_DEBOUNCE_SECONDS, CONFIG_WATCH_INTERVAL_SECONDS
+from src.utils.background_service import BaseBackgroundService
 
 if TYPE_CHECKING:
     from src.bot import Bot, BotConfig
@@ -323,7 +324,7 @@ class ConfigChangeApplier:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class ConfigWatcher:
+class ConfigWatcher(BaseBackgroundService):
     """Polling-based watcher that detects ``config.json`` changes and hot-reloads.
 
     Follows the ``WorkspaceMonitor`` pattern for the async lifecycle:
@@ -340,6 +341,8 @@ class ConfigWatcher:
         await watcher.stop()
     """
 
+    _service_name = "Config watcher"
+
     def __init__(
         self,
         config_path: Path,
@@ -349,14 +352,12 @@ class ConfigWatcher:
         poll_interval: float = CONFIG_WATCH_INTERVAL_SECONDS,
         debounce: float = CONFIG_WATCH_DEBOUNCE_SECONDS,
     ) -> None:
+        super().__init__()
         self._config_path = config_path
         self._current_config = current_config
         self._applier = applier
         self._poll_interval = poll_interval
         self._debounce = debounce
-
-        self._task: Optional[asyncio.Task[None]] = None
-        self._running = False
 
         # Track file mtime for change detection
         self._last_mtime: float = self._read_mtime()
@@ -437,26 +438,8 @@ class ConfigWatcher:
 
     def start(self) -> None:
         """Start the config watcher background task."""
-        if self._running:
-            log.warning("Config watcher already running")
-            return
+        super().start()
 
-        self._running = True
-        self._task = asyncio.create_task(self._watch_loop())
-
-    async def stop(self) -> None:
-        """Stop the config watcher."""
-        self._running = False
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-        log.info("Config watcher stopped")
-
-    @property
-    def is_running(self) -> bool:
-        """Whether the watcher is actively running."""
-        return self._running
+    async def _run_loop(self) -> None:
+        """Run the watch loop (required by BaseBackgroundService)."""
+        await self._watch_loop()

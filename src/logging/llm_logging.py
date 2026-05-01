@@ -41,30 +41,31 @@ log = logging.getLogger(__name__)
 _REDACTED = "[REDACTED]"
 
 # Dict keys whose values should always be redacted (case-insensitive match).
-_SECRET_KEY_NAMES: frozenset[str] = frozenset(
-    k.lower()
-    for k in (
-        "api_key",
-        "apikey",
-        "api-key",
-        "authorization",
-        "auth",
-        "bearer",
-        "password",
-        "passwd",
-        "pwd",
-        "secret",
-        "secret_key",
-        "secret-key",
-        "access_token",
-        "access-token",
-        "refresh_token",
-        "refresh-token",
-        "credential",
-        "credentials",
-        "token",
-    )
+# Patterns that mark a key as secret (case-insensitive).  Each entry is
+# checked against the lowered key using *in* matching.  Order matters:
+# more-specific patterns should come first.
+_SECRET_SUBSTRINGS: tuple[str, ...] = (
+    "api_key",
+    "apikey",
+    "api-key",
+    "authorization",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "credential",
+    "access_token",
+    "refresh_token",
+    "bearer_token",
+    "auth_token",
+    "api_token",
 )
+
+
+def _is_secret_key(key: str) -> bool:
+    """Return True if *key* (case-insensitive) looks like a secret field."""
+    k = key.lower()
+    return any(s in k for s in _SECRET_SUBSTRINGS)
 
 # Regex patterns applied to string values to catch inline secrets.
 _SECRET_VALUE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -111,7 +112,7 @@ def _redact_secrets(obj: Any, _depth: int = 0) -> Any:
     if isinstance(obj, dict):
         redacted: dict[str, Any] = {}
         for k, v in obj.items():
-            if isinstance(k, str) and k.lower() in _SECRET_KEY_NAMES:
+            if isinstance(k, str) and _is_secret_key(k):
                 redacted[k] = _REDACTED
             else:
                 redacted[k] = _redact_secrets(v, _depth + 1)

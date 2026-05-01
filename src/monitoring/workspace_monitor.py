@@ -45,6 +45,7 @@ from src.constants import (
     WORKSPACE_SIZE_WARNING_MB,
     WORKSPACE_STALE_TEMP_MAX_AGE_HOURS,
 )
+from src.utils.background_service import BaseBackgroundService
 from src.utils.singleton import get_or_create_singleton, reset_singleton
 
 log = logging.getLogger(__name__)
@@ -108,18 +109,13 @@ class WorkspaceStats:
 
 
 def _recursive_dir_size(directory: Path) -> int:
-    """Return total size (bytes) of all files under *directory*, recursively."""
-    total = 0
-    try:
-        for entry in directory.rglob("*"):
-            try:
-                if entry.is_file():
-                    total += entry.stat().st_size
-            except OSError:
-                pass
-    except OSError:
-        pass
-    return total
+    """Return total size (bytes) of all files under *directory*, recursively.
+
+    Delegates to :func:`src.utils.disk.recursive_dir_size` for reuse.
+    """
+    from src.utils.disk import recursive_dir_size
+
+    return recursive_dir_size(directory)
 
 
 def _archive_old_conversations(
@@ -373,7 +369,7 @@ def _prune_audit_logs(
     return pruned
 
 
-class WorkspaceMonitor:
+class WorkspaceMonitor(BaseBackgroundService):
     """Periodic workspace size monitor and cleanup task.
 
     Usage:
@@ -383,6 +379,8 @@ class WorkspaceMonitor:
         # Later...
         await monitor.stop()
     """
+
+    _service_name = "Workspace monitor"
 
     def __init__(
         self,
@@ -397,6 +395,7 @@ class WorkspaceMonitor:
         audit_log_max_age_days: int = AUDIT_LOG_MAX_AGE_DAYS,
         audit_log_max_files: int = AUDIT_LOG_MAX_FILES,
     ) -> None:
+        super().__init__()
         self._workspace = Path(workspace_dir)
         self._cleanup_interval = cleanup_interval
         self._archive_max_age_days = archive_max_age_days
@@ -407,8 +406,6 @@ class WorkspaceMonitor:
         self._llm_log_max_age_days = llm_log_max_age_days
         self._audit_log_max_age_days = audit_log_max_age_days
         self._audit_log_max_files = audit_log_max_files
-        self._task: Optional[asyncio.Task[None]] = None
-        self._running = False
         self._last_stats: Optional[WorkspaceStats] = None
         self._size_samples: deque[tuple[float, int]] = deque(
             maxlen=_MAX_GROWTH_SAMPLES,
@@ -518,7 +515,7 @@ class WorkspaceMonitor:
 
         return stats
 
-    async def _periodic_cleanup(self) -> None:
+    async def _run_loop(self) -> None:
         """Background task that monitors workspace size and runs cleanup."""
         log.info(
             "Workspace monitor started (interval=%.0fs, archive_after=%dd, "
@@ -568,34 +565,12 @@ class WorkspaceMonitor:
 
     def start_periodic_cleanup(self) -> None:
         """Start periodic workspace monitoring and cleanup."""
-        if self._running:
-            log.warning("Workspace monitor already running")
-            return
-
-        self._running = True
-        self._task = asyncio.create_task(self._periodic_cleanup())
-
-    async def stop(self) -> None:
-        """Stop the periodic workspace monitor."""
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-        log.info("Workspace monitor stopped")
+        self.start()
 
     @property
     def last_stats(self) -> Optional[WorkspaceStats]:
         """Most recent workspace statistics."""
         return self._last_stats
-
-    @property
-    def is_running(self) -> bool:
-        """Whether the monitor is actively running."""
-        return self._running
 
 
 def get_global_workspace_monitor(

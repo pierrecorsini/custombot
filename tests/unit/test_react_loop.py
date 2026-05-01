@@ -340,10 +340,11 @@ class TestExecuteToolCall:
     """Tests for execute_tool_call error paths."""
 
     async def test_missing_function_name_returns_error(self):
-        """Tool call with missing function → returns malformed error message."""
+        """Tool call with missing function name → returns malformed error message."""
         tc = MagicMock()
         tc.id = "call_bad"
-        tc.function = None
+        tc.function.name = ""
+        tc.function.arguments = "{}"
 
         executor = _make_tool_executor()
 
@@ -352,7 +353,7 @@ class TestExecuteToolCall:
         )
         assert tc_id == "call_bad"
         assert "malformed" in content.lower()
-        assert entry.name == "unknown"
+        assert entry.name == ""
 
     async def test_path_traversal_blocked(self):
         """Workspace dir outside root → path traversal blocked."""
@@ -611,16 +612,24 @@ class TestProcessToolCallsAdvanced:
 
         executor = AsyncMock()
 
-        # First tool succeeds; second raises RuntimeError (not caught by
-        # execute_tool_call's except (AttributeError, TypeError) handler),
-        # so it propagates through TaskGroup.
-        async def _execute_good(**kwargs):
-            return "good result"
+        # Use a gate to ensure the good tool completes before the bad
+        # tool starts failing.  This makes the test deterministic
+        # regardless of TaskGroup scheduling order.
+        good_done = asyncio.Event()
 
-        async def _execute_bad(**kwargs):
-            raise RuntimeError("Tool execution exploded")
+        async def _execute_by_name(**kwargs):
+            tool_call = kwargs.get("tool_call")
+            name = getattr(getattr(tool_call, "function", None), "name", "")
+            if name == "good_tool":
+                result = "good result"
+                good_done.set()
+                return result
+            else:
+                # Wait until the good tool has completed before raising.
+                await asyncio.wait_for(good_done.wait(), timeout=2.0)
+                raise RuntimeError("Tool execution exploded")
 
-        executor.execute = AsyncMock(side_effect=[_execute_good, _execute_bad])
+        executor.execute = AsyncMock(side_effect=_execute_by_name)
 
         # process_tool_calls should NOT raise — the salvage path catches
         # the BaseException from the TaskGroup and salvages partial results.

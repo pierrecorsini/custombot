@@ -221,18 +221,18 @@ class TestOutboundDedup:
 
 
 class TestDedupPrometheusOutput:
-    """Tests for the _build_dedup_prometheus_output function."""
+    """Tests for the build_dedup_prometheus_output function."""
 
     def test_returns_empty_string_for_none(self) -> None:
-        from src.health.server import _build_dedup_prometheus_output
+        from src.health.prometheus import build_dedup_prometheus_output
 
-        assert _build_dedup_prometheus_output(None) == ""
+        assert build_dedup_prometheus_output(None) == ""
 
     def test_emits_all_four_counters(self) -> None:
-        from src.health.server import _build_dedup_prometheus_output
+        from src.health.prometheus import build_dedup_prometheus_output
 
         stats = DedupStats(inbound_hits=3, inbound_misses=10, outbound_hits=1, outbound_misses=5)
-        output = _build_dedup_prometheus_output(stats)
+        output = build_dedup_prometheus_output(stats)
         assert "custombot_dedup_inbound_hits_total" in output
         assert "custombot_dedup_inbound_misses_total" in output
         assert "custombot_dedup_outbound_hits_total" in output
@@ -244,19 +244,19 @@ class TestDedupPrometheusOutput:
         assert "5" in output  # outbound_misses
 
     def test_prometheus_format_structure(self) -> None:
-        from src.health.server import _build_dedup_prometheus_output
+        from src.health.prometheus import build_dedup_prometheus_output
 
         stats = DedupStats(inbound_hits=1, inbound_misses=0, outbound_hits=0, outbound_misses=0)
-        output = _build_dedup_prometheus_output(stats)
+        output = build_dedup_prometheus_output(stats)
         # Each metric has HELP and TYPE headers
         assert "# HELP custombot_dedup_inbound_hits_total" in output
         assert "# TYPE custombot_dedup_inbound_hits_total counter" in output
 
     def test_zero_stats_produce_valid_output(self) -> None:
-        from src.health.server import _build_dedup_prometheus_output
+        from src.health.prometheus import build_dedup_prometheus_output
 
         stats = DedupStats()
-        output = _build_dedup_prometheus_output(stats)
+        output = build_dedup_prometheus_output(stats)
         # Should produce valid output even with all zeros
         assert "custombot_dedup_inbound_hits_total" in output
         # Value should be 0

@@ -268,13 +268,28 @@ def _redact_secrets(data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Copy of data with sensitive values redacted.
     """
-    # Fields that should be redacted
-    SECRET_FIELDS: Set[str] = {"api_key", "password", "secret", "token", "credential"}
+    # Substrings that indicate a secret field — any key *containing* one of
+    # these (case-insensitive) will be redacted.  This catches compound
+    # names like ``embedding_api_key`` that an exact-match set would miss.
+    _SECRET_SUBSTRINGS: Tuple[str, ...] = (
+        "api_key",
+        "password",
+        "secret",
+        "access_token",
+        "refresh_token",
+        "auth_token",
+        "api_token",
+        "credential",
+    )
+
+    def _is_secret_key(key: str) -> bool:
+        k = key.lower()
+        return any(s in k for s in _SECRET_SUBSTRINGS)
 
     def redact_recursive(obj: Any) -> Any:
         if isinstance(obj, dict):
             return {
-                key: "***REDACTED***" if key in SECRET_FIELDS else redact_recursive(value)
+                key: "***REDACTED***" if _is_secret_key(key) else redact_recursive(value)
                 for key, value in obj.items()
             }
         elif isinstance(obj, list):

@@ -163,7 +163,7 @@ class TestSerializationBenchmark:
             # Verify both paths produce equivalent final output
             orjson_result = orjson_pipeline()
             msgpack_result = msgpack_pipeline()
-            assert orjson.loads(orjson_result) == orjson.loads(msgpack_result)
+            assert orjson_result == orjson.loads(msgpack_result)
 
     def test_text_heavy_payload(self) -> None:
         """Validate that orjson wins specifically on text-heavy payloads."""

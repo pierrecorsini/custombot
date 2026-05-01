@@ -98,17 +98,19 @@ class TestSafeName:
         ["#", "$", "%", "^", "&", "(", ")", "!", " "],
     )
     def test_unsafe_chars_replaced_with_underscore(self, char: str):
-        assert _safe_name(char) == "_"
+        # Single special chars become "_" which gets stripped to "" → ValueError
+        with pytest.raises(ValueError):
+            _safe_name(char)
 
     @pytest.mark.parametrize(
         "char, expected",
         [
-            ("@", "_at_"),
-            ("*", "_as_"),
-            ("/", "_sl_"),
-            ("\\", "_bs_"),
-            (":", "_col_"),
-            ("|", "_pi_"),
+            ("@", "at"),
+            ("*", "as"),
+            ("/", "sl"),
+            ("\\", "bs"),
+            (":", "col"),
+            ("|", "pi"),
         ],
     )
     def test_unsafe_chars_replaced_with_named(self, char: str, expected: str):
@@ -126,7 +128,7 @@ class TestSafeName:
 
     def test_phone_number_with_plus(self):
         result = _safe_name("+1234567890")
-        assert result == "_1234567890"
+        assert result == "1234567890"
 
     def test_unicode_characters(self):
         result = _safe_name("日本語")

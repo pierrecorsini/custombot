@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import textwrap
+
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -362,21 +362,73 @@ async def _prompt_historical(msg: dict[str, Any]) -> str:
 
 
 def _split_text(text: str, limit: int) -> list[str]:
-    """Split text into chunks without breaking mid-word.
+    """Split text into chunks, preferring newline boundaries then space boundaries.
 
-    Delegates to textwrap.wrap with replace_whitespace=False and
-    drop_whitespace=False to preserve indentation, newlines, and
-    formatting. break_long_words=True ensures every chunk respects
-    the limit even for long unbroken runs.
+    Strategy:
+      1. Split at ``\\n`` boundaries first, greedily packing consecutive
+         lines into a single chunk as long as the joined result (with
+         ``\\n`` separators) fits within *limit*.
+      2. When a single line exceeds *limit*, split at space boundaries
+         (consuming the space as the split point).
+      3. Force-break at *limit* when a word has no internal boundaries.
+
+    Guarantees:
+      * No chunk exceeds *limit* characters.
+      * ``"\\n".join(chunks) == text`` holds when every line fits within
+        *limit* individually.
+      * Leading/trailing whitespace in lines is preserved exactly.
     """
     if len(text) <= limit:
         return [text]
-    chunks = textwrap.wrap(
-        text,
-        width=limit,
-        replace_whitespace=False,
-        drop_whitespace=False,
-        break_long_words=True,
-        break_on_hyphens=False,
-    )
+
+    lines = text.split("\n")
+    chunks: list[str] = []
+    current = ""
+
+    for line in lines:
+        if len(line) <= limit:
+            # Line fits — try to pack into the current chunk.
+            if current:
+                candidate = current + "\n" + line
+                if len(candidate) <= limit:
+                    current = candidate
+                else:
+                    chunks.append(current)
+                    current = line
+            else:
+                current = line
+        else:
+            # Line exceeds limit — force-split it into sub-chunks.
+            if current:
+                chunks.append(current)
+                current = ""
+            sub = _split_long_line(line, limit)
+            chunks.extend(sub[:-1])
+            current = sub[-1]
+
+    # Always append the final chunk (even if empty — needed for trailing newlines).
+    chunks.append(current)
     return chunks if chunks else [""]
+
+
+def _split_long_line(line: str, limit: int) -> list[str]:
+    """Split a single line that exceeds *limit* at space or character boundaries."""
+    if len(line) <= limit:
+        return [line]
+
+    parts: list[str] = []
+    remaining = line
+
+    while len(remaining) > limit:
+        last_space = remaining.rfind(" ", 0, limit)
+        if last_space > 0:
+            parts.append(remaining[:last_space])
+            remaining = remaining[last_space + 1 :]
+        else:
+            parts.append(remaining[:limit])
+            remaining = remaining[limit:]
+
+    if remaining:
+        parts.append(remaining)
+
+    return parts if parts else [""]

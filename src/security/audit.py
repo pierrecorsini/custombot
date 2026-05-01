@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.utils.locking import ThreadLock
+from src.utils.locking import ThreadLockMixin
 
 log = logging.getLogger("security.audit")
 
@@ -53,7 +53,7 @@ def audit_log(
 # ── Persistent skill-audit JSONL logger ─────────────────────────────────
 
 
-class SkillAuditLogger:
+class SkillAuditLogger(ThreadLockMixin):
     """Persistent JSONL audit trail for skill executions.
 
     Appends one JSON line per skill execution to
@@ -70,10 +70,10 @@ class SkillAuditLogger:
     MAX_ROTATED_FILES: int = 5
 
     def __init__(self, log_dir: str | Path) -> None:
+        super().__init__()
         self._dir = Path(log_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "audit.jsonl"
-        self._lock = ThreadLock()
 
     # ── public API ───────────────────────────────────────────────────────
 

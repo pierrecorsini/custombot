@@ -55,6 +55,9 @@ def _make_bot(message_queue=None) -> Bot:
     skills.tool_definitions = []
     skills.all = MagicMock(return_value=[])
 
+    dedup = AsyncMock()
+    dedup.is_inbound_duplicate = AsyncMock(return_value=False)
+
     return Bot(
         config=cfg,
         db=db,
@@ -63,6 +66,7 @@ def _make_bot(message_queue=None) -> Bot:
         skills=skills,
         routing=None,
         message_queue=message_queue,
+        dedup=dedup,
     )
 
 
@@ -83,9 +87,6 @@ def _make_queued_msg(
     msg.created_at = created_at or time.time()
     if sender_id is not None:
         msg.sender_id = sender_id
-    else:
-        # Remove sender_id entirely to simulate QueuedMessage which lacks it
-        del msg.sender_id
     return msg
 
 
@@ -331,8 +332,9 @@ class TestCorruptedQueueData:
         assert captured.sender_name == ""
 
     async def test_message_without_sender_id_attribute(self):
-        """Queued message without sender_id attr uses empty string for ACL check."""
+        """Queued message without sender_id attr uses sender_name for ACL check."""
         queue = AsyncMock()
+        queue.get_pending_count = AsyncMock(return_value=0)
         q = MagicMock(spec=["message_id", "chat_id", "text", "sender_name", "created_at"])
         q.message_id = "m_no_sender_id"
         q.chat_id = "chat_1"
@@ -801,11 +803,12 @@ class TestIncomingMessageReconstruction:
         assert captured.sender_id == "5551234"
         assert captured.timestamp == 1700000000.0
 
-    async def test_missing_sender_id_uses_empty_string(self):
-        """When queued msg lacks sender_id, IncomingMessage.sender_id is empty."""
+    async def test_missing_sender_id_falls_back_to_sender_name(self):
+        """When queued msg lacks sender_id, IncomingMessage.sender_id falls back to sender_name."""
         queue = AsyncMock()
         q = _make_queued_msg(message_id="m1")
-        # _make_queued_msg without sender_id deletes the attr
+        # _make_queued_msg without sender_id omits the attribute;
+        # crash_recovery falls back to sender_name for IncomingMessage.sender_id
         queue.recover_stale = AsyncMock(return_value=[q])
 
         bot = _make_bot(message_queue=queue)
@@ -822,7 +825,8 @@ class TestIncomingMessageReconstruction:
 
         await bot.recover_pending_messages(channel=channel)
 
-        assert captured.sender_id == ""
+        # Falls back to sender_name ("Tester") since sender_id attr is absent
+        assert captured.sender_id == "Tester"
 
     async def test_handle_message_receives_incoming_message_instance(self):
         """Verify handle_message receives a proper IncomingMessage, not a mock."""

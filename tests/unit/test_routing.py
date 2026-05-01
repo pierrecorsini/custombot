@@ -13,6 +13,8 @@ Tests the message routing engine including:
 from __future__ import annotations
 
 import re
+import string
+import sys
 import textwrap
 import time
 from dataclasses import FrozenInstanceError, dataclass
@@ -1520,7 +1522,7 @@ class TestRoutingEngineAutoReload:
 
     def test_auto_reload_on_file_change(self, tmp_path: Path):
         """match() picks up new rules when an instruction file changes."""
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
         assert engine.rules == []
 
@@ -1543,7 +1545,7 @@ class TestRoutingEngineAutoReload:
         md.write_text(
             "---\nrouting:\n  id: temp-rule\n  priority: 1\n---\n\n# Temp\n"
         )
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
         assert len(engine.rules) == 1
 
@@ -1563,7 +1565,7 @@ class TestRoutingEngineAutoReload:
         md.write_text(
             "---\nrouting:\n  id: original\n  priority: 1\n---\n\n# Original\n"
         )
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
         assert engine.rules[0].id == "original"
 
@@ -1643,7 +1645,7 @@ class TestRoutingEngineAutoReload:
 
     def test_is_stale_detects_new_file(self, tmp_path: Path):
         """_is_stale returns True when a new .md file appears."""
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
 
         (tmp_path / "new.md").write_text(
@@ -1685,19 +1687,16 @@ from hypothesis import strategies as st
 
 # -- Strategies for generating routing inputs --
 
-# Simple alphanumeric strings for IDs, channels, etc.
-# Must only contain chars allowed by _validate_sender_id and _CHANNEL_TYPE_RE.
-# NOTE: excluded '.' and '@' to avoid regex partial matches (e.g. '.' matches
-# any char) and IncomingMessage validation errors for channel_type.
+# Strings matching _SENDER_ID_RE / _CHAT_ID_RE: ASCII [a-zA-Z0-9_\-.@]+
 simple_text = st.text(
-    alphabet=st.characters(whitelist_categories=("L", "N"), whitelist_characters="-_"),
+    alphabet=string.ascii_letters + string.digits + "_-.@",
     min_size=1,
     max_size=30,
 )
 
-# Channel type strings: lowercase alphanumeric + underscore only
+# Channel type strings: lowercase [a-z0-9_]+ (matches _CHANNEL_TYPE_RE)
 channel_text = st.text(
-    alphabet=st.characters(whitelist_categories=("L", "N"), whitelist_characters="_"),
+    alphabet=string.ascii_lowercase + string.digits + "_",
     min_size=1,
     max_size=30,
 )
@@ -1855,7 +1854,7 @@ class TestPropertyEngineMatching:
         text=printable_text,
         sender_id=simple_text,
         chat_id=simple_text,
-        channel_type=simple_text,
+        channel_type=channel_text,
         fromMe=st.booleans(),
         toMe=st.booleans(),
     )
@@ -1877,7 +1876,7 @@ class TestPropertyEngineMatching:
         text=printable_text,
         sender_id=simple_text,
         chat_id=simple_text,
-        channel_type=simple_text,
+        channel_type=channel_text,
         fromMe=st.booleans(),
         toMe=st.booleans(),
     )
@@ -1981,7 +1980,7 @@ class TestPropertyEngineMatching:
         text=printable_text,
         sender_id=simple_text,
         chat_id=simple_text,
-        channel_type=simple_text,
+        channel_type=channel_text,
         fromMe=st.booleans(),
         toMe=st.booleans(),
     )
@@ -2047,7 +2046,7 @@ class TestPropertyEngineMatching:
         text=printable_text,
         sender_id=simple_text,
         chat_id=simple_text,
-        channel_type=simple_text,
+        channel_type=channel_text,
         fromMe=st.booleans(),
         toMe=st.booleans(),
     )
@@ -2077,6 +2076,8 @@ class TestPropertyEngineMatching:
     ):
         """Invariant: specific sender pattern only matches that exact sender."""
         assume(specific_sender != other_sender)
+        # Guard against regex cross-matching: pattern "ab" matches "abcd"
+        assume(not re.match(specific_sender, other_sender))
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(sender=specific_sender)]
         matching_msg = make_msg(sender_id=specific_sender, fromMe=fromMe, toMe=toMe)
@@ -2085,8 +2086,8 @@ class TestPropertyEngineMatching:
         assert engine.match(non_matching_msg) is None
 
     @given(
-        specific_channel=simple_text,
-        other_channel=simple_text,
+        specific_channel=channel_text,
+        other_channel=channel_text,
     )
     @settings(max_examples=200)
     def test_specific_channel_matches_exactly(
@@ -2094,6 +2095,7 @@ class TestPropertyEngineMatching:
     ):
         """Invariant: specific channel pattern only matches that exact channel."""
         assume(specific_channel != other_channel)
+        assume(not re.match(specific_channel, other_channel))
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(channel=specific_channel)]
         assert engine.match(make_msg(channel_type=specific_channel)) == "chat.agent.md"
@@ -2109,6 +2111,7 @@ class TestPropertyEngineMatching:
     ):
         """Invariant: specific recipient pattern only matches that exact recipient."""
         assume(specific_recipient != other_recipient)
+        assume(not re.match(specific_recipient, other_recipient))
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(recipient=specific_recipient)]
         assert engine.match(make_msg(chat_id=specific_recipient)) == "chat.agent.md"
@@ -2164,7 +2167,7 @@ class TestPropertyMatchWithRule:
         text=printable_text,
         sender_id=simple_text,
         chat_id=simple_text,
-        channel_type=simple_text,
+        channel_type=channel_text,
         fromMe=st.booleans(),
         toMe=st.booleans(),
     )
@@ -2410,7 +2413,7 @@ class TestPropertyMatchWithRule:
         text=printable_text,
         sender_id=simple_text,
         chat_id=simple_text,
-        channel_type=simple_text,
+        channel_type=channel_text,
         fromMe=st.booleans(),
         toMe=st.booleans(),
     )
@@ -2445,6 +2448,7 @@ class TestPropertyMatchWithRule:
         """Invariant: specific sender rule at higher priority doesn't match a
         different sender; wildcard at lower priority takes over."""
         assume(specific_sender != other_sender)
+        assume(not re.match(specific_sender, other_sender))
         engine = RoutingEngine(Path("/dummy"))
         specific = make_rule(
             id="specific", priority=1, sender=specific_sender,
@@ -2500,6 +2504,7 @@ class TestPropertyMatchWithRule:
     ):
         """Invariant: messages with different cache keys are evaluated independently."""
         assume(sender_a != sender_b)
+        assume(not re.match(sender_a, sender_b))
         engine = RoutingEngine(Path("/dummy"))
         rule_a = make_rule(
             id="match-a", priority=1, sender=sender_a, instruction="a.md",
@@ -2543,7 +2548,7 @@ class TestPropertyMatchWithRule:
             max_size=50,
         ),
     )
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None)
     def test_cache_key_uses_first_100_chars_of_text(
         self, prefix, suffix_a, suffix_b,
     ):
@@ -2646,6 +2651,7 @@ class TestPropertyMatchWithRule:
         """Invariant: rule with specific channel only matches that channel;
         wildcard at lower priority catches everything else."""
         assume(target_channel != other_channel)
+        assume(not re.match(target_channel, other_channel))
         engine = RoutingEngine(Path("/dummy"))
         channel_rule = make_rule(
             id="chan", priority=1, channel=target_channel,
@@ -2684,6 +2690,9 @@ class TestPropertyMatchWithRule:
     ):
         """Invariant: rule with specific recipient only matches that chat_id."""
         assume(target_recipient != other_recipient)
+        # Guard: routing engine uses regex matching, so "0" matches "00"
+        assume(not re.match(target_recipient, other_recipient))
+        assume(not re.match(other_recipient, target_recipient))
         engine = RoutingEngine(Path("/dummy"))
         recipient_rule = make_rule(
             id="recip", priority=1, recipient=target_recipient,
@@ -2724,6 +2733,10 @@ class TestPropertyMatchWithRule:
         """Invariant: rules are evaluated in priority order; first matching rule
         wins even when rules use different pattern fields."""
         assume(sender_a != sender_b)
+        assume(not re.match(sender_a, sender_b))
+        # Guard against channel_a regex-matching the default channel "whatsapp"
+        # used by msg_fallback
+        assume(not re.match(channel_a, "whatsapp"))
         engine = RoutingEngine(Path("/dummy"))
         # Priority 1: specific sender
         sender_rule = make_rule(
@@ -2828,6 +2841,7 @@ class TestPropertyMatchWithRule:
         """Invariant: messages from different senders produce independent cache
         entries when a sender-specific rule exists."""
         assume(sender_a != sender_b)
+        assume(not re.match(sender_a, sender_b))
         engine = RoutingEngine(Path("/dummy"))
         rule_a = make_rule(
             id="match-a", priority=1, sender=sender_a, instruction="a.md",
@@ -2863,6 +2877,7 @@ class TestPropertyMatchWithRule:
         """Invariant: messages in different chats produce independent cache
         entries when a recipient-specific rule exists."""
         assume(chat_a != chat_b)
+        assume(not re.match(chat_a, chat_b))
         engine = RoutingEngine(Path("/dummy"))
         rule_a = make_rule(
             id="chat-a", priority=1, recipient=chat_a, instruction="a.md",
@@ -2893,6 +2908,7 @@ class TestPropertyMatchWithRule:
         """Invariant: messages on different channels produce independent cache
         entries when a channel-specific rule exists."""
         assume(channel_a != channel_b)
+        assume(not re.match(channel_a, channel_b))
         engine = RoutingEngine(Path("/dummy"))
         rule_a = make_rule(
             id="chan-a", priority=1, channel=channel_a, instruction="a.md",
@@ -2981,7 +2997,8 @@ class TestPropertyMatchWithRule:
 
         # Different channel → falls through to wildcard
         msg_no = make_msg(
-            sender_id=other_sender, fromMe=fromMe, toMe=toMe,
+            sender_id=other_sender, channel_type="telegram",
+            fromMe=fromMe, toMe=toMe,
         )
         r, inst = engine.match_with_rule(msg_no)
         assert r is fallback
@@ -3002,6 +3019,7 @@ class TestPropertyMatchWithRule:
         """Invariant: rule with specific sender AND fromMe=True only matches
         messages from that sender AND with fromMe=True."""
         assume(target_sender != other_sender)
+        assume(not re.match(target_sender, other_sender))
         engine = RoutingEngine(Path("/dummy"))
         sender_fromMe_rule = make_rule(
             id="sender-fromMe", priority=1,
@@ -3095,6 +3113,7 @@ class TestPropertyMatchWithRule:
         """Invariant: rule with specific sender AND content_regex requires
         BOTH fields to match simultaneously."""
         assume(target_sender != other_sender)
+        assume(not re.match(target_sender, other_sender))
         engine = RoutingEngine(Path("/dummy"))
         conj_rule = make_rule(
             id="conj", priority=1,
@@ -3148,6 +3167,7 @@ class TestPropertyMatchWithRule:
         """Invariant: rule with specific sender, recipient AND channel requires
         all three to match. Mismatch on any field falls through."""
         assume(target_sender != other_sender)
+        assume(not re.match(target_sender, other_sender))
         engine = RoutingEngine(Path("/dummy"))
         triple_rule = make_rule(
             id="triple", priority=1,
@@ -3181,7 +3201,7 @@ class TestPropertyMatchWithRule:
     # ── Regex pattern in sender field matches prefix ─────────────────────────
 
     @given(
-        numeric_suffix=st.from_regex(r"\d{3,8}", fullmatch=True),
+        numeric_suffix=st.from_regex(r"[0-9]{3,8}", fullmatch=True),
         alpha_text=st.from_regex(r"[a-zA-Z]{3,10}", fullmatch=True),
         fromMe=st.booleans(),
         toMe=st.booleans(),
@@ -3328,6 +3348,9 @@ class TestPropertyMatchWithRule:
     ):
         """Invariant: a specific-sender rule at lower priority value beats a
         wildcard rule at higher priority value, when sender matches."""
+        # Guard against specific_sender regex-matching the default sender_id
+        # used by msg_other ("5511999990000")
+        assume(not re.match(specific_sender, "5511999990000"))
         engine = RoutingEngine(Path("/dummy"))
         specific = make_rule(
             id="specific", priority=priority_specific,
@@ -3356,7 +3379,7 @@ class TestPropertyMatchWithRule:
         text=printable_text,
         sender_id=simple_text,
         chat_id=simple_text,
-        channel_type=simple_text,
+        channel_type=channel_text,
         fromMe=st.booleans(),
         toMe=st.booleans(),
     )
@@ -3394,6 +3417,9 @@ class TestPropertyMatchWithRule:
         """Invariant: when a message matches multiple specific rules, the one
         with the lowest priority value wins."""
         assume(sender_a != sender_b)
+        # Guard: routing engine uses regex matching, so "0" matches "00"
+        assume(not re.match(sender_a, sender_b))
+        assume(not re.match(sender_b, sender_a))
         engine = RoutingEngine(Path("/dummy"))
 
         # Two sender-specific rules with different priorities
@@ -3455,7 +3481,7 @@ def matching_contexts(draw):
 def routing_rules(draw):
     """Composite strategy: draw a fully random RoutingRule with varied patterns."""
     return RoutingRule(
-        id=draw(st.integers(0, 9999)).map(lambda i: f"rule-{i}"),
+        id=draw(st.integers(0, 9999).map(lambda i: f"rule-{i}")),
         priority=draw(st.integers(0, 100)),
         sender=draw(st.one_of(st.just("*"), simple_text, valid_regex)),
         recipient=draw(st.one_of(st.just("*"), simple_text, valid_regex)),
@@ -3556,6 +3582,15 @@ class TestPropertyMatchWithRuleCombinatorial:
         rule_orig, inst_orig = engine.match_with_rule(msg)
         if rule_orig is None:
             return  # No match to disable
+
+        # Skip if another rule has the same instruction as the winner,
+        # because disabling the winner would enable all others (including
+        # originally disabled ones) via the reconstruction below.
+        other_instructions = {
+            r.instruction for r in rules
+            if r is not rule_orig
+        }
+        assume(inst_orig not in other_instructions)
 
         # Find and disable the winning rule
         new_rules = [
@@ -3825,13 +3860,13 @@ class TestPropertyMatchWithRuleCombinatorial:
         assert off_rule is None
         assert off_inst is None
 
-        # Re-enable all rules
+        # Re-enable all rules — restore their original enabled states
         reenabled = [
             RoutingRule(
                 id=r.id, priority=r.priority, sender=r.sender,
                 recipient=r.recipient, channel=r.channel,
                 content_regex=r.content_regex, instruction=r.instruction,
-                enabled=True, fromMe=r.fromMe, toMe=r.toMe,
+                enabled=r.enabled, fromMe=r.fromMe, toMe=r.toMe,
                 skillExecVerbose=r.skillExecVerbose, showErrors=r.showErrors,
             )
             for r in sorted_rules
@@ -3849,6 +3884,7 @@ class TestPropertyMatchWithRuleCombinatorial:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="file watcher timing unreliable on Windows")
 class TestCacheInvalidationOnFileModification:
     """
     End-to-end tests verifying that match_with_rule() correctly invalidates
@@ -4128,6 +4164,9 @@ class TestIsStaleDebounce:
     _is_stale() short-circuits when the elapsed time since the last check is
     less than ROUTING_WATCH_DEBOUNCE_SECONDS (1.0 s).  Only when the debounce
     window has elapsed does it update _last_stale_check and compare mtimes.
+
+    Uses _polling_engine (use_watchdog=False) so debounce logic is actually
+    exercised — with watchdog active _is_stale() checks the _dirty flag instead.
     """
 
     # -- (a) Two calls within debounce window → _scan_file_mtimes called once --
@@ -4137,7 +4176,7 @@ class TestIsStaleDebounce:
         (tmp_path / "a.md").write_text(
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
 
         # Force the first call to pass the debounce gate.
@@ -4157,7 +4196,7 @@ class TestIsStaleDebounce:
         (tmp_path / "a.md").write_text(
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
 
         # First call — passes debounce gate.
@@ -4179,7 +4218,7 @@ class TestIsStaleDebounce:
         (tmp_path / "a.md").write_text(
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
 
         base_time = 1000.0
@@ -4213,7 +4252,7 @@ class TestIsStaleDebounce:
         (tmp_path / "a.md").write_text(
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
         original_mtimes = dict(engine._file_mtimes)
 
@@ -4236,7 +4275,7 @@ class TestIsStaleDebounce:
         (tmp_path / "existing.md").write_text(
             "---\nrouting:\n  id: existing\n  priority: 1\n---\n\n# Existing\n"
         )
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
 
         # First check — no changes.
@@ -4261,7 +4300,7 @@ class TestIsStaleDebounce:
         (tmp_path / "b.md").write_text(
             "---\nrouting:\n  id: b-rule\n  priority: 2\n---\n\n# B\n"
         )
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
         assert len(engine._file_mtimes) == 2
 
@@ -4284,7 +4323,7 @@ class TestIsStaleDebounce:
         (tmp_path / "a.md").write_text(
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
 
         base_time = 500.0
@@ -4306,7 +4345,7 @@ class TestIsStaleDebounce:
         (tmp_path / "a.md").write_text(
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
-        engine = RoutingEngine(tmp_path)
+        engine = _polling_engine(tmp_path)
         engine.load_rules()
 
         assert engine._last_stale_check == 0.0

@@ -417,8 +417,14 @@ class HealthServer:
 
                 ws = Path(self._workspace_dir)
                 data_dir = ws / ".data"
-                db_size_bytes = _recursive_dir_size(data_dir) if data_dir.exists() else 0
-                workspace_size_bytes = _recursive_dir_size(ws)
+
+                # Run blocking I/O in thread pool to avoid stalling the event loop
+                def _compute_sizes() -> tuple[int, int]:
+                    db_sz = _recursive_dir_size(data_dir) if data_dir.exists() else 0
+                    ws_sz = _recursive_dir_size(ws)
+                    return db_sz, ws_sz
+
+                db_size_bytes, workspace_size_bytes = await asyncio.to_thread(_compute_sizes)
 
                 # Growth rate from WorkspaceMonitor's accumulated samples
                 try:

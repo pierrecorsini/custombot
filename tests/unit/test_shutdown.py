@@ -88,7 +88,7 @@ class TestGracefulShutdownOperations:
         await gs.enter_operation("op1")
         await gs.enter_operation("op2")
 
-        async with gs._get_lock():
+        async with gs._in_flight_lock:
             assert gs._in_flight_count == 2
 
     async def test_exit_decrements_counter(self) -> None:
@@ -96,7 +96,7 @@ class TestGracefulShutdownOperations:
         op_id = await gs.enter_operation("op1")
         await gs.exit_operation(op_id)
 
-        async with gs._get_lock():
+        async with gs._in_flight_lock:
             assert gs._in_flight_count == 0
 
     async def test_exit_removes_from_ops_dict(self) -> None:
@@ -123,14 +123,14 @@ class TestGracefulShutdownOperations:
         await gs.enter_operation("op1")
         await gs.exit_operation(None)  # decrement without removing
 
-        async with gs._get_lock():
+        async with gs._in_flight_lock:
             assert gs._in_flight_count == 0
 
     async def test_exit_never_goes_below_zero(self) -> None:
         gs = GracefulShutdown()
         await gs.exit_operation(None)  # count was 0
 
-        async with gs._get_lock():
+        async with gs._in_flight_lock:
             assert gs._in_flight_count == 0
 
 
@@ -155,7 +155,7 @@ class TestGracefulShutdownEnterDuringShutdown:
 
         await gs.enter_operation("late_op")
 
-        async with gs._get_lock():
+        async with gs._in_flight_lock:
             assert gs._in_flight_count == 0
 
 

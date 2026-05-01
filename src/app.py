@@ -315,15 +315,26 @@ class Application:
     @staticmethod
     def _reconfigure_logging(config: Config) -> None:
         """Reconfigure logging after a config change (e.g. verbosity)."""
-        from main import _setup_logging
+        import logging
 
-        _setup_logging(
-            verbose=False,
+        from src.logging.logging_config import VerbosityLevel, setup_logging
+
+        verbosity = VerbosityLevel(config.log_verbosity.lower())
+        level = {
+            VerbosityLevel.QUIET: logging.WARNING,
+            VerbosityLevel.NORMAL: logging.INFO,
+            VerbosityLevel.VERBOSE: logging.DEBUG,
+        }[verbosity]
+
+        setup_logging(
+            level=level,
             log_format=config.log_format,
+            include_correlation_id=True,
+            suppress_noisy=True,
             log_file=config.log_file,
             log_max_bytes=config.log_max_bytes,
             log_backup_count=config.log_backup_count,
-            log_verbosity=config.log_verbosity,
+            verbosity=verbosity,
         )
 
     # ── Pipeline Construction ───────────────────────────────────────────

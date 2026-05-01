@@ -223,6 +223,12 @@ class TestPerformShutdown:
         vector_memory = MagicMock()
         project_store = MagicMock()
 
+        message_queue = MagicMock()
+        message_queue.close = AsyncMock()
+
+        llm = MagicMock()
+        llm.close = AsyncMock()
+
         return {
             "shutdown": shutdown,
             "channel": channel,
@@ -231,6 +237,8 @@ class TestPerformShutdown:
             "db": db,
             "vector_memory": vector_memory,
             "project_store": project_store,
+            "message_queue": message_queue,
+            "llm": llm,
         }
 
     @pytest.mark.asyncio()
@@ -246,6 +254,8 @@ class TestPerformShutdown:
             db=m["db"],
             vector_memory=m["vector_memory"],
             project_store=m["project_store"],
+            message_queue=m["message_queue"],
+            llm=m["llm"],
             session_metrics=session_metrics,
             log=logging.getLogger("test"),
         )
@@ -272,6 +282,8 @@ class TestPerformShutdown:
             db=m["db"],
             vector_memory=m["vector_memory"],
             project_store=m["project_store"],
+            message_queue=m["message_queue"],
+            llm=m["llm"],
             session_metrics=session_metrics,
             log=logging.getLogger("test"),
         )
@@ -296,6 +308,8 @@ class TestPerformShutdown:
             db=m["db"],
             vector_memory=m["vector_memory"],
             project_store=m["project_store"],
+            message_queue=m["message_queue"],
+            llm=m["llm"],
             session_metrics={"uptime": 5},
             log=logging.getLogger("test"),
         )
@@ -312,6 +326,8 @@ class TestPerformShutdown:
             db=m["db"],
             vector_memory=m["vector_memory"],
             project_store=m["project_store"],
+            message_queue=m["message_queue"],
+            llm=m["llm"],
             session_metrics={"uptime": 5},
             log=logging.getLogger("test"),
         )
@@ -336,6 +352,8 @@ class TestPerformShutdown:
             db=m["db"],
             vector_memory=m["vector_memory"],
             project_store=m["project_store"],
+            message_queue=m["message_queue"],
+            llm=m["llm"],
             session_metrics={"uptime": 5},
             log=logging.getLogger("test"),
         )

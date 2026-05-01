@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.db.sqlite_utils import SqliteHelper
-from src.utils.locking import ThreadLock
+from src.utils.locking import ThreadLockMixin
 
 log = logging.getLogger(__name__)
 
@@ -53,13 +53,12 @@ VALID_RELATIONS = {
 }
 
 
-class ProjectStore(SqliteHelper):
+class ProjectStore(ThreadLockMixin, SqliteHelper):
     """Manages projects, knowledge entries, and their relationships."""
 
     def __init__(self, db_path: str) -> None:
         self._db_path = Path(db_path)
-        self._lock = ThreadLock()
-        SqliteHelper.__init__(self)
+        super().__init__()
 
     def connect(self) -> None:
         self._open_connection()

@@ -31,6 +31,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from src.utils.background_service import BaseBackgroundService
 from src.utils.singleton import get_or_create_singleton, reset_singleton
 
 log = logging.getLogger(__name__)
@@ -160,7 +161,7 @@ def get_memory_stats(
     )
 
 
-class MemoryMonitor:
+class MemoryMonitor(BaseBackgroundService):
     """
     Memory monitor with periodic checking and threshold warnings.
 
@@ -188,11 +189,10 @@ class MemoryMonitor:
             warning_threshold_percent: Percentage at which to log warnings.
             critical_threshold_percent: Percentage at which to log errors.
         """
+        super().__init__()
         self._warning_threshold = warning_threshold_percent
         self._critical_threshold = critical_threshold_percent
         self._cache_trackers: dict[str, Callable[[], int]] = {}
-        self._task: Optional[asyncio.Task[None]] = None
-        self._running = False
         self._last_stats: Optional[MemoryStats] = None
         self._peak_memory_percent: float = 0.0
 
@@ -270,8 +270,9 @@ class MemoryMonitor:
 
         return result
 
-    async def _periodic_check(self, interval_seconds: float) -> None:
+    async def _run_loop(self) -> None:
         """Background task that checks memory periodically."""
+        interval_seconds = getattr(self, '_interval', DEFAULT_MEMORY_CHECK_INTERVAL)
         log.info(
             "Memory monitor started (interval=%.1fs, warning_threshold=%.1f%%, critical_threshold=%.1f%%)",
             interval_seconds,
@@ -308,25 +309,10 @@ class MemoryMonitor:
         Args:
             interval_seconds: How often to check memory (default 60s).
         """
-        if self._running:
-            log.warning("Memory monitor already running")
-            return
-
-        self._running = True
-        self._task = asyncio.create_task(self._periodic_check(interval_seconds))
+        self._interval = interval_seconds
+        self.start()
         log.info("Memory monitor periodic check started")
 
-    async def stop(self) -> None:
-        """Stop the periodic memory check."""
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-        log.info("Memory monitor stopped")
 
     @property
     def peak_memory_percent(self) -> float:

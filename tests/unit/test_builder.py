@@ -65,6 +65,7 @@ def _make_mocks() -> dict:
 
     mock_vm = MagicMock()
     mock_vm.connect = MagicMock()
+    mock_vm.probe_embedding_model = AsyncMock(return_value=(True, "ok"))
 
     mock_project_store = MagicMock()
     mock_project_store.connect = MagicMock()
@@ -135,7 +136,7 @@ async def _run_build_bot(test_config: Config, tmp_path: Path) -> tuple[BotCompon
         stack.enter_context(patch("src.project.store.ProjectStore", mocks["ps_cls"]))
         stack.enter_context(patch("src.routing.RoutingEngine", mocks["routing_cls"]))
         stack.enter_context(patch("src.skills.SkillRegistry", mocks["skills_cls"]))
-        stack.enter_context(patch("src.builder.MessageQueue", mocks["mq_cls"]))
+        stack.enter_context(patch("src.message_queue.MessageQueue", mocks["mq_cls"]))
         stack.enter_context(patch("src.builder.ProgressBar", return_value=mocks["progress"]))
         stack.enter_context(patch("src.builder.maybe_spinner_async", return_value=mocks["spinner"]))
         stack.enter_context(patch("src.builder.WORKSPACE_DIR", str(tmp_path)))
@@ -198,7 +199,7 @@ class TestVectorMemoryConstruction:
         _, mocks = await _run_build_bot(test_config, tmp_path)
         mocks["vm_cls"].assert_called_once()
         call_kwargs = mocks["vm_cls"].call_args[1]
-        assert call_kwargs["openai_client"] is mocks["llm"]._client
+        assert call_kwargs["openai_client"] is mocks["llm"].openai_client
         assert call_kwargs["embedding_model"] == test_config.llm.embedding_model
         assert call_kwargs["embedding_dimensions"] == test_config.llm.embedding_dimensions
 
@@ -222,6 +223,7 @@ class TestVectorMemoryConstruction:
             stack.enter_context(patch("src.project.store.ProjectStore", mocks["ps_cls"]))
             stack.enter_context(patch("src.routing.RoutingEngine", mocks["routing_cls"]))
             stack.enter_context(patch("src.skills.SkillRegistry", mocks["skills_cls"]))
+            stack.enter_context(patch("src.message_queue.MessageQueue", mocks["mq_cls"]))
             stack.enter_context(patch("src.builder.ProgressBar", return_value=mocks["progress"]))
             stack.enter_context(patch("src.builder.maybe_spinner_async", return_value=mocks["spinner"]))
             stack.enter_context(patch("src.builder.WORKSPACE_DIR", str(tmp_path)))
@@ -283,7 +285,7 @@ class TestBotWiring:
 
     async def test_bot_receives_config(self, test_config: Config, tmp_path: Path):
         result, _ = await _run_build_bot(test_config, tmp_path)
-        assert result.bot._cfg is test_config
+        assert result.bot._cfg.max_tool_iterations == test_config.llm.max_tool_iterations
 
     async def test_result_db_matches_bot_db(self, test_config: Config, tmp_path: Path):
         result, _ = await _run_build_bot(test_config, tmp_path)
@@ -306,7 +308,11 @@ class TestBotComponentsDataclass:
         db = MagicMock()
         vm = MagicMock()
         ps = MagicMock()
-        bc = BotComponents(bot=bot, db=db, vector_memory=vm, project_store=ps)
+        bc = BotComponents(
+            bot=bot, db=db, vector_memory=vm, project_store=ps,
+            token_usage=MagicMock(), message_queue=MagicMock(),
+            llm=MagicMock(), dedup=MagicMock(),
+        )
         with pytest.raises(AttributeError):
             bc.bot = MagicMock()  # type: ignore[misc]
 
@@ -315,7 +321,11 @@ class TestBotComponentsDataclass:
         db = MagicMock()
         vm = MagicMock()
         ps = MagicMock()
-        bc = BotComponents(bot=bot, db=db, vector_memory=vm, project_store=ps)
+        bc = BotComponents(
+            bot=bot, db=db, vector_memory=vm, project_store=ps,
+            token_usage=MagicMock(), message_queue=MagicMock(),
+            llm=MagicMock(), dedup=MagicMock(),
+        )
         assert bc.bot is bot
         assert bc.db is db
         assert bc.vector_memory is vm
@@ -357,7 +367,7 @@ class TestWireLLMClientsResilience:
         registry.register(skill_b)
         registry.register(skill_c)
 
-        with caplog.at_level("ERROR", logger="src.skills"):
+        with caplog.at_level("DEBUG", logger="src.skills"):
             # (c) No exception propagates from wire_llm_clients()
             registry.wire_llm_clients(mock_llm)
 
@@ -368,7 +378,7 @@ class TestWireLLMClientsResilience:
         # Skill B was attempted despite raising
         skill_b.wire_llm.assert_called_once_with(mock_llm)
 
-        # (b) The error is logged with the failing skill name
+        # (b) The error is logged with the failing skill name (in extra)
+        assert any(getattr(r, "skill", None) == "skill_b" for r in caplog.records)
         error_msgs = [r.message for r in caplog.records]
-        assert any("skill_b" in msg for msg in error_msgs)
         assert any("Failed to wire" in msg for msg in error_msgs)

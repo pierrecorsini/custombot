@@ -28,6 +28,7 @@ import time
 from collections import OrderedDict, deque
 from typing import Any, Optional
 
+from src.utils.background_service import BaseBackgroundService
 from src.utils.singleton import get_or_create_singleton, reset_singleton
 
 from src.monitoring.metrics_types import (
@@ -90,7 +91,7 @@ DEFAULT_MAX_TRACKED_CHATS: int = 1000
 DEFAULT_TOP_CHATS: int = 10
 
 
-class PerformanceMetrics:
+class PerformanceMetrics(BaseBackgroundService):
     """
     Performance metrics collector with memory-efficient data structures.
 
@@ -122,6 +123,7 @@ class PerformanceMetrics:
             history_size: Maximum number of samples to retain per metric.
             summary_interval: Number of messages between summary logs.
         """
+        super().__init__()
         self._history_size = history_size
         self._summary_interval = summary_interval
 
@@ -212,8 +214,6 @@ class PerformanceMetrics:
         self._last_system_refresh: float = 0.0
 
         # Background logging task
-        self._log_task: Optional[asyncio.Task[None]] = None
-        self._running: bool = False
 
     # ── Metric Recording ─────────────────────────────────────────────────────
 
@@ -668,8 +668,9 @@ class PerformanceMetrics:
 
     # ── Periodic Logging ─────────────────────────────────────────────────────
 
-    async def _periodic_log(self, interval_seconds: float) -> None:
+    async def _run_loop(self) -> None:
         """Background task for periodic metrics logging."""
+        interval_seconds = getattr(self, '_interval', DEFAULT_METRICS_LOG_INTERVAL)
         log.info(
             "Performance metrics logging started (interval=%.1fs)",
             interval_seconds,
@@ -694,29 +695,11 @@ class PerformanceMetrics:
         Args:
             interval_seconds: How often to log metrics (default 60s).
         """
-        if self._running:
-            log.warning("Performance metrics logging already running")
-            return
+        self._interval = interval_seconds
+        self.start()
 
-        self._running = True
-        self._log_task = asyncio.create_task(self._periodic_log(interval_seconds))
 
-    async def stop(self) -> None:
-        """Stop periodic metrics logging."""
-        self._running = False
-        if self._log_task:
-            self._log_task.cancel()
-            try:
-                await self._log_task
-            except asyncio.CancelledError:
-                pass
-            self._log_task = None
-        log.info("Performance metrics logging stopped")
 
-    @property
-    def is_running(self) -> bool:
-        """Check if periodic logging is active."""
-        return self._running
 
 
 def get_metrics_collector(

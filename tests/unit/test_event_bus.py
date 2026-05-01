@@ -82,7 +82,7 @@ async def test_handler_exception_logged_with_event_metadata(
         correlation_id="corr-123",
     )
 
-    with caplog.at_level(logging.ERROR, logger="src.core.event_bus"):
+    with caplog.at_level(logging.DEBUG, logger="src.core.event_bus"):
         await bus.emit(event)
 
     # The exception log should reference the event name

@@ -230,18 +230,13 @@ def check_llm_logs(log_dir: Optional[str] = None) -> ComponentHealth:
 
 
 def _recursive_dir_size(directory: Path) -> int:
-    """Return total size (bytes) of all files under *directory*, recursively."""
-    total = 0
-    try:
-        for entry in directory.rglob("*"):
-            try:
-                if entry.is_file():
-                    total += entry.stat().st_size
-            except OSError:
-                pass
-    except OSError:
-        pass
-    return total
+    """Return total size (bytes) of all files under *directory*, recursively.
+
+    Delegates to :func:`src.utils.disk.recursive_dir_size` for reuse.
+    """
+    from src.utils.disk import recursive_dir_size
+
+    return recursive_dir_size(directory)
 
 
 def check_disk_usage(workspace_dir: str) -> ComponentHealth:
@@ -274,6 +269,44 @@ def check_disk_usage(workspace_dir: str) -> ComponentHealth:
         name="disk_usage",
         status=status,
         message=message,
+    )
+
+
+def check_disk_space_health(workspace_dir: str) -> ComponentHealth:
+    """Check filesystem-level free disk space on the workspace volume.
+
+    Uses :func:`src.utils.disk.check_disk_space` to query actual free space.
+    Reports DEGRADED when available space falls below the warning threshold
+    (1 GB) or the default minimum (100 MB).
+    """
+    from src.utils.disk import DISK_SPACE_WARNING_THRESHOLD, check_disk_space
+
+    try:
+        result = check_disk_space(workspace_dir)
+    except OSError as exc:
+        return ComponentHealth(
+            name="disk_space",
+            status=HealthStatus.DEGRADED,
+            message=f"Cannot check disk space: {exc}",
+        )
+
+    free_gb = result.free_bytes / (1024 * 1024 * 1024)
+    if not result.has_sufficient_space:
+        return ComponentHealth(
+            name="disk_space",
+            status=HealthStatus.DEGRADED,
+            message=f"Low disk space: {free_gb:.2f} GB free",
+        )
+    if result.free_bytes < DISK_SPACE_WARNING_THRESHOLD:
+        return ComponentHealth(
+            name="disk_space",
+            status=HealthStatus.DEGRADED,
+            message=f"Disk space below warning threshold: {free_gb:.2f} GB free",
+        )
+    return ComponentHealth(
+        name="disk_space",
+        status=HealthStatus.HEALTHY,
+        message=f"{free_gb:.2f} GB free",
     )
 
 
@@ -323,16 +356,15 @@ def check_vector_memory(vector_memory: Any) -> ComponentHealth:
             message="VectorMemory not configured",
         )
 
-    with vector_memory._cache_lock:
-        api_healthy = vector_memory._embed_api_healthy
-        queue_depth = len(vector_memory._pending_retries)
-
-    queue_capacity = queue_depth / _MAX_RETRY_QUEUE_SIZE
+    snap = vector_memory.health_snapshot()
+    api_healthy = snap["embedding_api_healthy"]
+    queue_depth = snap["retry_queue_depth"]
+    queue_capacity = snap["retry_queue_capacity"]
 
     details: dict[str, Any] = {
         "embedding_api_healthy": api_healthy,
         "retry_queue_depth": queue_depth,
-        "retry_queue_capacity": round(queue_capacity, 2),
+        "retry_queue_capacity": queue_capacity,
     }
 
     if not api_healthy and queue_capacity > 0.5:

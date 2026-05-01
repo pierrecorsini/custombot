@@ -2194,8 +2194,13 @@ class TestHealthProbe:
         with patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01):
             asyncio.create_task(_close_after_delay())
             client._ensure_health_probe()
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.3)
 
+        # Give the probe task a chance to finish and set itself to None
+        for _ in range(10):
+            if client._health_probe_task is None:
+                break
+            await asyncio.sleep(0.05)
         assert client._health_probe_task is None
 
     @pytest.mark.asyncio
@@ -2209,7 +2214,10 @@ class TestHealthProbe:
             client._client.models, "list", AsyncMock(side_effect=Exception("down"))
         ), patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01):
             client._ensure_health_probe()
-            assert client._health_probe_task is not None
+            probe_task = client._health_probe_task
+            assert probe_task is not None
             await client.close()
 
-        assert client._health_probe_task is None
+        # The probe task should be done/cancelled after close
+        assert probe_task.done()
+        assert probe_task.cancelled()

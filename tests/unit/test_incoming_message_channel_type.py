@@ -104,7 +104,7 @@ class TestConstantExported:
     """VALID_CHANNEL_TYPES should be importable from the package."""
 
     def test_importable_from_package(self) -> None:
-        from src.channels import VALID_CHANNEL_TYPES as vt
+        from src.channels.base import VALID_CHANNEL_TYPES as vt
 
         assert isinstance(vt, frozenset)
         assert "whatsapp" in vt

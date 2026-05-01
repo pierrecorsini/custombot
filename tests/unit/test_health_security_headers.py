@@ -8,7 +8,7 @@ required defense-in-depth headers:
 - X-Frame-Options: DENY
 - Cache-Control: no-store
 
-Also verifies ``_IPLimiter`` behaviour:
+Also verifies ``IPLimiter`` behaviour:
 - Requests within the limit are allowed.
 - Requests exceeding the limit are rejected with ``retry_after``.
 - After the sliding window expires, requests are allowed again.
@@ -23,6 +23,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.health.middleware import (
+    IPLimiter,
+    create_rate_limit_middleware,
+    create_request_size_limit_middleware,
+    load_rate_limit_config,
+    load_request_size_config,
+)
 from src.health.server import HealthServer
 
 
@@ -43,20 +50,13 @@ async def _create_test_client(server: HealthServer) -> Any:
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
 
-    from src.health.server import (
-        _create_rate_limit_middleware,
-        _create_request_size_limit_middleware,
-        _load_rate_limit_config,
-        _load_request_size_config,
-    )
-
-    max_body, max_url = _load_request_size_config()
-    limit, window, max_ips = _load_rate_limit_config()
-    ip_limiter = _IPLimiter_shim(limit, window, max_ips)
+    max_body, max_url = load_request_size_config()
+    limit, window, max_ips = load_rate_limit_config()
+    ip_limiter = IPLimiter(limit, window, max_ips)
 
     middlewares = [
-        _create_request_size_limit_middleware(max_body, max_url),
-        _create_rate_limit_middleware(ip_limiter),
+        create_request_size_limit_middleware(max_body, max_url),
+        create_rate_limit_middleware(ip_limiter),
     ]
 
     app = web.Application(middlewares=middlewares)
@@ -71,13 +71,6 @@ async def _create_test_client(server: HealthServer) -> Any:
     client = TestClient(test_server)
     await client.start_server()
     return client
-
-
-def _IPLimiter_shim(limit: int, window: float, max_ips: int) -> Any:
-    """Create a real _IPLimiter — import helper to avoid private-name mangling."""
-    from src.health.server import _IPLimiter
-
-    return _IPLimiter(limit, window, max_ips)
 
 
 def _make_server() -> HealthServer:
@@ -117,12 +110,12 @@ class TestSecurityHeaders:
 
 
 class TestIPLimiter:
-    """Unit tests for ``_IPLimiter`` rate limiting, burst, cooldown, and eviction."""
+    """Unit tests for ``IPLimiter`` rate limiting, burst, cooldown, and eviction."""
 
     def _make_limiter(
         self, limit: int = 3, window: float = 5.0, max_ips: int = 4
-    ) -> Any:
-        return _IPLimiter_shim(limit, window, max_ips)
+    ) -> IPLimiter:
+        return IPLimiter(limit, window, max_ips)
 
     # ── (a) Requests within the limit are allowed ────────────────────────
 

@@ -242,10 +242,29 @@ def ensure_disk_space(
     return result
 
 
+def recursive_dir_size(directory: Path) -> int:
+    """Return total size (bytes) of all files under *directory*, recursively.
+
+    Safe for any directory — skips files that raise ``OSError``.
+    """
+    total = 0
+    try:
+        for entry in directory.rglob("*"):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return total
+
+
 __all__ = [
     "check_disk_space",
     "ensure_disk_space",
     "DiskSpaceResult",
     "DEFAULT_MIN_DISK_SPACE",
     "DISK_SPACE_WARNING_THRESHOLD",
+    "recursive_dir_size",
 ]

@@ -513,6 +513,7 @@ class TestMessageQueueEnqueue:
 
         await queue.enqueue(make_incoming(message_id="a1"))
         await queue.enqueue(make_incoming(message_id="a2"))
+        await queue._flush_write_buffer()
 
         qfile = data_dir / "message_queue.jsonl"
         lines = qfile.read_text(encoding="utf-8").strip().splitlines()
@@ -682,16 +683,18 @@ class TestMessageQueueComplete:
         await queue.enqueue(make_incoming(message_id="x1"))
 
         qfile = data_dir / "message_queue.jsonl"
+        await queue._flush_write_buffer()
         lines_before = qfile.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines_before) >= 1
 
         await queue.complete("x1")
+        await queue._flush_write_buffer()
 
         lines_after = qfile.read_text(encoding="utf-8").strip().splitlines()
         # After complete, a completion marker is appended (append-only design)
         # The original enqueue line + completion marker should be present
         assert len(lines_after) == 2
-        assert '"status": "completed"' in lines_after[1]
+        assert json.loads(lines_after[1])["status"] == "completed"
         await queue.close()
 
     async def test_double_complete_returns_false(self, tmp_path: Path):
@@ -1007,6 +1010,7 @@ class TestMessageQueuePersistence:
 
         await queue.enqueue(make_incoming(message_id="a1"))
         await queue.enqueue(make_incoming(message_id="a2"))
+        await queue._flush_write_buffer()
 
         qfile = data_dir / "message_queue.jsonl"
         lines = qfile.read_text(encoding="utf-8").strip().splitlines()
@@ -1028,6 +1032,7 @@ class TestMessageQueuePersistence:
 
         # Complete one — appends completion marker
         await queue.complete("r1")
+        await queue._flush_write_buffer()
 
         # File should contain 2 enqueue entries + 1 completion marker
         qfile = data_dir / "message_queue.jsonl"
@@ -1035,7 +1040,7 @@ class TestMessageQueuePersistence:
         assert len(lines) == 3
         assert json.loads(lines[0])["message_id"] == "r1"
         assert json.loads(lines[1])["message_id"] == "r2"
-        assert '"status": "completed"' in lines[2]
+        assert json.loads(lines[2])["status"] == "completed"
         await queue.close()
 
     async def test_no_temp_file_left_after_persist(self, tmp_path: Path):
@@ -1266,6 +1271,7 @@ class TestEdgeCases:
         )
         await queue.enqueue(make_incoming(message_id="remove-1"))
         await queue.complete("remove-1")
+        await queue._flush_write_buffer()
 
         qfile = data_dir / "message_queue.jsonl"
         lines = qfile.read_text(encoding="utf-8").strip().splitlines()
@@ -1923,6 +1929,7 @@ class TestConcurrentEnqueueCompleteRaceConditions:
         assert len(chat_pending) == 30
 
         # JSONL file must have 30 lines, all valid
+        await queue._flush_write_buffer()
         qfile = tmp_path / "data" / "message_queue.jsonl"
         lines = qfile.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 30
@@ -2236,6 +2243,11 @@ class TestConcurrentEnqueueCompleteRaceConditions:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+# Alphabet matching _CHAT_ID_PATTERN: ^[a-zA-Z0-9_\-.@]+$
+# Used by Hypothesis strategies so that generated chat_ids pass
+# _validate_chat_id() during from_dict() round-trip tests.
+_CHAT_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.@"
+
 # Hypothesis strategy for generating valid MessageStatus values
 _status_strategy = st.sampled_from(list(MessageStatus))
 
@@ -2255,8 +2267,8 @@ _metadata_strategy = st.dictionaries(
 # Core strategy for generating QueuedMessage instances
 _queued_message_strategy = st.builds(
     QueuedMessage,
-    message_id=st.text(min_size=1, max_size=200),
-    chat_id=st.text(min_size=1, max_size=200),
+    message_id=st.text(min_size=1, max_size=200, alphabet=st.characters(whitelist_categories=("L", "N"), whitelist_characters="-_.@")),
+    chat_id=st.text(min_size=1, max_size=200, alphabet=_CHAT_ID_ALPHABET),
     text=st.text(min_size=0, max_size=5000),
     sender_id=st.one_of(st.none(), st.text(min_size=0, max_size=200)),
     sender_name=st.one_of(st.none(), st.text(min_size=0, max_size=200)),
@@ -2337,7 +2349,7 @@ class TestQueuedMessagePropertyRoundTrip:
     @given(
         text=st.text(min_size=0, max_size=10000),
         message_id=st.text(min_size=1, max_size=500),
-        chat_id=st.text(min_size=1, max_size=500),
+        chat_id=st.text(min_size=1, max_size=500, alphabet=_CHAT_ID_ALPHABET),
     )
     @settings(max_examples=100)
     def test_text_field_fidelity(
@@ -2894,10 +2906,13 @@ class TestValidateMethod:
             + "GARBAGE\n"
             + '{"truncated":\n'
         )
-        qfile.write_text(original_content, encoding="utf-8")
 
         queue = MessageQueue(str(data_dir))
         await queue.connect()
+
+        # Write corrupted content AFTER connect so eager eviction
+        # in _load_pending() doesn't clean the file first.
+        qfile.write_text(original_content, encoding="utf-8")
 
         result = await queue.validate()
         assert result.is_corrupted is True
@@ -2926,21 +2941,21 @@ class TestValidateMethod:
         """validate() distinguishes pending vs completed entries."""
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        qfile = data_dir / "message_queue.jsonl"
 
         pending = make_queued(message_id="v-pend")
-        completed = json.dumps({
-            "message_id": "v-done",
-            "status": "completed",
-            "completed_at": time.time(),
-        })
-        qfile.write_text(
-            json.dumps(pending.to_dict()) + "\n" + completed + "\n",
-            encoding="utf-8",
-        )
+        # Use a full completed QueuedMessage (not the short completion marker
+        # which lacks chat_id/text and would be classified as corrupted).
+        completed_msg = make_queued(message_id="v-done", status=MessageStatus.COMPLETED)
 
         queue = MessageQueue(str(data_dir))
         await queue.connect()
+
+        # Write file content AFTER connect to avoid eager eviction.
+        qfile = data_dir / "message_queue.jsonl"
+        qfile.write_text(
+            json.dumps(pending.to_dict()) + "\n" + json.dumps(completed_msg.to_dict()) + "\n",
+            encoding="utf-8",
+        )
 
         result = await queue.validate()
         assert result.pending_lines == 1
@@ -2971,10 +2986,13 @@ class TestRepairMethod:
             + json.dumps(valid_b.to_dict()) + "\n"
             + '{"partial":\n'
         )
-        qfile.write_text(original, encoding="utf-8")
 
         queue = MessageQueue(str(data_dir))
         await queue.connect()
+
+        # Write corrupted content AFTER connect so eager eviction
+        # in _load_pending() doesn't clean the file first.
+        qfile.write_text(original, encoding="utf-8")
 
         result = await queue.repair()
         assert result.is_corrupted is True
@@ -3000,13 +3018,16 @@ class TestRepairMethod:
         qfile = data_dir / "message_queue.jsonl"
 
         valid = make_queued(message_id="repair-bak")
-        qfile.write_text(
-            json.dumps(valid.to_dict()) + "\n" + "BAD LINE\n",
-            encoding="utf-8",
+        corrupted_content = (
+            json.dumps(valid.to_dict()) + "\n" + "BAD LINE\n"
         )
 
         queue = MessageQueue(str(data_dir))
         await queue.connect()
+
+        # Write corrupted content AFTER connect so eager eviction
+        # in _load_pending() doesn't clean the file first.
+        qfile.write_text(corrupted_content, encoding="utf-8")
 
         result = await queue.repair()
         assert result.backup_path is not None
@@ -3049,13 +3070,16 @@ class TestRepairMethod:
             sender_id="sender-x",
             sender_name="Alice",
         )
-        qfile.write_text(
-            json.dumps(valid.to_dict()) + "\n" + "GARBAGE\n",
-            encoding="utf-8",
+        corrupted_content = (
+            json.dumps(valid.to_dict()) + "\n" + "GARBAGE\n"
         )
 
         queue = MessageQueue(str(data_dir))
         await queue.connect()
+
+        # Write corrupted content AFTER connect so eager eviction
+        # in _load_pending() doesn't clean the file first.
+        qfile.write_text(corrupted_content, encoding="utf-8")
 
         result = await queue.repair()
         assert result.repaired is True
@@ -3074,13 +3098,16 @@ class TestRepairMethod:
         qfile = data_dir / "message_queue.jsonl"
 
         valid = make_queued(message_id="repair-then-val")
-        qfile.write_text(
-            json.dumps(valid.to_dict()) + "\n" + "BAD\n",
-            encoding="utf-8",
+        corrupted_content = (
+            json.dumps(valid.to_dict()) + "\n" + "BAD\n"
         )
 
         queue = MessageQueue(str(data_dir))
         await queue.connect()
+
+        # Write corrupted content AFTER connect so eager eviction
+        # in _load_pending() doesn't clean the file first.
+        qfile.write_text(corrupted_content, encoding="utf-8")
 
         repair_result = await queue.repair()
         assert repair_result.repaired is True
@@ -3125,6 +3152,7 @@ class TestAppendDurability:
 
         await queue.enqueue(make_incoming(message_id="dur-comp-1"))
         await queue.complete("dur-comp-1")
+        await queue._flush_write_buffer()
 
         # Don't close — check disk state immediately after complete
         qfile = data_dir / "message_queue.jsonl"

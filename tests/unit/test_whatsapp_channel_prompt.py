@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.bot._bot import BotConfig
 from src.channels.base import IncomingMessage
 
 
@@ -93,14 +94,24 @@ async def test_whatsapp_channel_prompt_injected_into_system_message(tmp_path: Pa
         llm = LLMClient(config.llm)
         routing = _create_mock_routing_engine(workspace)
 
+        bot_config = BotConfig(
+            max_tool_iterations=5,
+            memory_max_history=50,
+            system_prompt_prefix="",
+        )
+
+        mock_dedup = AsyncMock()
+        mock_dedup.is_inbound_duplicate = AsyncMock(return_value=False)
+
         bot = Bot(
-            config=config,
+            config=bot_config,
             db=db,
             llm=llm,
             memory=memory,
             skills=skills,
             routing=routing,
             instructions_dir=str(instructions_dir),
+            dedup=mock_dedup,
         )
 
         # Create a real WhatsAppChannel
@@ -116,6 +127,7 @@ async def test_whatsapp_channel_prompt_injected_into_system_message(tmp_path: Pa
             sender_name="Test User",
             text="Hello",
             timestamp=1000.0,
+            acl_passed=True,
         )
 
         # Act — pass the channel
@@ -182,14 +194,24 @@ async def test_no_channel_means_no_channel_prompt(tmp_path: Path):
         llm = LLMClient(config.llm)
         routing = _create_mock_routing_engine(workspace)
 
+        bot_config = BotConfig(
+            max_tool_iterations=5,
+            memory_max_history=50,
+            system_prompt_prefix="",
+        )
+
+        mock_dedup = AsyncMock()
+        mock_dedup.is_inbound_duplicate = AsyncMock(return_value=False)
+
         bot = Bot(
-            config=config,
+            config=bot_config,
             db=db,
             llm=llm,
             memory=memory,
             skills=skills,
             routing=routing,
             instructions_dir=str(instructions_dir),
+            dedup=mock_dedup,
         )
 
         msg = IncomingMessage(
@@ -199,6 +221,7 @@ async def test_no_channel_means_no_channel_prompt(tmp_path: Path):
             sender_name="Test User",
             text="Hello",
             timestamp=1000.0,
+            acl_passed=True,
         )
 
         # Act — no channel passed

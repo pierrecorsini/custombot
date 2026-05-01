@@ -123,6 +123,10 @@ CONFIG_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "description": "Separate API key for embedding calls (defaults to llm.api_key if empty)",
                 },
+                "stream_response": {
+                    "type": "boolean",
+                    "description": "Stream LLM responses token-by-token to reduce perceived latency (default: false)",
+                },
             },
             "required": ["model"],
             "additionalProperties": False,
@@ -260,6 +264,35 @@ CONFIG_SCHEMA: dict[str, Any] = {
                 },
             },
             "additionalProperties": False,
+        },
+        "middleware": {
+            "type": "object",
+            "description": "Middleware pipeline configuration",
+            "properties": {
+                "middleware_order": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "description": "Ordered list of built-in middleware names (empty uses default order)",
+                },
+                "extra_middleware_paths": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "description": "Dotted import paths for custom middleware factories",
+                },
+            },
+            "additionalProperties": False,
+        },
+        "max_thread_pool_workers": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 256,
+            "description": "Maximum worker threads for asyncio ThreadPoolExecutor (null uses system default)",
         },
     },
     "required": ["llm", "whatsapp"],

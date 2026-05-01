@@ -12,13 +12,9 @@ import logging
 import time
 
 from src.core.errors import NonCriticalCategory, log_noncritical
+from src.utils.circuit_breaker import CircuitBreaker
 
 log = logging.getLogger(__name__)
-
-# TTL for the embedding API health cache.  When the embeddings endpoint is
-# confirmed unreachable, subsequent calls short-circuit for this many seconds
-# instead of waiting for the full API timeout on every attempt.
-_EMBED_HEALTH_TTL = 60.0
 
 # Maximum number of queued retry entries.  Oldest entries are dropped when
 # the cap is exceeded to prevent unbounded memory growth during extended outages.
@@ -29,44 +25,22 @@ class EmbeddingHealthMixin:
     """Mixin providing embedding API health checks and retry queue management.
 
     Expects the host class to provide:
-        _cache_lock          — ThreadLock protecting _embed_api_* state
-        _embed_api_healthy   — bool flag
-        _embed_api_last_check — float timestamp
+        _circuit_breaker     — CircuitBreaker instance tracking API health
         _pending_retries     — list of (chat_id, text, category, queued_at)
     """
 
-    def _check_embedding_api_health(self) -> None:
-        """Raise immediately if the embedding API was recently confirmed down.
+    async def _check_embedding_api_health(self) -> None:
+        """Raise immediately if the embedding API circuit breaker is open."""
+        if await self._circuit_breaker.is_open():
+            raise ConnectionError("Embedding API unreachable (circuit breaker open)")
 
-        When the API is unreachable every ``_embed()`` / ``_embed_batch()``
-        call would block for the full HTTP timeout (potentially 120 s).  After
-        a failure we record the timestamp and short-circuit subsequent calls
-        for ``_EMBED_HEALTH_TTL`` seconds so the event loop is not blocked.
-        """
-        with self._cache_lock:
-            if self._embed_api_healthy:
-                return
-            elapsed = time.monotonic() - self._embed_api_last_check
-            if elapsed >= _EMBED_HEALTH_TTL:
-                # TTL expired — allow a fresh probe
-                return
-        remaining = round(_EMBED_HEALTH_TTL - elapsed, 1)
-        raise ConnectionError(
-            f"Embedding API unreachable (last failure {elapsed:.0f}s ago, "
-            f"retrying in ~{remaining}s)"
-        )
-
-    def _mark_embedding_api_healthy(self) -> None:
+    async def _mark_embedding_api_healthy(self) -> None:
         """Record that the embedding API is reachable."""
-        with self._cache_lock:
-            self._embed_api_healthy = True
-            self._embed_api_last_check = time.monotonic()
+        await self._circuit_breaker.record_success()
 
-    def _mark_embedding_api_unhealthy(self) -> None:
+    async def _mark_embedding_api_unhealthy(self) -> None:
         """Record that the embedding API is unreachable."""
-        with self._cache_lock:
-            self._embed_api_healthy = False
-            self._embed_api_last_check = time.monotonic()
+        await self._circuit_breaker.record_failure()
 
     def _queue_for_retry(
         self,
@@ -99,19 +73,16 @@ class EmbeddingHealthMixin:
         if not self._pending_retries:
             return
 
-        # Only attempt retries if the health TTL has expired or API is healthy
-        with self._cache_lock:
-            if not self._embed_api_healthy:
-                elapsed = time.monotonic() - self._embed_api_last_check
-                if elapsed < _EMBED_HEALTH_TTL:
-                    return  # Still in cooldown
+        # Only attempt retries if the circuit breaker allows it
+        if await self._circuit_breaker.is_open():
+            return
 
         items = self._pending_retries[:]
         self._pending_retries.clear()
         retried = 0
         for chat_id, text, category, queued_at in items:
             try:
-                self._check_embedding_api_health()
+                await self._check_embedding_api_health()
                 embedding = await self._batched_embed(text)
                 now = time.time()
                 await asyncio.to_thread(

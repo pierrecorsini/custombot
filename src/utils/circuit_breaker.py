@@ -27,7 +27,7 @@ import enum
 import logging
 import time
 
-from src.utils.locking import AsyncLock
+from src.utils.locking import AsyncLockMixin
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class CircuitState(str, enum.Enum):
     HALF_OPEN = "half_open"
 
 
-class CircuitBreaker:
+class CircuitBreaker(AsyncLockMixin):
     """Protects against cascading failures by short-circuiting calls.
 
     After *failure_threshold* consecutive failures the breaker opens and
@@ -57,12 +57,12 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         cooldown_seconds: float = 60.0,
     ) -> None:
+        super().__init__()
         self._failure_threshold = failure_threshold
         self._cooldown_seconds = cooldown_seconds
         self._state: CircuitState = CircuitState.CLOSED
         self._failure_count: int = 0
         self._last_failure_time: float = 0.0
-        self._lock = AsyncLock()
 
     @property
     def state(self) -> CircuitState:

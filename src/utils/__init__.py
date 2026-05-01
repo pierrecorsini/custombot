@@ -56,11 +56,8 @@ from src.utils.json_utils import (
 )
 from src.utils.logging_utils import log_execution
 from src.utils.singleton import (
-    SingletonMeta,
-    create_singleton_getter,
     get_or_create_singleton,
     reset_singleton,
-    singleton,
 )
 from src.utils.timing import (
     DEFAULT_SLOW_THRESHOLD_SECONDS,
@@ -469,11 +466,8 @@ __all__ = [
     "safe_json_parse",
     "JsonParseResult",
     # Singleton utilities
-    "singleton",
-    "SingletonMeta",
     "get_or_create_singleton",
     "reset_singleton",
-    "create_singleton_getter",
     # Async executor
     "AsyncExecutor",
     "ExecutorResult",

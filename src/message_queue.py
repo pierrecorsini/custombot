@@ -38,7 +38,7 @@ from src.constants import MAX_QUEUED_TEXT_LENGTH, QUEUE_FSYNC_BATCH_SIZE, QUEUE_
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.db.db_utils import _validate_chat_id
 from src.utils import JsonParseMode, json_dumps, safe_json_parse
-from src.utils.locking import AsyncLock
+from src.utils.locking import AsyncLockMixin
 
 if TYPE_CHECKING:
     from src.channels.base import IncomingMessage
@@ -167,7 +167,7 @@ class QueueCorruptionResult:
     repaired: bool = False
 
 
-class MessageQueue:
+class MessageQueue(AsyncLockMixin):
     """
     Persistent message queue for crash recovery.
 
@@ -207,6 +207,7 @@ class MessageQueue:
             data_dir: Path to data directory for queue storage.
             stale_timeout: Seconds after which a pending message is considered stale.
         """
+        super().__init__()
         self._dir = Path(data_dir)
         self._queue_file = self._dir / "message_queue.jsonl"
         self._stale_timeout = stale_timeout
@@ -217,11 +218,6 @@ class MessageQueue:
         # Track completed IDs for append-only writes with periodic compaction
         self._completed_since_compact: int = 0
         self._compact_threshold: int = 20  # compact after this many completions
-
-        # Lock for thread-safe operations.  AsyncLock defers asyncio.Lock
-        # creation until first use, avoiding event-loop binding issues at
-        # construction time (see src.utils.locking policy).
-        self._lock = AsyncLock()
 
         self._initialized = False
 
