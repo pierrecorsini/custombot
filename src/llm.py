@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -95,7 +96,7 @@ class LLMClient:
         if log_llm:
             from src.logging.llm_logging import LLMLogger
 
-            log_dir = str(Path(WORKSPACE_DIR) / "logs" / "llm")
+            log_dir = str(_Path(WORKSPACE_DIR) / "logs" / "llm")
             self._llm_logger = LLMLogger(log_dir)
             log.info("LLM request/response logging enabled → %s", log_dir)
 
