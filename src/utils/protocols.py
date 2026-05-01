@@ -318,9 +318,11 @@ class Storage(Protocol):
 __all__ = [
     "MessageHandler",
     "Channel",
+    "Closeable",
     "LockProvider",
     "MemoryProtocol",
     "Skill",
+    "Stoppable",
     "Storage",
     "ProjectStore",
     "ProjectContextLoader",
@@ -509,4 +511,40 @@ class MemoryMonitor(Protocol):
 
     async def stop(self) -> None:
         """Stop monitoring."""
+        ...
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lifecycle Protocols
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class Stoppable(Protocol):
+    """Protocol for background services with long-running loops.
+
+    Components that manage asyncio tasks or background loops should
+    implement ``stop()`` to cancel tasks and clean up resources.
+
+    Examples: TaskScheduler, WorkspaceMonitor, PerformanceMetrics,
+    MemoryMonitor, HealthServer, ConfigWatcher.
+    """
+
+    async def stop(self) -> None:
+        """Cancel background tasks and release resources."""
+        ...
+
+
+@runtime_checkable
+class Closeable(Protocol):
+    """Protocol for resources that hold connections or handles.
+
+    Components that manage open connections, file handles, or database
+    references should implement ``close()`` to release them.
+
+    Examples: Database, BaseChannel, LLMClient, MessageQueue, EventBus.
+    """
+
+    async def close(self) -> None:
+        """Release connections, handles, and other resources."""
         ...
