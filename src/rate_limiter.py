@@ -73,7 +73,7 @@ EXPENSIVE_SKILLS: FrozenSet[str] = frozenset(
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class RateLimitConfig:
     """Configuration for rate limiting."""
 
@@ -133,7 +133,7 @@ class RateLimitConfig:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class RateLimitResult:
     """Result of a rate limit check."""
 

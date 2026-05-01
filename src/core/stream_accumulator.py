@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 __all__ = ["StreamAccumulator"]
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamAccumulator:
     """Accumulates SSE streaming deltas into a ChatCompletion.
 

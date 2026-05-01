@@ -106,7 +106,7 @@ __all__ = [
 MAX_MESSAGE_HISTORY = 500
 
 
-@dataclass
+@dataclass(slots=True)
 class ValidationResult:
     """Result of database connection validation."""
 

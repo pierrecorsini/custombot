@@ -33,7 +33,7 @@ from src.utils.logging_utils import log_execution
 log = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ExecutorResult:
     """Result of a subprocess execution."""
 

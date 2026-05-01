@@ -165,7 +165,7 @@ class JsonParseMode(enum.Enum):
 # ── Parse result ───────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class JsonParseResult:
     """Result of JSON parsing with error information."""
 

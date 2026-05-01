@@ -43,7 +43,7 @@ CHECKSUM_LENGTH = 32
 BACKUP_DIR = "backups"
 
 
-@dataclass
+@dataclass(slots=True)
 class MemoryCorruptionResult:
     """Result of memory file corruption detection."""
 

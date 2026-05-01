@@ -20,7 +20,7 @@ class HealthStatus(str, Enum):
     DEGRADED = "degraded"
 
 
-@dataclass
+@dataclass(slots=True)
 class ComponentHealth:
     """Health status of a single component."""
 
@@ -42,7 +42,7 @@ class ComponentHealth:
         return result
 
 
-@dataclass
+@dataclass(slots=True)
 class HealthReport:
     """Overall health report for the bot."""
 

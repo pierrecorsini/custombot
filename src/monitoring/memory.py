@@ -42,7 +42,7 @@ DEFAULT_MEMORY_WARNING_THRESHOLD: float = 80.0
 DEFAULT_MEMORY_CHECK_INTERVAL: float = 60.0
 
 
-@dataclass
+@dataclass(slots=True)
 class MemoryStats:
     """Memory usage statistics for system and process."""
 

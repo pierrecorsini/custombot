@@ -121,7 +121,7 @@ DB_WRITE_LATENCY_HISTOGRAM_BUCKETS_MS: tuple[float, ...] = (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class LatencyStats:
     """
     Statistics for a latency metric.
@@ -151,7 +151,7 @@ class LatencyStats:
         }
 
 
-@dataclass
+@dataclass(slots=True)
 class SkillMetrics:
     """Per-skill execution metrics: calls, successes, errors, and error types."""
 
@@ -170,7 +170,7 @@ class SkillMetrics:
         }
 
 
-@dataclass
+@dataclass(slots=True)
 class SkillTimeoutRatio:
     """Per-skill timeout ratio tracking (actual_time / declared_timeout).
 
@@ -192,7 +192,7 @@ class SkillTimeoutRatio:
         }
 
 
-@dataclass
+@dataclass(slots=True)
 class OversizedArgsSizeStats:
     """Per-skill oversized argument size distribution.
 
@@ -216,7 +216,7 @@ class OversizedArgsSizeStats:
         }
 
 
-@dataclass
+@dataclass(slots=True)
 class ChatMessageCount:
     """Per-chat message count entry for top-chats reporting."""
 
@@ -227,7 +227,7 @@ class ChatMessageCount:
         return {"chat_id": self.chat_id, "message_count": self.message_count}
 
 
-@dataclass
+@dataclass(slots=True)
 class ChatConversationDepth:
     """Per-chat conversation depth (last ReAct iteration count)."""
 
@@ -245,7 +245,7 @@ DEFAULT_MAX_TRACKED_CHATS: int = 1000
 DEFAULT_TOP_CHATS: int = 10
 
 
-@dataclass
+@dataclass(slots=True)
 class ErrorWindowStats:
     """Error count and rate within a sliding time window."""
 
@@ -261,7 +261,7 @@ class ErrorWindowStats:
         }
 
 
-@dataclass
+@dataclass(slots=True)
 class PerformanceSnapshot:
     """
     Point-in-time snapshot of performance metrics.

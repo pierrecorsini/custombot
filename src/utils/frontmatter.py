@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 
 
-@dataclass
+@dataclass(slots=True)
 class ParsedFile:
     """Result of parsing a file with optional frontmatter.
 

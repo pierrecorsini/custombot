@@ -53,7 +53,7 @@ log = logging.getLogger(__name__)
 _MAX_GROWTH_SAMPLES = 288
 
 
-@dataclass
+@dataclass(slots=True)
 class WorkspaceStats:
     """Snapshot of workspace disk usage and cleanup results."""
 

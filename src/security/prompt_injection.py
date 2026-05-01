@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 DEFAULT_MAX_SYSTEM_PROMPT_LENGTH = 100_000
 
 
-@dataclass
+@dataclass(slots=True)
 class InjectionDetectionResult:
     """Result of prompt injection detection."""
 
@@ -48,7 +48,7 @@ class InjectionDetectionResult:
     matched_patterns: list[str] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class ContentFilterResult:
     """Result of response content filtering."""
 

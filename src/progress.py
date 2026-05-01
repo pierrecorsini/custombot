@@ -71,7 +71,7 @@ T = TypeVar("T")
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class SpinnerConfig:
     """Configuration for spinner behavior."""
 
@@ -201,7 +201,7 @@ class SpinnerStatus:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ProgressConfig:
     """Configuration for progress bar behavior."""
 

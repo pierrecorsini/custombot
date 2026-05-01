@@ -41,7 +41,7 @@ _disk_cache: dict[str, tuple[float, int, int, int]] = {}
 _disk_cache_lock = ThreadLock()
 
 
-@dataclass
+@dataclass(slots=True)
 class DiskSpaceResult:
     """
     Result of a disk space check operation.

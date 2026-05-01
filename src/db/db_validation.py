@@ -20,7 +20,7 @@ from src.utils import JsonParseMode, safe_json_parse
 log = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ValidationResult:
     """Result of database connection validation."""
 

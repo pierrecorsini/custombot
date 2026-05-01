@@ -53,7 +53,7 @@ class MessageStatus(str, Enum):
     COMPLETED = "completed"
 
 
-@dataclass
+@dataclass(slots=True)
 class QueuedMessage:
     """
     A message in the persistence queue.
@@ -135,7 +135,7 @@ class QueuedMessage:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class QueueCorruptionResult:
     """Result of queue file corruption detection and repair.
 

@@ -70,7 +70,7 @@ class ChatMessage:
             d["name"] = self.name
         return d
 
-@dataclass
+@dataclass(slots=True)
 class HistoryBundle:
     """Message history paired with its unsanitized user-message count.
 

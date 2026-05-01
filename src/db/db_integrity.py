@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 # ── dataclasses ─────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class CorruptionResult:
     """Result of message file corruption detection."""
 
@@ -39,7 +39,7 @@ class CorruptionResult:
     repaired: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class MessageLine:
     """Parsed message line with checksum validation."""
 

@@ -42,7 +42,7 @@ DEFAULT_SLOW_THRESHOLD_SECONDS: float = 5.0
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class TimingResult:
     """
     Result of a timed operation.

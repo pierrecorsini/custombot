@@ -29,7 +29,7 @@ from src.constants import WORKSPACE_STALE_TEMP_MAX_AGE_HOURS
 log = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class IntegrityResult:
     """Result of the startup workspace integrity check."""
 

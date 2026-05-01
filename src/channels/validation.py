@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ValidationResult:
     """Result of validating a single channel."""
 

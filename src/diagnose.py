@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 
-@dataclass
+@dataclass(slots=True)
 class CheckResult:
     """Outcome of a single diagnostic check."""
 
@@ -39,7 +39,7 @@ class CheckResult:
     details: dict[str, Any] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class DiagnoseReport:
     """Aggregated diagnostic report."""
 
@@ -62,7 +62,7 @@ class DiagnoseReport:
         return self.failed == 0 and self.total > 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _ProbeSuccess:
     """Internal result type returned by probe callables."""
 

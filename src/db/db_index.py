@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 # ── dataclass ───────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class RecoveryResult:
     """Result of message index recovery operation."""
 
