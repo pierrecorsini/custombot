@@ -21,7 +21,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
-import questionary
+try:
+    import questionary
+except ImportError:
+    raise ImportError(
+        "The 'options' command requires the 'tui' optional dependency. "
+        "Install it with: pip install custombot[tui]  or  pip install questionary"
+    ) from None
 
 from src.config import CONFIG_PATH, Config, load_config, save_config
 from src.ui.cli_output import cli

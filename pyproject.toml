@@ -13,7 +13,6 @@ dependencies = [
     "psutil~=6.0.0",
     "pyyaml~=6.0.0",
     "neonize~=0.3.16",
-    "questionary~=2.1.0",
     "duckduckgo-search~=8.1.0",
     "sqlite-vec~=0.1.7",
     "orjson~=3.10.0",
@@ -25,6 +24,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tui = [
+    "questionary~=2.1.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

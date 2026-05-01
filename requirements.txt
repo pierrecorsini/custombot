@@ -11,9 +11,6 @@ pyyaml~=6.0.0
 # WhatsApp — native Python client (whatsmeow via Go binary)
 neonize~=0.3.16
 
-# Interactive CLI - Rich-based menus
-questionary~=2.1.0
-
 # Skills
 duckduckgo-search~=8.1.0
 
