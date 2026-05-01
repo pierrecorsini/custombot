@@ -13,19 +13,24 @@ from pathlib import Path
 from typing import Any
 
 from src.skills.base import BaseSkill, validate_input
+from src.utils.singleton import _singleton_registry, reset_singleton
 
-_scheduler_instance = None
+_SCHEDULER_KEY = "_scheduler_instance"
 
 
 def _get_scheduler():
     """Return the global scheduler instance (set during startup)."""
-    return _scheduler_instance
+    return _singleton_registry.get(_SCHEDULER_KEY)
 
 
 def set_scheduler_instance(scheduler) -> None:
     """Set the global scheduler instance (called during startup)."""
-    global _scheduler_instance
-    _scheduler_instance = scheduler
+    _singleton_registry[_SCHEDULER_KEY] = scheduler
+
+
+def reset_scheduler_instance() -> None:
+    """Reset the scheduler instance (for testing)."""
+    _singleton_registry.pop(_SCHEDULER_KEY, None)
 
 
 class TaskSchedulerSkill(BaseSkill):
