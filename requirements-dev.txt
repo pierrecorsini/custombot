@@ -14,7 +14,7 @@ ruff==0.15.12
 hypothesis==6.152.3
 
 # Benchmark regression testing
-pytest-benchmark==4.0.0
+pytest-benchmark==5.2.3
 
 # Security auditing
 pip-audit==2.10.0
