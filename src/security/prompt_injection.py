@@ -424,6 +424,10 @@ def filter_response_content(content: str, *, redact: bool = True) -> ContentFilt
     Detects PII, API keys, secrets, and other sensitive data in
     responses. Optionally redacts the sensitive portions.
 
+    Uses a single-pass approach: detection and redaction happen in one
+    regex sweep per pattern, avoiding the previous two-phase design
+    that scanned all patterns twice.
+
     Args:
         content: The LLM response text to check.
         redact: If True, redact flagged content. If False, just flag it.
@@ -434,55 +438,43 @@ def filter_response_content(content: str, *, redact: bool = True) -> ContentFilt
     if not content or not content.strip():
         return ContentFilterResult(flagged=False, sanitized_content=content or "")
 
-    categories: list[str] = []
+    categories: set[str] = set()
     result = content
 
-    # Phase 1: Detect all patterns BEFORE any redaction (preserves original text for matching)
-    all_patterns: list[tuple[re.Pattern[str], str]] = [
+    # Single pass: detect + redact in one sweep per pattern list.
+    # Pattern order matters: _API_KEY_PATTERNS first (most specific),
+    # then _SECRET_PATTERNS, then _PII_PATTERNS.
+    redactable_patterns: list[tuple[re.Pattern[str], str]] = [
         *_API_KEY_PATTERNS,
         *_SECRET_PATTERNS,
         *_PII_PATTERNS,
-        *_SENSITIVE_FILE_PATTERNS,
     ]
 
-    for pattern, category in all_patterns:
+    for pattern, category in redactable_patterns:
+        if redact:
+            new_result, count = pattern.subn(f"[REDACTED_{category.upper()}]", result)
+            if count > 0:
+                categories.add(category)
+                result = new_result
+        elif pattern.search(result):
+            categories.add(category)
+
+    # Detection-only scan for sensitive file extensions (no redaction needed)
+    for pattern, category in _SENSITIVE_FILE_PATTERNS:
         if pattern.search(result):
-            categories.append(category)
-
-    # Deduplicate categories
-    seen: set[str] = set()
-    unique_categories: list[str] = []
-    for cat in categories:
-        if cat not in seen:
-            seen.add(cat)
-            unique_categories.append(cat)
-    categories = unique_categories
-
-    # Phase 2: Redact flagged content (only if redact=True)
-    if redact and categories:
-        # Reset result to original for redaction pass
-        result = content
-        for pattern, category in _API_KEY_PATTERNS:
-            if category in categories:
-                result = pattern.sub(f"[REDACTED_{category.upper()}]", result)
-        for pattern, category in _SECRET_PATTERNS:
-            if category in categories:
-                result = pattern.sub(f"[REDACTED_{category.upper()}]", result)
-        for pattern, category in _PII_PATTERNS:
-            if category in categories:
-                result = pattern.sub(f"[REDACTED_{category.upper()}]", result)
+            categories.add(category)
 
     if categories:
         log.warning(
             "Response content filter flagged %d categories: %s",
             len(categories),
-            categories,
-            extra={"filter_categories": categories},
+            sorted(categories),
+            extra={"filter_categories": sorted(categories)},
         )
 
     return ContentFilterResult(
-        flagged=len(categories) > 0,
-        categories=categories,
+        flagged=bool(categories),
+        categories=sorted(categories),
         sanitized_content=result,
     )
 
