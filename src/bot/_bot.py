@@ -407,7 +407,9 @@ class Bot:
                 clear_correlation_id()
                 return None
         except Exception:
-            clear_correlation_id()
+            # Don't clear correlation_id here — the finally block in
+            # _handle_message_inner will do it, and clearing early loses
+            # the ID for error tracking if the exception propagates.
             raise
 
         rate_result = self._rate_limiter.check_message_rate(
