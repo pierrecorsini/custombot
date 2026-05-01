@@ -316,17 +316,18 @@ class Storage(Protocol):
 
 # Protocol version info for documentation purposes
 __all__ = [
-    "MessageHandler",
+    "BackgroundService",
     "Channel",
     "Closeable",
     "LockProvider",
+    "MemoryMonitor",
     "MemoryProtocol",
+    "MessageHandler",
     "Skill",
     "Stoppable",
     "Storage",
     "ProjectStore",
     "ProjectContextLoader",
-    "MemoryMonitor",
 ]
 
 
@@ -547,4 +548,21 @@ class Closeable(Protocol):
 
     async def close(self) -> None:
         """Release connections, handles, and other resources."""
+        ...
+
+
+@runtime_checkable
+class BackgroundService(Protocol):
+    """Protocol for long-running background services with managed tasks.
+
+    Standardizes the lifecycle of components that spawn ``asyncio.create_task``
+    loops.  All such services should follow: start → loop → stop.
+
+    Examples: TaskScheduler, WorkspaceMonitor, PerformanceMetrics,
+    MemoryMonitor, HealthServer, ConfigWatcher, MessageQueue (flush loop),
+    LLMClient (health probe), Channel (incoming message pump).
+    """
+
+    async def stop(self) -> None:
+        """Cancel background tasks and release resources."""
         ...
