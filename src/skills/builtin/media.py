@@ -161,7 +161,7 @@ class SendVoiceNote(BaseSkill):
                 await send_media("audio", mp3_path, "")
                 return f"Voice note sent ({char_count} characters, voice: {voice})"
             else:
-                return f"Voice note generated at {audio_path} (no send_media callback)"
+                return f"Voice note generated at {mp3_path} (no send_media callback)"
 
         except Exception as exc:
             log.error("Failed to generate voice note: %s", exc)

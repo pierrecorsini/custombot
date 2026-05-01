@@ -1,0 +1,128 @@
+"""
+src/security/signing.py — HMAC-SHA256 payload signing for scheduler integrity.
+
+Provides signing and verification utilities to protect scheduler task files
+against tampering.  When ``SCHEDULER_HMAC_SECRET`` is set, the scheduler
+writes an HMAC-SHA256 signature alongside each ``tasks.json`` file and
+verifies it on load — rejecting files whose content has been modified
+outside the application.
+
+Usage::
+
+    from src.security.signing import sign_payload, verify_payload
+
+    sig = sign_payload(secret, json_bytes)
+    if not verify_payload(secret, json_bytes, sig):
+        raise IntegrityError("tasks.json has been tampered with")
+
+The secret is loaded from the ``SCHEDULER_HMAC_SECRET`` environment variable.
+If the variable is unset or empty, signing and verification are no-ops
+(backward-compatible mode).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import logging
+import os
+from pathlib import Path
+from typing import Final
+
+log = logging.getLogger(__name__)
+
+# Environment variable name for the scheduler HMAC secret.
+SCHEDULER_HMAC_SECRET_ENV: Final = "SCHEDULER_HMAC_SECRET"
+
+# Fixed padding length for timing-safe comparison (SHA-256 hex = 64 chars).
+_PADDED_LEN: Final = 128
+
+
+class IntegrityError(Exception):
+    """Raised when payload HMAC verification fails."""
+
+
+def get_scheduler_secret() -> str | None:
+    """Load the optional HMAC secret from the environment.
+
+    Returns ``None`` when signing is disabled (variable unset or empty).
+    """
+    secret = os.environ.get(SCHEDULER_HMAC_SECRET_ENV, "").strip()
+    return secret if secret else None
+
+
+def sign_payload(secret: str, payload: bytes) -> str:
+    """Compute an HMAC-SHA256 hex digest over *payload* using *secret*.
+
+    Args:
+        secret: UTF-8 secret key.
+        payload: Raw bytes to sign (e.g. JSON-encoded task data).
+
+    Returns:
+        64-character lowercase hex string.
+    """
+    return hmac.new(
+        secret.encode("utf-8"), payload, hashlib.sha256,
+    ).hexdigest()
+
+
+def verify_payload(secret: str, payload: bytes, signature: str) -> bool:
+    """Verify an HMAC-SHA256 *signature* over *payload*.
+
+    Uses ``hmac.compare_digest`` with fixed-length padding for
+    timing-safe comparison regardless of input length differences.
+
+    Args:
+        secret: UTF-8 secret key.
+        payload: Raw bytes that were signed.
+        signature: Claimed hex digest to verify.
+
+    Returns:
+        ``True`` if the signature is valid, ``False`` otherwise.
+    """
+    expected = sign_payload(secret, payload)
+
+    # Pad both to the same fixed length for constant-time comparison.
+    expected_padded = expected.ljust(_PADDED_LEN)
+    signature_padded = signature.ljust(_PADDED_LEN)
+
+    if not hmac.compare_digest(expected_padded, signature_padded):
+        log.warning("Scheduler HMAC verification failed: invalid signature")
+        return False
+
+    return True
+
+
+def read_signature_file(sig_path: str | Path) -> str | None:
+    """Read an HMAC signature from a sidecar ``.hmac`` file.
+
+    Args:
+        sig_path: Path to the signature file (``Path`` or str).
+
+    Returns:
+        The stripped signature string, or ``None`` if the file does not
+        exist or cannot be read.
+    """
+    path = Path(sig_path) if not isinstance(sig_path, Path) else sig_path
+    if not path.exists():
+        return None
+    try:
+        return path.read_text().strip()
+    except OSError as exc:
+        log.warning("Failed to read HMAC signature file %s: %s", path, exc)
+        return None
+
+
+def write_signature_file(sig_path: str | Path, signature: str) -> None:
+    """Write an HMAC signature to a sidecar ``.hmac`` file.
+
+    Args:
+        sig_path: Path to the signature file (``Path`` or str).
+        signature: The hex digest to persist.
+    """
+    path = Path(sig_path) if not isinstance(sig_path, Path) else sig_path
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(signature)
+    except OSError as exc:
+        log.error("Failed to write HMAC signature file %s: %s", path, exc)

@@ -25,8 +25,8 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 from src.channels.base import IncomingMessage
 from src.constants import (
+    DEFAULT_CHAT_LOCK_CACHE_SIZE,
     DEFAULT_CHAT_RATE_LIMIT,
-    MAX_LRU_CACHE_SIZE,
     MAX_MESSAGE_LENGTH,
     MEMORY_CHECK_INTERVAL_SECONDS,
     MEMORY_CRITICAL_THRESHOLD_PERCENT,
@@ -46,11 +46,17 @@ from src.core.instruction_loader import InstructionLoader
 from src.core.project_context import ProjectContextLoader as _ProjectContextLoaderImpl
 from src.core.tool_executor import ToolExecutor
 from src.core.tool_formatter import ToolLogEntry, format_response_with_tool_log
-from src.db import Database
+from src.db import Database, _validate_chat_id
 from src.exceptions import ErrorCode, LLMError
 from src.logging import clear_correlation_id, get_correlation_id, set_correlation_id
 from src.message_queue import MessageQueue
 from src.monitoring import PerformanceMetrics, SessionMetrics, get_metrics_collector
+from src.monitoring.tracing import (
+    context_assembly_span,
+    get_tracer,
+    record_exception_safe,
+    set_correlation_id_on_span,
+)
 from src.rate_limiter import RateLimiter
 from src.routing import RoutingEngine
 from src.security.prompt_injection import (
@@ -58,6 +64,11 @@ from src.security.prompt_injection import (
     filter_response_content,
     sanitize_user_input,
 )
+from src.security.signing import (
+    get_scheduler_secret,
+    verify_payload,
+)
+from src.security.audit import audit_log
 from src.skills import SkillRegistry
 from src.utils import LRULockCache
 from src.utils.circuit_breaker import CircuitBreaker
@@ -166,7 +177,7 @@ class Bot:
         self._project_store = project_store
         # Semaphore: only one active LLM call per chat at a time (bounded LRU cache)
         self._chat_locks: LockProvider = (
-            chat_locks if chat_locks is not None else LRULockCache(max_size=MAX_LRU_CACHE_SIZE)
+            chat_locks if chat_locks is not None else LRULockCache(max_size=DEFAULT_CHAT_LOCK_CACHE_SIZE)
         )
         # Unified dedup service — wraps both inbound (message-id) and outbound
         # (content-hash) strategies.  Falls back to direct DB check when not
@@ -425,61 +436,76 @@ class Bot:
         correlation_id: str | None = None,
     ) -> str | None:
         """Core message processing: acquire lock, enqueue, run ReAct loop, track metrics."""
-        async with self._chat_locks.acquire(msg.chat_id):
-            start_time = time.perf_counter()
-            generation = self._db.get_generation(msg.chat_id)
+        tracer = get_tracer()
+        async with tracer.start_as_current_span_async(
+            "message.process",
+            attributes={
+                "messaging.destination": msg.chat_id,
+                "messaging.message.id": msg.message_id,
+            },
+        ) as proc_span:
+            set_correlation_id_on_span(proc_span, correlation_id)
 
-            if self._message_queue:
-                await self._message_queue.enqueue(msg)
-
-            _routing_show_errors_var.set(True)
-
-            try:
-                result = await self._process(msg, channel=channel, stream_callback=stream_callback, generation=generation)
-
-                if self._message_queue:
-                    await self._message_queue.complete(msg.message_id)
-
-                processing_time = time.perf_counter() - start_time
-                self._metrics.track_message_latency(processing_time)
-                self._metrics.track_chat_message(msg.chat_id)
+            async with self._chat_locks.acquire(msg.chat_id):
+                start_time = time.perf_counter()
+                generation = self._db.get_generation(msg.chat_id)
 
                 if self._message_queue:
-                    queue_depth = await self._message_queue.get_pending_count()
-                    self._metrics.update_queue_depth(queue_depth)
+                    await self._message_queue.enqueue(msg)
 
-                self._metrics.update_active_chat_count(len(self._chat_locks))
+                _routing_show_errors_var.set(True)
 
-                log.info(
-                    "Message %s processed successfully in %.2fs",
-                    msg.message_id,
-                    processing_time,
-                    extra={"chat_id": msg.chat_id, "message_id": msg.message_id},
-                )
-                return result
-            except Exception as exc:
-                log.error(
-                    "Message processing failed for %s: %s",
-                    msg.message_id,
-                    exc,
-                    exc_info=True,
-                    extra={
-                        "chat_id": msg.chat_id,
-                        "message_id": msg.message_id,
-                        "correlation_id": correlation_id,
-                    },
-                )
+                try:
+                    result = await self._process(msg, channel=channel, stream_callback=stream_callback, generation=generation)
 
-                if not _routing_show_errors_var.get():
-                    log.info(
-                        "Error suppressed (showErrors=false) for message %s",
-                        msg.message_id,
+                    if self._message_queue:
+                        await self._message_queue.complete(msg.message_id)
+
+                    processing_time = time.perf_counter() - start_time
+                    self._metrics.track_message_latency(processing_time)
+                    self._metrics.track_chat_message(msg.chat_id)
+
+                    if self._message_queue:
+                        queue_depth = await self._message_queue.get_pending_count()
+                        self._metrics.update_queue_depth(queue_depth)
+
+                    self._metrics.update_active_chat_count(len(self._chat_locks))
+                    proc_span.set_attribute(
+                        "custombot.processing_time_ms",
+                        round(processing_time * 1000, 2),
                     )
-                    return None
 
-                raise
-            finally:
-                clear_correlation_id()
+                    log.info(
+                        "Message %s processed successfully in %.2fs",
+                        msg.message_id,
+                        processing_time,
+                        extra={"chat_id": msg.chat_id, "message_id": msg.message_id},
+                    )
+                    return result
+                except Exception as exc:
+                    record_exception_safe(proc_span, exc)
+                    log.error(
+                        "Message processing failed for %s: %s",
+                        msg.message_id,
+                        exc,
+                        exc_info=True,
+                        extra={
+                            "chat_id": msg.chat_id,
+                            "message_id": msg.message_id,
+                            "correlation_id": correlation_id,
+                        },
+                    )
+
+                    if not _routing_show_errors_var.get():
+                        log.info(
+                            "Error suppressed (showErrors=false) for message %s",
+                            msg.message_id,
+                        )
+                        return None
+
+                    raise
+                finally:
+                    clear_correlation_id()
 
     # ── scheduled task processing ──────────────────────────────────────────
 
@@ -488,9 +514,38 @@ class Bot:
         chat_id: str,
         prompt: str,
         channel: "BaseChannel | None" = None,
+        prompt_hmac: str | None = None,
     ) -> str | None:
         """Process a scheduled task prompt directly, bypassing routing and dedup."""
+        _validate_chat_id(chat_id)
         correlation_id = set_correlation_id(f"sched_{chat_id}_{uuid.uuid4().hex[:8]}")
+
+        # Verify prompt integrity when HMAC signing is configured.
+        secret = get_scheduler_secret()
+        if secret:
+            if prompt_hmac is None:
+                log.warning(
+                    "Scheduled task for chat %s received without HMAC "
+                    "(signing secret is configured)",
+                    chat_id,
+                    extra={"chat_id": chat_id},
+                )
+                audit_log(
+                    "scheduled_prompt_missing_hmac",
+                    {"chat_id": chat_id},
+                )
+            elif not verify_payload(secret, prompt.encode("utf-8"), prompt_hmac):
+                log.error(
+                    "Scheduled task for chat %s rejected: prompt HMAC "
+                    "verification failed — possible tampering",
+                    chat_id,
+                    extra={"chat_id": chat_id},
+                )
+                audit_log(
+                    "scheduled_prompt_hmac_failure",
+                    {"chat_id": chat_id},
+                )
+                return None
 
         log.info(
             "Processing scheduled task for chat %s",
@@ -677,6 +732,16 @@ class Bot:
             log.warning("No routing engine configured, skipping message")
             return None
 
+        if not self._routing.has_rules:
+            log.warning(
+                "Routing engine has no rules loaded — message from %s in chat %s ignored. "
+                "Ensure workspace/instructions/ contains at least a 'chat.agent.md' "
+                "with routing frontmatter.",
+                msg.sender_id,
+                msg.chat_id,
+            )
+            return None
+
         matched_rule, instruction_filename = self._routing.match_with_rule(msg)
         if not matched_rule:
             log.info(
@@ -699,12 +764,18 @@ class Bot:
         instruction_content = self._load_instruction(instruction_filename)
         channel_prompt = channel.get_channel_prompt() if channel else None
 
-        result = await self._context_assembler.assemble(
-            chat_id=msg.chat_id,
-            channel_prompt=channel_prompt,
-            instruction=instruction_content,
-            rule_id=matched_rule.id,
-        )
+        with context_assembly_span(chat_id=msg.chat_id, rule_id=matched_rule.id) as span:
+            set_correlation_id_on_span(span, get_correlation_id())
+            result = await self._context_assembler.assemble(
+                chat_id=msg.chat_id,
+                channel_prompt=channel_prompt,
+                instruction=instruction_content,
+                rule_id=matched_rule.id,
+            )
+            if result is not None:
+                span.set_attribute(
+                    "custombot.context.message_count", len(result.messages)
+                )
 
         if result is None:
             log.warning(

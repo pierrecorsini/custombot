@@ -37,6 +37,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, Sequence
 
 from src.core.errors import NonCriticalCategory, log_noncritical
+from src.monitoring.tracing import (
+    message_pipeline_span,
+    set_correlation_id_on_span,
+)
 from src.ui.cli_output import log_message_flow
 
 if TYPE_CHECKING:
@@ -82,7 +86,7 @@ class MessagePipeline:
         self._middlewares = list(middlewares)
 
     async def execute(self, ctx: MessageContext) -> None:
-        """Run all middlewares in order."""
+        """Run all middlewares in order, wrapped in an OTel span."""
         index = 0
 
         async def call_next() -> None:
@@ -92,7 +96,20 @@ class MessagePipeline:
                 index += 1
                 await mw(ctx, call_next)
 
-        await call_next()
+        async with message_pipeline_span(
+            chat_id=ctx.msg.chat_id,
+            message_id=ctx.msg.message_id,
+            sender_id=ctx.msg.sender_id,
+            channel_type=ctx.msg.channel_type,
+        ) as span:
+            from src.logging import get_correlation_id
+
+            set_correlation_id_on_span(span, get_correlation_id())
+            span.set_attribute("messaging.from_me", ctx.msg.fromMe)
+            span.set_attribute("messaging.to_me", ctx.msg.toMe)
+            await call_next()
+            if ctx.response is not None:
+                span.set_attribute("custombot.response.length", len(ctx.response))
 
 
 # ── Config-driven pipeline builder ───────────────────────────────────────

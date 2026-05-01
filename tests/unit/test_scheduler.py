@@ -37,7 +37,13 @@ from src.scheduler import (
     _same_day,
     _utc_offset_hours,
 )
-from src.constants import SCHEDULER_MAX_RETRIES, SCHEDULER_RETRY_INITIAL_DELAY
+from src.constants import (
+    SCHEDULER_LOOP_BACKOFF_CAP,
+    SCHEDULER_MAX_RETRIES,
+    SCHEDULER_MAX_SLEEP_SECONDS,
+    SCHEDULER_MIN_SLEEP_SECONDS,
+    SCHEDULER_RETRY_INITIAL_DELAY,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -804,7 +810,7 @@ class TestExecuteTask:
         task = _make_task(prompt="run this")
         task["task_id"] = "task_001"
         await scheduler._execute_task("chat1", task)
-        on_trigger.assert_awaited_once_with("chat1", "run this")
+        on_trigger.assert_awaited_once_with("chat1", "run this", None)
 
     @pytest.mark.asyncio
     async def test_sets_last_run(self, scheduler: TaskScheduler):
@@ -1076,6 +1082,152 @@ class TestLoop:
         assert len(data_b) == 1
         for t in data_a + data_b:
             assert t["last_run"] is not None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — Adaptive Sleep
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAdaptiveSleep:
+    """Tests for adaptive sleep in _loop() via _time_to_next_due and _compute_adaptive_sleep."""
+
+    def test_time_to_next_due_returns_none_when_no_tasks(self, scheduler: TaskScheduler):
+        """No tasks registered → None."""
+        assert scheduler._time_to_next_due() is None
+
+    def test_time_to_next_due_interval_task_imminent(self, scheduler: TaskScheduler):
+        """Interval task with no last_run is due immediately → 0."""
+        scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+        result = scheduler._time_to_next_due()
+        assert result is not None
+        assert result == 0.0
+
+    def test_time_to_next_due_interval_task_waiting(self, scheduler: TaskScheduler):
+        """Interval task recently run → remaining time is positive."""
+        task_dict = _make_task(schedule_type="interval", seconds=600)
+        scheduler.add_task("chat1", task_dict)
+        # Simulate a recent run
+        task_dict["last_run"] = _now().isoformat()
+        result = scheduler._time_to_next_due()
+        assert result is not None
+        # Should be close to 600 seconds minus a small elapsed time
+        assert 590 < result <= 600
+
+    def test_time_to_next_due_skips_disabled_tasks(self, scheduler: TaskScheduler):
+        """Disabled tasks are excluded from computation."""
+        task_dict = _make_task(schedule_type="interval", seconds=60)
+        scheduler.add_task("chat1", task_dict)
+        task_dict["enabled"] = False
+        assert scheduler._time_to_next_due() is None
+
+    def test_time_to_next_due_picks_minimum_across_tasks(self, scheduler: TaskScheduler):
+        """With multiple tasks, returns the soonest time-to-due."""
+        # Task A: due immediately (no last_run)
+        scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+        # Task B: due in 300s
+        task_b = _make_task(schedule_type="interval", seconds=600)
+        scheduler.add_task("chat2", task_b)
+        task_b["last_run"] = _now().isoformat()
+
+        result = scheduler._time_to_next_due()
+        assert result is not None
+        assert result == 0.0  # Task A wins
+
+    def test_compute_adaptive_sleep_no_tasks(self, scheduler: TaskScheduler):
+        """No tasks → SCHEDULER_MAX_SLEEP_SECONDS."""
+        assert scheduler._compute_adaptive_sleep() == SCHEDULER_MAX_SLEEP_SECONDS
+
+    def test_compute_adaptive_sleep_task_imminent(self, scheduler: TaskScheduler):
+        """Task due immediately → SCHEDULER_MIN_SLEEP_SECONDS (floor clamp)."""
+        scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+        assert scheduler._compute_adaptive_sleep() == SCHEDULER_MIN_SLEEP_SECONDS
+
+    def test_compute_adaptive_sleep_task_far_away(self, scheduler: TaskScheduler):
+        """Task due in > TICK_SECONDS → capped at TICK_SECONDS."""
+        task_dict = _make_task(schedule_type="interval", seconds=9999)
+        scheduler.add_task("chat1", task_dict)
+        task_dict["last_run"] = _now().isoformat()
+        result = scheduler._compute_adaptive_sleep()
+        assert result == TICK_SECONDS
+
+    def test_compute_adaptive_sleep_task_soon_but_not_imminent(self, scheduler: TaskScheduler):
+        """Task due in 10s (within TICK_SECONDS) → returns actual time-to-due."""
+        task_dict = _make_task(schedule_type="interval", seconds=10)
+        scheduler.add_task("chat1", task_dict)
+        # Mark as just run so the next due is ~10s from now
+        task_dict["last_run"] = _now().isoformat()
+        result = scheduler._compute_adaptive_sleep()
+        assert SCHEDULER_MIN_SLEEP_SECONDS <= result <= 10.5
+
+    @pytest.mark.asyncio
+    async def test_loop_uses_adaptive_sleep_with_no_tasks(self, scheduler: TaskScheduler):
+        """When no tasks exist, loop sleeps SCHEDULER_MAX_SLEEP_SECONDS per tick."""
+        sleep_durations: list[float] = []
+        original_sleep = asyncio.sleep
+
+        async def tracking_sleep(duration: float) -> None:
+            sleep_durations.append(duration)
+            await original_sleep(0.01)
+
+        with patch("src.scheduler.asyncio.sleep", side_effect=tracking_sleep):
+            scheduler._running = True
+            loop_task = asyncio.create_task(scheduler._loop())
+            await original_sleep(0.3)
+            scheduler._running = False
+            loop_task.cancel()
+            try:
+                await loop_task
+            except asyncio.CancelledError:
+                pass
+
+        # All sleeps should be SCHEDULER_MAX_SLEEP_SECONDS since no tasks
+        assert len(sleep_durations) >= 1
+        for d in sleep_durations:
+            assert d == SCHEDULER_MAX_SLEEP_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_loop_uses_adaptive_sleep_with_due_task(self, scheduler: TaskScheduler):
+        """When a task is due, loop uses minimum sleep duration."""
+        on_trigger = scheduler._on_trigger  # type: ignore[attr-defined]
+        on_trigger.return_value = "result"
+        scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+
+        sleep_durations: list[float] = []
+        original_sleep = asyncio.sleep
+
+        async def tracking_sleep(duration: float) -> None:
+            sleep_durations.append(duration)
+            await original_sleep(0.01)
+
+        with patch("src.scheduler.asyncio.sleep", side_effect=tracking_sleep):
+            scheduler._running = True
+            loop_task = asyncio.create_task(scheduler._loop())
+            await original_sleep(0.5)
+            scheduler._running = False
+            loop_task.cancel()
+            try:
+                await loop_task
+            except asyncio.CancelledError:
+                pass
+
+        # Task is due immediately → first sleep should be SCHEDULER_MIN_SLEEP_SECONDS
+        assert len(sleep_durations) >= 1
+        assert sleep_durations[0] == SCHEDULER_MIN_SLEEP_SECONDS
+
+    def test_time_to_next_due_daily_task(self, scheduler: TaskScheduler):
+        """Daily task computes seconds until next target minute."""
+        now = datetime(2026, 4, 20, 8, 0, tzinfo=timezone.utc)
+        with patch("src.scheduler._now", return_value=now):
+            scheduler._cached_utc_offset = 0.0
+            scheduler._utc_offset_updated_at = time.monotonic()
+            # Target at 09:00 UTC = 3600s from now
+            scheduler.add_task("chat1", _make_task(schedule_type="daily", hour=9, minute=0))
+            result = scheduler._time_to_next_due()
+            assert result is not None
+            assert 3590 < result <= 3600
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 

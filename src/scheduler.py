@@ -21,7 +21,7 @@ import json
 import logging
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
@@ -30,7 +30,10 @@ from src.constants import (
     MAX_SCHEDULED_PROMPT_LENGTH,
     SCHEDULER_HMAC_SECRET_ENV,
     SCHEDULER_HMAC_SIG_EXT,
+    SCHEDULER_LOOP_BACKOFF_CAP,
     SCHEDULER_MAX_RETRIES,
+    SCHEDULER_MAX_SLEEP_SECONDS,
+    SCHEDULER_MIN_SLEEP_SECONDS,
     SCHEDULER_RETRY_INITIAL_DELAY,
 )
 from src.db.db import _validate_chat_id
@@ -93,6 +96,8 @@ class TaskScheduler:
         self._failure_count: int = 0
         self._success_count: int = 0
         self._recent_executions: deque[dict[str, Any]] = deque(maxlen=10)
+        # Consecutive-failure backoff for the main loop tick
+        self._consecutive_failures: int = 0
         # Unified dedup service — set via set_dedup_service()
         self._dedup: DeduplicationService | None = None
 
@@ -481,6 +486,13 @@ class TaskScheduler:
         prompt = task.get("prompt", "")
         compare = task.get("compare", False)
         last_result = task.get("last_result")
+        task_label = task.get("label", task.get("task_id", "unknown"))
+
+        log.info(
+            "━━━ ⏰ RUNNING SCHEDULED TASK '%s' ━━━  [chat: %s]",
+            task_label,
+            chat_id,
+        )
 
         if compare and last_result:
             prompt = (
@@ -533,17 +545,15 @@ class TaskScheduler:
                         chat_id,
                     )
                 else:
-                    await self._on_send(chat_id, formatted)
-                    # Record successful delivery for future dedup checks
-                    if self._dedup:
-                        self._dedup.record_outbound(chat_id, formatted)
-                    log.info(
-                        "Delivered scheduled task %s to chat %s",
-                        task["task_id"],
-                        chat_id,
+                    await self._deliver_with_retry(
+                        chat_id, formatted, task.get("task_id", "")
                     )
 
-            log.info("Executed scheduled task %s for chat %s", task["task_id"], chat_id)
+            log.info(
+                "━━━ ✔ SCHEDULED TASK '%s' DONE ━━━  [chat: %s]",
+                task.get("label", task["task_id"]),
+                chat_id,
+            )
             self._success_count += 1
             self._recent_executions.append({
                 "task_id": task["task_id"],
@@ -563,10 +573,154 @@ class TaskScheduler:
             })
             log.error("Error executing task %s: %s", task.get("task_id"), exc, exc_info=True)
 
+    async def _deliver_with_retry(
+        self, chat_id: str, formatted: str, task_id: str,
+    ) -> None:
+        """Deliver a scheduled task result with retry on transient send failures.
+
+        The channel layer already retries once with reconnection, but usync
+        timeouts can persist across multiple attempts.  This adds a second
+        layer of retry with a short delay to handle transient WhatsApp
+        device-resolution failures.
+        """
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                await self._on_send(chat_id, formatted)
+                if self._dedup:
+                    self._dedup.record_outbound(chat_id, formatted)
+                log.info(
+                    "Delivered scheduled task %s to chat %s",
+                    task_id,
+                    chat_id,
+                )
+                return
+            except Exception as exc:
+                if attempt >= max_attempts - 1:
+                    raise
+                if not is_transient_error(exc):
+                    raise
+                from src.utils.retry import calculate_delay_with_jitter
+                delay = calculate_delay_with_jitter(15.0 * (attempt + 1))
+                log.warning(
+                    "Send attempt %d/%d failed for task %s: %s — retrying in %.1fs",
+                    attempt + 1,
+                    max_attempts,
+                    task_id,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
     # ── main loop ──────────────────────────────────────────────────────────
 
+    def _time_to_next_due(self) -> float | None:
+        """Compute seconds until the next task is due.
+
+        Scans all enabled tasks and returns the minimum time-to-due.
+        Returns ``None`` when no tasks are registered.
+
+        For *interval* tasks the result is
+        ``max(0, interval - elapsed_since_last_run)``.
+
+        For *daily* / *cron* tasks the result is the seconds remaining
+        until the next target minute boundary (accounting for local UTC
+        offset).  If the target minute has already passed today the
+        next-occurrence is tomorrow.
+        """
+        if not self._tasks:
+            return None
+
+        now = _now()
+        local_offset = self._get_cached_utc_offset()
+        min_wait: float | None = None
+
+        for tasks in self._tasks.values():
+            for task in tasks:
+                if not task.get("enabled", True):
+                    continue
+
+                schedule = task.get("schedule", {})
+                stype = schedule.get("type", "")
+                last_run = task.get("last_run")
+
+                if stype == "interval":
+                    interval_sec = schedule.get("seconds", 3600)
+                    if not last_run:
+                        # Never run — due immediately
+                        candidate = 0.0
+                    else:
+                        elapsed = (now - datetime.fromisoformat(last_run)).total_seconds()
+                        candidate = max(0.0, interval_sec - elapsed)
+
+                elif stype in ("daily", "cron"):
+                    target_hour = schedule.get("hour", 0)
+                    target_min = schedule.get("minute", 0)
+                    local_total_min = target_hour * 60 + target_min
+                    utc_total_min = (local_total_min - int(local_offset * 60)) % (24 * 60)
+                    utc_hour = utc_total_min // 60
+                    utc_minute = utc_total_min % 60
+
+                    target_today = now.replace(
+                        hour=utc_hour, minute=utc_minute,
+                        second=0, microsecond=0,
+                    )
+                    if target_today > now:
+                        candidate = (target_today - now).total_seconds()
+                    else:
+                        # Already passed today — next occurrence is tomorrow
+                        candidate = (target_today + timedelta(days=1) - now).total_seconds()
+
+                    # For cron: skip if the next occurrence falls on a non-matching weekday
+                    if stype == "cron":
+                        weekdays = schedule.get("weekdays", list(range(7)))
+                        next_occ = target_today if target_today > now else target_today + timedelta(days=1)
+                        # Walk forward until we find a matching weekday
+                        for _ in range(8):
+                            if next_occ.weekday() in weekdays:
+                                break
+                            next_occ += timedelta(days=1)
+                        candidate = max(0.0, (next_occ - now).total_seconds())
+
+                else:
+                    continue
+
+                if min_wait is None or candidate < min_wait:
+                    min_wait = candidate
+
+        return min_wait
+
+    def _compute_adaptive_sleep(self) -> float:
+        """Return the sleep duration for the next loop iteration.
+
+        - No tasks registered  → ``SCHEDULER_MAX_SLEEP_SECONDS`` (5 min)
+        - Tasks exist, imminent → ``max(SCHEDULER_MIN_SLEEP, time_to_next)``
+        - Tasks exist, distant  → ``min(TICK_SECONDS, time_to_next)``
+        """
+        time_to_next = self._time_to_next_due()
+
+        if time_to_next is None:
+            # No tasks at all — sleep long
+            return SCHEDULER_MAX_SLEEP_SECONDS
+
+        if time_to_next <= TICK_SECONDS:
+            # Task is imminent or overdue — clamp to minimum to avoid spinning
+            return max(SCHEDULER_MIN_SLEEP_SECONDS, time_to_next)
+
+        # Next task is further away than TICK_SECONDS — cap at TICK_SECONDS
+        return TICK_SECONDS
+
     async def _loop(self) -> None:
-        """Background loop: check tasks every TICK_SECONDS.
+        """Background loop: check tasks with adaptive sleep intervals.
+
+        Instead of a fixed ``TICK_SECONDS`` sleep, computes the time until
+        the next task is due and sleeps accordingly.  This reduces CPU
+        wakeups from ~2880/day to a fraction when few tasks are scheduled.
+
+        When consecutive ticks encounter failures (task exceptions or outer
+        loop errors), the sleep interval is multiplied by ``2 ** failures``,
+        capped at ``SCHEDULER_LOOP_BACKOFF_CAP``.  The counter resets on the
+        first successful tick that executes at least one task.
 
         All due tasks are collected first (snapshot), then executed
         concurrently so that long-running tasks don't block co-scheduled ones.
@@ -574,6 +728,9 @@ class TaskScheduler:
         write per unique chat_id instead of one per task.
         """
         while self._running:
+            tick_had_failure = False
+            tick_had_tasks = False
+
             try:
                 due_tasks: list[tuple[str, dict[str, Any]]] = []
                 for chat_id, tasks in list(self._tasks.items()):
@@ -582,6 +739,7 @@ class TaskScheduler:
                             due_tasks.append((chat_id, task))
 
                 if due_tasks:
+                    tick_had_tasks = True
                     results = await asyncio.gather(
                         *[self._execute_task(cid, t) for cid, t in due_tasks],
                         return_exceptions=True,
@@ -597,6 +755,7 @@ class TaskScheduler:
                             )
                             raise result
                         if isinstance(result, Exception):
+                            tick_had_failure = True
                             cid, t = due_tasks[i]
                             log.error(
                                 "Scheduled task %s raised: %s",
@@ -613,9 +772,32 @@ class TaskScheduler:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                tick_had_failure = True
                 log.error("Scheduler loop error: %s", exc, exc_info=True)
 
-            await asyncio.sleep(TICK_SECONDS)
+            # Update consecutive-failure tracking and apply backoff
+            if tick_had_failure:
+                self._consecutive_failures += 1
+            elif tick_had_tasks:
+                if self._consecutive_failures > 0:
+                    log.info(
+                        "Scheduler recovered after %d consecutive failures",
+                        self._consecutive_failures,
+                    )
+                self._consecutive_failures = 0
+
+            sleep_duration = self._compute_adaptive_sleep()
+            if self._consecutive_failures > 0:
+                sleep_duration = min(
+                    sleep_duration * 2 ** self._consecutive_failures,
+                    SCHEDULER_LOOP_BACKOFF_CAP,
+                )
+                log.info(
+                    "Scheduler tick failed (consecutive: %d), backoff sleep %.1fs",
+                    self._consecutive_failures,
+                    sleep_duration,
+                )
+            await asyncio.sleep(sleep_duration)
 
 
 def _same_day(iso_a: str, iso_b: str) -> bool:

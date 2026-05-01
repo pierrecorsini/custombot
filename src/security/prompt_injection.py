@@ -217,7 +217,7 @@ _MEDIUM_NAMES = [name for _, name in _MEDIUM_CONFIDENCE_PATTERNS]
 # ─────────────────────────────────────────────────────────────────────────────
 
 # API key patterns
-_API_KEY_PATTERNS: list[tuple[re.Pattern, str]] = [
+_API_KEY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"sk-[a-zA-Z0-9]{20,}"), "openai_api_key"),
     (re.compile(r"sk-proj-[a-zA-Z0-9_-]{20,}"), "openai_project_key"),
     (re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"), "anthropic_api_key"),
@@ -230,7 +230,7 @@ _API_KEY_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 # Secret patterns
-_SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"(?i)(?:password|passwd|pwd)\s*[:=]\s*['\"]?[^\s'\"]{8,}"),
         "password",
@@ -244,7 +244,7 @@ _SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 # PII patterns
-_PII_PATTERNS: list[tuple[re.Pattern, str]] = [
+_PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Credit card numbers (basic pattern)
     (re.compile(r"\b(?:\d{4}[-\s]?){3}\d{4}\b"), "credit_card"),
     # SSN pattern (US)
@@ -254,7 +254,7 @@ _PII_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 # Sensitive file extensions in content
-_SENSITIVE_FILE_PATTERNS: list[tuple[re.Pattern, str]] = [
+_SENSITIVE_FILE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)\.env\b"), "env_file"),
     (re.compile(r"(?i)\.pem\b"), "pem_file"),
     (re.compile(r"(?i)\.key\b"), "key_file"),
@@ -438,7 +438,7 @@ def filter_response_content(content: str, *, redact: bool = True) -> ContentFilt
     result = content
 
     # Phase 1: Detect all patterns BEFORE any redaction (preserves original text for matching)
-    all_patterns: list[tuple[re.Pattern, str]] = [
+    all_patterns: list[tuple[re.Pattern[str], str]] = [
         *_API_KEY_PATTERNS,
         *_SECRET_PATTERNS,
         *_PII_PATTERNS,

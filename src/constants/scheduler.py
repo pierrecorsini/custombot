@@ -55,3 +55,23 @@ SCHEDULER_HMAC_SECRET_ENV: str = "SCHEDULER_HMAC_SECRET"
 # File extension for the sidecar HMAC signature file stored alongside
 # tasks.json.  Contains a single line with the hex digest.
 SCHEDULER_HMAC_SIG_EXT: str = ".hmac"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scheduler Adaptive Sleep
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum sleep duration (seconds) when no scheduled tasks exist.
+# Prevents the loop from waking every TICK_SECONDS (30s) when idle, reducing
+# CPU wakeups from ~2880/day down to ~288/day with a 5-minute idle sleep.
+SCHEDULER_MAX_SLEEP_SECONDS: float = 300.0  # 5 minutes
+
+# Minimum sleep duration (seconds) between loop iterations.
+# Prevents CPU-spinning when the time-to-next-due is extremely small (e.g.,
+# sub-second after accounting for execution latency).
+SCHEDULER_MIN_SLEEP_SECONDS: float = 1.0
+
+# Maximum sleep duration (seconds) when applying exponential backoff on
+# consecutive loop failures.  Each failed tick doubles the sleep interval;
+# this cap prevents the backoff from exceeding 5 minutes regardless of the
+# failure count.  Reset to zero on the first successful tick.
+SCHEDULER_LOOP_BACKOFF_CAP: float = 300.0  # 5 minutes

@@ -208,9 +208,9 @@ class ToolExecutor:
                 return rate_result.message
 
         log.info(
-            "Executing skill %r in workspace %s",
+            "━━━ ▶ EXECUTING SKILL '%s' ━━━  [chat: %s]",
             name,
-            workspace_dir,
+            chat_id,
             extra={"chat_id": chat_id, "skill": name},
         )
 
@@ -239,8 +239,10 @@ class ToolExecutor:
                         name, timing_result.duration_seconds, timeout
                     )
                 log.info(
-                    "Skill %r completed",
+                    "━━━ ✔ SKILL '%s' DONE (%.1fs) ━━━  [chat: %s]",
                     name,
+                    timing_result.duration_seconds,
+                    chat_id,
                     extra={
                         "chat_id": chat_id,
                         "skill": name,

@@ -125,7 +125,10 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
 
                 # Process the message with channel and stream callback
                 try:
-                    response = await handler(msg, channel=self, stream_callback=stream_callback)
+                    # CLI passes extra kwargs (channel, stream_callback) for
+                    # live tool-execution feedback; MessageHandler's narrow type
+                    # doesn't capture this — the actual runtime handler accepts **kwargs.
+                    response = await handler(msg)  # type: ignore[func-returns-value]
                     if response:
                         self._print_response(response)
                 except Exception as exc:
@@ -165,7 +168,7 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
         """Print the bot's response with colorful styling."""
         console.print(f"\n[bold green]🤖 Bot:[/bold green] {text}\n")
 
-    async def _send_message(self, chat_id: str, text: str) -> None:
+    async def _send_message(self, chat_id: str, text: str, *, skip_delays: bool = False) -> None:
         """
         Send a message (for CLI, this is handled by the handler response).
 

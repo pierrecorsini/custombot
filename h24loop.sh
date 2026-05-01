@@ -6,6 +6,7 @@ TASK_COUNTER=0
 SLEEP_SECONDS=15
 TASK_TIMEOUT=600
 OPENCODE_ARGS=(--agent OpenCoder -m "zai-coding-plan/glm-5.1" --dangerously-skip-permissions --print-logs)
+OPENCODE_ARGS=(--agent OpenCoder -m "zai-coding-plan/glm-5.1" --dangerously-skip-permissions)
 
 log() {
     echo "[$(date '+%H:%M:%S')] $*"

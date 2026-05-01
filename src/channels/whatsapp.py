@@ -12,8 +12,9 @@ import asyncio
 import logging
 import textwrap
 import time
+from dataclasses import replace
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from src.channels.base import BaseChannel, IncomingMessage, MessageHandler
 from src.channels.neonize_backend import NeonizeBackend
@@ -74,7 +75,7 @@ Always format your response for plain-text WhatsApp rendering. Your message must
         # Per-chat incoming message length tracking (bounded LRU)
         self._last_incoming_len = LRUDict(max_size=500)
         # Backpressure: track active handler tasks and consecutive failures
-        self._active_tasks: set[asyncio.Task] = set()
+        self._active_tasks: set[asyncio.Task[None]] = set()
         self._consecutive_failures: int = 0
         self._last_failure_time: float = 0.0
         self._MAX_CONSECUTIVE_FAILURES: int = 10
@@ -159,6 +160,7 @@ Always format your response for plain-text WhatsApp rendering. Your message must
                         continue
 
             if self._is_allowed(incoming.sender_id):
+                incoming = replace(incoming, acl_passed=True)
                 # Backpressure: stop accepting if too many consecutive failures
                 # Apply cooldown: reset counter if last failure was >5 minutes ago
                 if self._consecutive_failures >= self._MAX_CONSECUTIVE_FAILURES:
@@ -179,7 +181,7 @@ Always format your response for plain-text WhatsApp rendering. Your message must
 
                 # Track incoming message length for humanized send timing (LRU)
                 self._track_incoming_len(incoming.chat_id, len(incoming.text or ""))
-                task = asyncio.create_task(handler(incoming))
+                task: asyncio.Task[None] = asyncio.create_task(handler(incoming))
                 self._active_tasks.add(task)
                 task.add_done_callback(self._make_task_callback())
             else:
@@ -192,10 +194,10 @@ Always format your response for plain-text WhatsApp rendering. Your message must
         self._shutdown_requested = True
         await self._backend.disconnect()
 
-    def _make_task_callback(self):
+    def _make_task_callback(self) -> Callable[[asyncio.Task[None]], None]:
         """Create a done callback that tracks failures and provides backpressure."""
 
-        def _on_task_done(task: asyncio.Task) -> None:
+        def _on_task_done(task: asyncio.Task[None]) -> None:
             self._active_tasks.discard(task)
             if task.cancelled():
                 return
@@ -232,10 +234,7 @@ Always format your response for plain-text WhatsApp rendering. Your message must
                 # Per-chunk retry: one attempt with a short delay
                 log_noncritical(
                     NonCriticalCategory.CHANNEL_SEND,
-                    "Send chunk %d/%d failed for %s, retrying once",
-                    i + 1,
-                    total_chunks,
-                    chat_id,
+                    f"Send chunk {i + 1}/{total_chunks} failed for {chat_id}, retrying once",
                     logger=log,
                     level=logging.WARNING,
                 )
@@ -336,7 +335,7 @@ Always format your response for plain-text WhatsApp rendering. Your message must
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _prompt_historical(msg: dict) -> str:
+async def _prompt_historical(msg: dict[str, Any]) -> str:
     """Prompt user about a historical message. Returns: y / n / all / none."""
     from rich.console import Console
     from rich.text import Text

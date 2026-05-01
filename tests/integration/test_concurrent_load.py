@@ -26,9 +26,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.bot import Bot
+from src.bot import Bot, BotConfig
 from src.channels.base import IncomingMessage
 from src.config import Config, LLMConfig
+from src.core.dedup import DeduplicationService
 from src.db import Database
 from src.memory import Memory
 from src.message_queue import MessageQueue
@@ -79,7 +80,7 @@ def _make_bot(
     workspace: Path,
     config: Config,
     with_queue: bool = False,
-) -> tuple[Bot, Database, Memory, MessageQueue | None]:
+) -> tuple[Bot, Database, Memory, MessageQueue | None, DeduplicationService]:
     """Wire up a full Bot with real components and a mocked LLM transport."""
     from src.llm import LLMClient
 
@@ -92,9 +93,17 @@ def _make_bot(
         queue = MessageQueue(str(workspace / ".data"))
 
     llm = LLMClient(config.llm)
+    dedup = DeduplicationService(db=db)
+
+    bot_config = BotConfig(
+        max_tool_iterations=config.llm.max_tool_iterations,
+        memory_max_history=config.memory_max_history,
+        system_prompt_prefix=config.llm.system_prompt_prefix,
+        stream_response=config.llm.stream_response,
+    )
 
     bot = Bot(
-        config=config,
+        config=bot_config,
         db=db,
         llm=llm,
         memory=memory,
@@ -102,8 +111,9 @@ def _make_bot(
         routing=routing,
         message_queue=queue,
         instructions_dir=str(workspace / "instructions"),
+        dedup=dedup,
     )
-    return bot, db, memory, queue
+    return bot, db, memory, queue, dedup
 
 
 def _make_message(chat_id: str, message_id: str, text: str) -> IncomingMessage:
@@ -115,6 +125,7 @@ def _make_message(chat_id: str, message_id: str, text: str) -> IncomingMessage:
         sender_name=f"User-{chat_id}",
         text=text,
         timestamp=time.time(),
+        acl_passed=True,
     )
 
 
@@ -165,7 +176,7 @@ class TestConcurrentMultiChatProcessing:
 
             mock_client.chat.completions.create = _create
 
-            bot, db, memory, queue = _make_bot(workspace, config)
+            bot, db, memory, queue, _dedup = _make_bot(workspace, config)
             await db.connect()
 
             # Build messages: each chat sends a unique text
@@ -274,7 +285,7 @@ class TestPerChatLockSerialization:
 
             mock_client.chat.completions.create = _create
 
-            bot, db, memory, queue = _make_bot(workspace, config)
+            bot, db, memory, queue, _dedup = _make_bot(workspace, config)
             await db.connect()
 
             messages = [
@@ -346,7 +357,7 @@ class TestPerChatLockSerialization:
 
             mock_client.chat.completions.create = _create
 
-            bot, db, memory, queue = _make_bot(workspace, config)
+            bot, db, memory, queue, _dedup = _make_bot(workspace, config)
             await db.connect()
 
             messages = [
@@ -407,7 +418,7 @@ class TestMessageQueueIntegrity:
                 return_value=_make_text_response("Done")
             )
 
-            bot, db, memory, queue = _make_bot(workspace, config, with_queue=True)
+            bot, db, memory, queue, _dedup = _make_bot(workspace, config, with_queue=True)
             await db.connect()
             assert queue is not None
             await queue.connect()
@@ -466,7 +477,7 @@ class TestMessageQueueIntegrity:
                 return_value=_make_text_response("Response")
             )
 
-            bot, db, memory, queue = _make_bot(workspace, config, with_queue=True)
+            bot, db, memory, queue, _dedup = _make_bot(workspace, config, with_queue=True)
             await db.connect()
             assert queue is not None
             await queue.connect()
@@ -560,7 +571,7 @@ class TestHighVolumeStress:
 
             mock_client.chat.completions.create = _create
 
-            bot, db, memory, queue = _make_bot(workspace, config)
+            bot, db, memory, queue, _dedup = _make_bot(workspace, config)
             await db.connect()
 
             # Build all messages: each chat has msgs_per_chat messages
@@ -919,8 +930,8 @@ class TestConcurrentCompressionAndRead:
         )
 
         # NOW lower thresholds so the next compress_chat_history call will fire
-        monkeypatch.setattr("src.db.db.COMPRESSION_LINE_THRESHOLD", 30)
-        monkeypatch.setattr("src.db.db.COMPRESSION_KEEP_RECENT", 10)
+        monkeypatch.setattr("src.db.compression.COMPRESSION_LINE_THRESHOLD", 30)
+        monkeypatch.setattr("src.db.compression.COMPRESSION_KEEP_RECENT", 10)
 
         # Collect read results for consistency verification
         read_results: list[list[dict]] = []
@@ -1023,8 +1034,8 @@ class TestConcurrentCompressionAndRead:
             )
 
         # Lower thresholds AFTER pre-fill so compress will trigger
-        monkeypatch.setattr("src.db.db.COMPRESSION_LINE_THRESHOLD", 30)
-        monkeypatch.setattr("src.db.db.COMPRESSION_KEEP_RECENT", compression_keep)
+        monkeypatch.setattr("src.db.compression.COMPRESSION_LINE_THRESHOLD", 30)
+        monkeypatch.setattr("src.db.compression.COMPRESSION_KEEP_RECENT", compression_keep)
 
         # Collect read snapshots for consistency verification
         snapshots: list[list[dict]] = []

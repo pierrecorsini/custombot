@@ -170,8 +170,8 @@ class TestRoutingRule:
         )
         assert rule.enabled is False
 
-    def test_rule_pre_compiles_regex_patterns(self) -> None:
-        """RoutingRule should pre-compile regex patterns on construction."""
+    def test_rule_lazy_compiles_regex_patterns(self) -> None:
+        """RoutingRule should lazily compile regex patterns on first match."""
         rule = RoutingRule(
             id="test",
             priority=1,
@@ -181,6 +181,16 @@ class TestRoutingRule:
             content_regex=r"^hello",
             instruction="test.md",
         )
+        # Patterns are NOT compiled at construction (lazy)
+        assert rule._compiled is False
+        assert rule._compiled_sender is None
+        assert rule._compiled_recipient is None
+        assert rule._compiled_channel is None
+        assert rule._compiled_content is None
+
+        # Trigger lazy compilation
+        rule._ensure_compiled()
+
         # sender is a regex → should be compiled
         assert rule._compiled_sender is not None
         # recipient is '*' → should be None

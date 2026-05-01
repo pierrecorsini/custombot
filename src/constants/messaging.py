@@ -13,6 +13,22 @@ from __future__ import annotations
 MAX_QUEUED_TEXT_LENGTH: int = 10_000
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Batched Fsync Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Number of pending writes to accumulate before issuing an os.fsync().
+# Each fsync costs ~1-5ms on HDD/NFS; batching amortises this cost across
+# multiple messages under burst traffic.  Set to 1 to disable batching
+# (every write is immediately fsynced for maximum durability).
+# Default of 10 trades ~50ms worst-case data loss for 10× throughput gain.
+QUEUE_FSYNC_BATCH_SIZE: int = 10
+
+# Maximum time (seconds) to hold writes before flushing, even if the batch
+# size threshold has not been reached.  Caps worst-case data loss to this
+# window during low-throughput periods.
+QUEUE_FSYNC_INTERVAL_SECONDS: float = 0.05  # 50ms
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Outbound Message Dedup
 # ─────────────────────────────────────────────────────────────────────────────
 

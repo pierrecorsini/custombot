@@ -129,19 +129,25 @@ class MtimeCache:
     callers don't repeat the stat → compare → read → store dance for
     every file they want to cache.
 
-    When a file doesn't exist, the key is recorded in ``_missing`` with
-    a timestamp.  Subsequent reads within ``MTIME_CACHE_MISSING_TTL``
-    seconds return ``None`` immediately, avoiding the
-    ``asyncio.to_thread()`` hop that would otherwise stat the filesystem
-    only to discover the file is still absent.
+    When a file doesn't exist, the key is recorded in ``_missing`` (a
+    bounded ``LRUDict``) with a timestamp.  Subsequent reads within
+    ``MTIME_CACHE_MISSING_TTL`` seconds return ``None`` immediately,
+    avoiding the ``asyncio.to_thread()`` hop that would otherwise stat
+    the filesystem only to discover the file is still absent.
+
+    ``_missing`` is capped at ``max_size`` entries (matching ``_cache``)
+    with FIFO eviction, preventing unbounded growth when many unique chat
+    IDs probe for nonexistent files.
     """
 
     __slots__ = ("_cache", "_missing", "_hits", "_misses")
 
     def __init__(self, max_size: int = MAX_LRU_CACHE_SIZE) -> None:
         self._cache: LRUDict = LRUDict(max_size=max_size)
-        # {key: monotonic timestamp} — tracks keys whose file was absent
-        self._missing: dict[str, float] = {}
+        # {key: monotonic timestamp} — tracks keys whose file was absent.
+        # Bounded by the same max_size as _cache to prevent unbounded growth
+        # when many unique chat IDs probe for nonexistent files.
+        self._missing: LRUDict = LRUDict(max_size=max_size)
         self._hits: int = 0
         self._misses: int = 0
 
@@ -399,6 +405,27 @@ class Memory:
             log.error("Failed to create memory backup: %s", e)
             return None
 
+    async def abackup_memory_file(self, chat_id: str) -> Optional[str]:
+        """Async counterpart of backup_memory_file — offloads I/O to a thread."""
+        path = self._chat_dir(chat_id) / MEMORY_FILENAME
+        if not path.exists():
+            return None
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = self._root / BACKUP_DIR
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_id = sanitize_path_component(chat_id)
+        backup_file = backup_dir / f"{safe_id}_{timestamp}.md.bak"
+
+        try:
+            await asyncio.to_thread(shutil.copy2, path, backup_file)
+            log.info("Created memory backup: %s", backup_file)
+            return str(backup_file)
+        except OSError as e:
+            log.error("Failed to create memory backup: %s", e)
+            return None
+
     def repair_memory_file(self, chat_id: str, backup: bool = True) -> MemoryCorruptionResult:
         """
         Attempt to repair a corrupted MEMORY.md file.
@@ -437,6 +464,35 @@ class Memory:
             result.repaired = True
             log.info("Repaired memory file for chat %s", chat_id)
 
+        except OSError as e:
+            result.error_details.append(f"Failed to repair: {e}")
+            log.error("Failed to repair memory file for chat %s: %s", chat_id, e)
+
+        return result
+
+    async def arepair_memory_file(
+        self, chat_id: str, backup: bool = True,
+    ) -> MemoryCorruptionResult:
+        """Async counterpart of repair_memory_file — offloads I/O to a thread."""
+        result = await asyncio.to_thread(self.detect_memory_corruption, chat_id)
+
+        if not result.is_corrupted:
+            return result
+
+        if backup:
+            result.backup_path = await self.abackup_memory_file(chat_id)
+
+        path = self._ensure_chat_dir(chat_id) / MEMORY_FILENAME
+
+        try:
+            await asyncio.to_thread(path.write_text, "", encoding="utf-8")
+
+            checksum_path = self._get_checksum_file(chat_id)
+            if checksum_path.exists():
+                await asyncio.to_thread(checksum_path.unlink)
+
+            result.repaired = True
+            log.info("Repaired memory file for chat %s", chat_id)
         except OSError as e:
             result.error_details.append(f"Failed to repair: {e}")
             log.error("Failed to repair memory file for chat %s: %s", chat_id, e)

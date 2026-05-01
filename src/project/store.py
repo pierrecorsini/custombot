@@ -59,6 +59,7 @@ class ProjectStore(SqliteHelper):
     def __init__(self, db_path: str) -> None:
         self._db_path = Path(db_path)
         self._lock = ThreadLock()
+        SqliteHelper.__init__(self)
 
     def connect(self) -> None:
         self._open_connection()

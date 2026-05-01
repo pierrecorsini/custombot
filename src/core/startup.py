@@ -222,7 +222,11 @@ async def _step_channel(ctx: StartupContext) -> str | None:
 
 async def _step_wire_scheduler(ctx: StartupContext) -> str | None:
     """Wire scheduler callbacks to the channel."""
-    ctx.app._wire_scheduler()
+    ctx.app._wire_scheduler(
+        channel=ctx.channel,
+        bot=ctx.components.bot,
+        scheduler=ctx.scheduler,
+    )
     return None
 
 
@@ -274,7 +278,11 @@ async def _step_recover_messages(ctx: StartupContext) -> str | None:
 
 async def _step_pipeline(ctx: StartupContext) -> str | None:
     """Build the message-processing middleware chain from config."""
-    pipeline = ctx.app._build_pipeline()
+    pipeline = ctx.app._build_pipeline(
+        shutdown_mgr=ctx.shutdown_mgr,
+        components=ctx.components,
+        channel=ctx.channel,
+    )
     ctx.pipeline = pipeline
     ctx.app._pipeline = pipeline
     return None

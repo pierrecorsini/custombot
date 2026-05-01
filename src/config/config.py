@@ -33,9 +33,12 @@ from src.config.config_schema import (
 # Logger for configuration validation
 log = logging.getLogger(__name__)
 from src.constants import (
+    DEFAULT_CHAT_LOCK_CACHE_SIZE,
     DEFAULT_LLM_TIMEOUT,
+    DEFAULT_LOCK_EVICTION_POLICY,
     DEFAULT_MEMORY_MAX_HISTORY,
     DEFAULT_SHUTDOWN_TIMEOUT,
+    EvictionPolicy,
     MAX_TOOL_ITERATIONS,
     WORKSPACE_DIR,
 )
@@ -200,6 +203,8 @@ def _get_default_values() -> Dict[str, Any]:
         "llm.max_tool_iterations": MAX_TOOL_ITERATIONS,
         "llm.embedding_model": "text-embedding-3-small",
         "llm.embedding_dimensions": 1536,
+        "llm.embedding_base_url": "",
+        "llm.embedding_api_key": "",
         "whatsapp.provider": "neonize",
         "whatsapp.neonize.db_path": f"{WORKSPACE_DIR}/whatsapp_session.db",
         "load_history": False,
@@ -454,6 +459,8 @@ class LLMConfig:
     max_tool_iterations: int = MAX_TOOL_ITERATIONS
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
     # When True, LLM responses are streamed token-by-token to reduce perceived
     # latency.  Falls back to non-streaming for tool-call turns.  Not all
     # providers support streaming — disable if the provider returns errors.
@@ -576,6 +583,14 @@ class Config:
     # Controls concurrency for asyncio.to_thread() calls (DB, file I/O, vector
     # memory).  None means use DEFAULT_THREAD_POOL_WORKERS from constants.
     max_thread_pool_workers: Optional[int] = None
+    # Maximum number of per-chat locks retained in the LRU cache.
+    # Controls how many concurrent chats can have cached locks before eviction.
+    # Raise for deployments with >1000 concurrent active chats.
+    max_chat_lock_cache_size: int = DEFAULT_CHAT_LOCK_CACHE_SIZE
+    # Eviction policy when the per-chat lock cache is full and all entries are in-use.
+    # "grow" allows unbounded growth with a warning (default, safe for correctness).
+    # "reject_on_full" raises RuntimeError to prevent memory bloat.
+    max_chat_lock_eviction_policy: str = DEFAULT_LOCK_EVICTION_POLICY.value
 
     def __repr__(self) -> str:
         return (

@@ -75,7 +75,7 @@ class SessionMetrics:
     def increment_errors(self) -> None:
         self._errors += 1
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "start_time": self.start_time,
             "uptime": time.time() - self.start_time,

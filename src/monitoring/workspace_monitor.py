@@ -32,7 +32,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from src.constants import (
     AUDIT_LOG_MAX_AGE_DAYS,
@@ -85,7 +85,7 @@ class WorkspaceStats:
     def logs_mb(self) -> float:
         return self.logs_bytes / (1024 * 1024)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         result = {
             "workspace_mb": round(self.workspace_mb, 1),
@@ -600,7 +600,7 @@ class WorkspaceMonitor:
 
 def get_global_workspace_monitor(
     workspace_dir: str = "workspace",
-    **kwargs,
+    **kwargs: Any,
 ) -> WorkspaceMonitor:
     """Get or create the global workspace monitor instance."""
     return get_or_create_singleton(
@@ -615,7 +615,7 @@ def reset_global_workspace_monitor() -> None:
     reset_singleton(WorkspaceMonitor)
 
 
-async def check_workspace_health(workspace_dir: str) -> dict:
+async def check_workspace_health(workspace_dir: str) -> dict[str, Any]:
     """Check workspace health for the health endpoint.
 
     Returns a dict with ``ComponentHealth`` and workspace stats.

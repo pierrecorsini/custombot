@@ -24,9 +24,12 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import (
     Any,
+    AsyncIterator,
     Awaitable,
     Callable,
     Dict,
@@ -436,7 +439,10 @@ class LockProvider(Protocol):
 
     Methods:
         get_or_create: Get an existing lock or create a new one for the key
-        __len__: Return the current number of active locks
+        acquire: Async context manager that ref-tracks, acquires, and releases
+        release: Decrement reference count for a previously obtained lock
+        __len__: Return the current number of cached locks
+        active_count: Return the number of currently held (ref_count > 0) locks
 
     Example:
         class RedisLockProvider:
@@ -462,8 +468,28 @@ class LockProvider(Protocol):
         """
         ...
 
+    @asynccontextmanager
+    async def acquire(self, key: str) -> AsyncIterator[None]:
+        """
+        Context manager: get, ref-track, acquire, and release a lock.
+
+        Combines get_or_create(), lock acquisition, and release() into
+        a single async context manager so callers never miss the release step.
+        """
+        ...
+        yield  # pragma: no cover
+
+    def release(self, key: str) -> None:
+        """Decrement the reference count for a previously obtained lock."""
+        ...
+
     def __len__(self) -> int:
         """Return the current number of managed locks."""
+        ...
+
+    @property
+    def active_count(self) -> int:
+        """Return the number of locks currently held (ref_count > 0)."""
         ...
 
 

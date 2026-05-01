@@ -95,7 +95,7 @@ class TestGenerationCounter:
         assert db.get_generation("chat_1") == 3
 
     def test_check_generation_matches(self, db: Database) -> None:
-        db._chat_generations["chat_1"] = 5
+        db._generation_counter._generations["chat_1"] = 5
         assert db.check_generation("chat_1", 5) is True
         assert db.check_generation("chat_1", 4) is False
 
@@ -248,12 +248,12 @@ class TestNameSanitization:
 
 
 class TestChatGenerationsBoundedGrowth:
-    """Verify _chat_generations dict is bounded and evicts oldest entries."""
+    """Verify generation counter dict is bounded and evicts oldest entries."""
 
     def test_get_generation_returns_zero_for_unknown_chat(self, db: Database) -> None:
         """Unknown chat IDs return generation 0 without side effects."""
         assert db.get_generation("nonexistent_chat") == 0
-        assert "nonexistent_chat" not in db._chat_generations
+        assert "nonexistent_chat" not in db._generation_counter._generations
 
     def test_bump_generation_increments_from_zero(self, db: Database) -> None:
         """_bump_generation starts at 0 and increments by 1."""
@@ -279,23 +279,23 @@ class TestChatGenerationsBoundedGrowth:
         # Fill to exactly the cap — no eviction yet.
         for i in range(MAX_CHAT_GENERATIONS):
             db._bump_generation(f"chat_{i:05d}")
-        assert len(db._chat_generations) == MAX_CHAT_GENERATIONS
+        assert len(db._generation_counter._generations) == MAX_CHAT_GENERATIONS
 
         # One more bump triggers eviction: oldest quarter removed.
         # _bump_generation adds the new entry first (size=10001), then evicts
         # the oldest quarter (2500), leaving 10001 - 2500 = 7501.
         db._bump_generation("chat_overflow")
         expected_size = MAX_CHAT_GENERATIONS + 1 - (MAX_CHAT_GENERATIONS // 4)
-        assert len(db._chat_generations) == expected_size
+        assert len(db._generation_counter._generations) == expected_size
 
         # The first quarter of chat IDs should have been evicted.
         evicted_count = MAX_CHAT_GENERATIONS // 4
         for i in range(evicted_count):
-            assert f"chat_{i:05d}" not in db._chat_generations
+            assert f"chat_{i:05d}" not in db._generation_counter._generations
         # Remaining entries (and the overflow entry) should still be present.
         for i in range(evicted_count, MAX_CHAT_GENERATIONS):
-            assert f"chat_{i:05d}" in db._chat_generations
-        assert "chat_overflow" in db._chat_generations
+            assert f"chat_{i:05d}" in db._generation_counter._generations
+        assert "chat_overflow" in db._generation_counter._generations
 
     def test_evicted_chat_generation_resets_to_zero(self, db: Database) -> None:
         """After eviction, get_generation() returns 0 for the evicted chat_id."""
@@ -309,7 +309,7 @@ class TestChatGenerationsBoundedGrowth:
             db._bump_generation(f"chat_fill_{i:05d}")
 
         # "chat_target" should have been evicted.
-        assert "chat_target" not in db._chat_generations
+        assert "chat_target" not in db._generation_counter._generations
         assert db.get_generation("chat_target") == 0
 
     def test_move_to_end_keeps_recent_chats(self, db: Database) -> None:
@@ -329,7 +329,7 @@ class TestChatGenerationsBoundedGrowth:
         db._bump_generation("chat_overflow")
 
         # "chat_first" should survive because it was moved to the end.
-        assert "chat_first" in db._chat_generations
+        assert "chat_first" in db._generation_counter._generations
         assert db.get_generation("chat_first") == 2
 
     def test_sustained_writes_dict_never_exceeds_cap(self, db: Database) -> None:
@@ -347,14 +347,14 @@ class TestChatGenerationsBoundedGrowth:
         for i in range(total_chats):
             db._bump_generation(f"chat_{i:08d}")
             # (a) Dict never exceeds cap after each _bump_generation returns.
-            assert len(db._chat_generations) <= MAX_CHAT_GENERATIONS
+            assert len(db._generation_counter._generations) <= MAX_CHAT_GENERATIONS
 
         # (b) Recently-written chats survive LRU eviction.
         # With quarter-eviction, the last ~MAX_CHAT_GENERATIONS chats remain.
         surviving_start = total_chats - MAX_CHAT_GENERATIONS
         for i in range(surviving_start, total_chats):
             chat_id = f"chat_{i:08d}"
-            assert chat_id in db._chat_generations, (
+            assert chat_id in db._generation_counter._generations, (
                 f"Recent {chat_id} should survive eviction"
             )
 

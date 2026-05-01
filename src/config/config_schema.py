@@ -113,6 +113,14 @@ CONFIG_SCHEMA: dict[str, Any] = {
                     "maximum": 3072,
                     "description": "Dimension of the embedding vectors (must match the model output size)",
                 },
+                "embedding_base_url": {
+                    "type": "string",
+                    "description": "Separate API base URL for embedding calls (defaults to llm.base_url if empty)",
+                },
+                "embedding_api_key": {
+                    "type": "string",
+                    "description": "Separate API key for embedding calls (defaults to llm.api_key if empty)",
+                },
             },
             "required": ["model"],
             "additionalProperties": False,
@@ -216,6 +224,17 @@ CONFIG_SCHEMA: dict[str, Any] = {
         "log_llm": {
             "type": "boolean",
             "description": "Enable per-file logging of each LLM request and response (default: false)",
+        },
+        "max_chat_lock_cache_size": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 100000,
+            "description": "Maximum per-chat lock cache entries before LRU eviction (default: 1000). Raise for deployments with >1000 concurrent chats.",
+        },
+        "max_chat_lock_eviction_policy": {
+            "type": "string",
+            "enum": ["grow", "reject_on_full"],
+            "description": "Eviction policy when the per-chat lock cache is full and all entries are in-use. 'grow' (default) allows unbounded growth with a warning; 'reject_on_full' raises RuntimeError to prevent memory bloat.",
         },
         "shell": {
             "type": "object",

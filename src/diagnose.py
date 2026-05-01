@@ -556,6 +556,75 @@ def check_orphaned_workspace_dirs(config_path: Path) -> CheckResult:
     )
 
 
+def check_routing_rules(config_path: Path) -> CheckResult:
+    """Check that the instructions directory exists and contains routing rules."""
+    workspace = Path(WORKSPACE_DIR)
+    instructions_dir = workspace / "instructions"
+
+    if not instructions_dir.is_dir():
+        return CheckResult(
+            name="Routing rules",
+            passed=False,
+            message=f"Instructions directory missing: {instructions_dir}",
+            details={
+                "hint": (
+                    "Create workspace/instructions/ and add at least a "
+                    "'chat.agent.md' with routing frontmatter. "
+                    "See src/templates/instructions/ for examples."
+                ),
+            },
+        )
+
+    md_files = list(instructions_dir.glob("*.md"))
+    if not md_files:
+        return CheckResult(
+            name="Routing rules",
+            passed=False,
+            message="No .md instruction files found",
+            details={
+                "hint": (
+                    "Add at least a 'chat.agent.md' with YAML routing "
+                    "frontmatter. See src/templates/instructions/ for examples."
+                ),
+            },
+        )
+
+    # Count files with valid routing frontmatter
+    from src.utils.frontmatter import extract_routing_rules, parse_file
+
+    files_with_rules = 0
+    total_rules = 0
+    for md_file in md_files:
+        try:
+            parsed = parse_file(md_file)
+            rule_dicts = extract_routing_rules(parsed.metadata)
+            if rule_dicts:
+                files_with_rules += 1
+                total_rules += len(rule_dicts)
+        except Exception:
+            pass
+
+    if total_rules == 0:
+        return CheckResult(
+            name="Routing rules",
+            passed=False,
+            message=f"{len(md_files)} .md file(s) found but none have routing rules",
+            details={
+                "hint": (
+                    "Add YAML frontmatter with a 'routing' key to at least "
+                    "one .md file. See src/templates/instructions/chat.agent.md "
+                    "for an example."
+                ),
+            },
+        )
+
+    return CheckResult(
+        name="Routing rules",
+        passed=True,
+        message=f"{total_rules} rule(s) from {files_with_rules} file(s)",
+    )
+
+
 def check_python_env(config_path: Path) -> CheckResult:
     """Check Python version and platform info."""
     py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -611,6 +680,7 @@ async def run_diagnose(config_path: Path) -> DiagnoseReport:
         check_disk_space,
         check_workspace_integrity,
         check_orphaned_workspace_dirs,
+        check_routing_rules,
         check_python_env,
         check_dependencies,
     ]

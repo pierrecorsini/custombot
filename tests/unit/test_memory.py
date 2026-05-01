@@ -27,6 +27,7 @@ from src.memory import (
     AGENTS_FILENAME,
     BACKUP_DIR,
     MEMORY_FILENAME,
+    MtimeCache,
     RECOVERY_LOG_FILENAME,
     Memory,
     MemoryCorruptionResult,
@@ -237,6 +238,58 @@ class TestLRUCacheInternals:
         await mem.read_agents_md("chat2")
         assert mem._memory_cache.misses == 1
         assert mem._agents_cache.misses == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MtimeCache._missing bounding
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestMtimeCacheMissingBounding:
+    """_missing dict must stay within max_size to prevent unbounded growth."""
+
+    @pytest.mark.asyncio
+    async def test_missing_dict_respects_max_size(self, mem: Memory):
+        """_missing stays bounded when many unique keys probe for absent files."""
+        max_size = 5
+        cache = MtimeCache(max_size=max_size)
+
+        # Probe 10 nonexistent files — _missing should cap at max_size
+        for i in range(10):
+            result = await cache.read(
+                f"key-{i:04d}", Path(f"/tmp/nonexistent_{i}"),
+            )
+            assert result is None
+
+        assert len(cache._missing) <= max_size
+
+        # Most recent entries should survive
+        assert cache._missing.get("key-0009") is not None
+
+        # Oldest entries should have been evicted
+        assert cache._missing.get("key-0000") is None
+
+    @pytest.mark.asyncio
+    async def test_missing_and_cache_share_max_size_independently(self, mem: Memory):
+        """_missing and _cache each have their own max_size bound."""
+        max_size = 5
+        cache = MtimeCache(max_size=max_size)
+
+        # Fill _missing with absent-file probes
+        for i in range(10):
+            await cache.read(
+                f"missing-{i:04d}", Path(f"/tmp/nonexistent_{i}"),
+            )
+
+        # _missing is bounded
+        assert len(cache._missing) <= max_size
+
+        # _cache is empty (no files existed to cache)
+        assert len(cache._cache) == 0
+
+        # Both can coexist at max_size independently
+        assert len(cache._missing) <= max_size
+        assert len(cache._cache) <= max_size
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -767,6 +820,87 @@ class TestRepairMemoryFile:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Async backup / async repair
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAsyncBackupMemoryFile:
+    """Tests for abackup_memory_file — async, non-blocking counterpart."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_nonexistent(self, mem: Memory):
+        result = await mem.abackup_memory_file("no-such-chat")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_creates_backup_file(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "async backup data")
+        backup_path = await mem.abackup_memory_file("chat1")
+        assert backup_path is not None
+        assert Path(backup_path).exists()
+        assert Path(backup_path).read_text(encoding="utf-8") == "async backup data"
+
+    @pytest.mark.asyncio
+    async def test_backup_in_backups_dir(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "data")
+        backup_path = await mem.abackup_memory_file("chat1")
+        assert backup_path is not None
+        assert BACKUP_DIR in backup_path
+
+    @pytest.mark.asyncio
+    async def test_backup_has_bak_extension(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "data")
+        backup_path = await mem.abackup_memory_file("chat1")
+        assert backup_path is not None
+        assert backup_path.endswith(".md.bak")
+
+
+class TestAsyncRepairMemoryFile:
+    """Tests for arepair_memory_file — async, non-blocking counterpart."""
+
+    @pytest.mark.asyncio
+    async def test_no_repair_when_not_corrupted(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "clean data")
+        result = await mem.arepair_memory_file("chat1")
+        assert result.is_corrupted is False
+        assert result.repaired is False
+        assert _memory_path(workspace, "chat1").read_text() == "clean data"
+
+    @pytest.mark.asyncio
+    async def test_repairs_corrupted_file(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "corrupted")
+        _checksum_path(workspace, "chat1").write_text("wrong_checksum", encoding="utf-8")
+
+        result = await mem.arepair_memory_file("chat1")
+        assert result.repaired is True
+        assert _memory_path(workspace, "chat1").read_text() == ""
+
+    @pytest.mark.asyncio
+    async def test_creates_backup_before_repair(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "corrupted data")
+        _checksum_path(workspace, "chat1").write_text("bad", encoding="utf-8")
+
+        result = await mem.arepair_memory_file("chat1", backup=True)
+        assert result.backup_path is not None
+        assert Path(result.backup_path).exists()
+        assert Path(result.backup_path).read_text() == "corrupted data"
+
+    @pytest.mark.asyncio
+    async def test_skips_backup_when_requested(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "corrupted data")
+        _checksum_path(workspace, "chat1").write_text("bad", encoding="utf-8")
+
+        result = await mem.arepair_memory_file("chat1", backup=False)
+        assert result.backup_path is None
+
+    @pytest.mark.asyncio
+    async def test_no_repair_for_missing_file(self, mem: Memory):
+        result = await mem.arepair_memory_file("no-such-chat")
+        assert result.is_corrupted is False
+        assert result.repaired is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # read_memory_with_validation / write_memory_with_checksum
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -949,9 +1083,9 @@ class TestPathTraversalValidation:
         assert is_path_in_workspace(mem._root / "whatsapp_data", path)
 
     def test_dotdot_in_chat_id_blocked(self, mem: Memory):
-        """`..` passes through sanitize_path_component (dots are allowed),
-        but resolve() catches the escape — verify it's blocked."""
-        with pytest.raises(PathSecurityError, match="Workspace escape blocked"):
+        """`..` is rejected by sanitize_path_component (dots-only stripped),
+        preventing path traversal before it reaches _validate_path."""
+        with pytest.raises((PathSecurityError, ValueError)):
             mem.ensure_workspace("..")
 
     def test_resolve_stays_within_workspace(self, mem: Memory, workspace: Path):

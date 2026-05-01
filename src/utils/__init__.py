@@ -16,7 +16,12 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Generic, TypeVar
 
-from src.constants import MAX_LRU_CACHE_SIZE
+from src.constants import (
+    DEFAULT_LOCK_CACHE_PRESSURE_THRESHOLD,
+    DEFAULT_LOCK_EVICTION_POLICY,
+    EvictionPolicy,
+    MAX_LRU_CACHE_SIZE,
+)
 
 log = logging.getLogger(__name__)
 from src.utils.async_executor import (
@@ -83,20 +88,44 @@ class LRULockCache:
         _cache: OrderedDict storing key -> asyncio.Lock mappings
         _ref_counts: Dict tracking how many references are outstanding per key
         _max_size: Maximum number of locks to retain
+        _pressure_threshold: Fraction of max_size at which pressure warnings fire
+        _eviction_policy: Strategy when all cached locks are in-use
         _lock: AsyncLock for thread-safe cache operations (see src.utils.locking)
     """
 
-    __slots__ = ("_cache", "_max_size", "_lock", "_ref_counts")
+    __slots__ = (
+        "_cache",
+        "_max_size",
+        "_pressure_threshold",
+        "_eviction_policy",
+        "_lock",
+        "_ref_counts",
+    )
 
-    def __init__(self, max_size: int = MAX_LRU_CACHE_SIZE) -> None:
+    def __init__(
+        self,
+        max_size: int = MAX_LRU_CACHE_SIZE,
+        pressure_threshold: float = DEFAULT_LOCK_CACHE_PRESSURE_THRESHOLD,
+        eviction_policy: EvictionPolicy = DEFAULT_LOCK_EVICTION_POLICY,
+    ) -> None:
         """
         Initialize the LRU lock cache.
 
         Args:
             max_size: Maximum number of locks to retain. Default is MAX_LRU_CACHE_SIZE.
+                Configurable via ``max_chat_lock_cache_size`` in config.json.
+            pressure_threshold: Fraction (0.0–1.0) of max_size at which pressure
+                warnings are logged.  Default 0.8 means warnings start when 80%
+                of cached locks are actively held.
+            eviction_policy: What to do when the cache is full and all entries
+                are in-use.  ``EvictionPolicy.GROW`` (default) allows unbounded
+                growth with a warning; ``EvictionPolicy.REJECT_ON_FULL`` raises
+                ``RuntimeError`` to prevent memory bloat.
         """
         self._cache: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._max_size = max_size
+        self._pressure_threshold = pressure_threshold
+        self._eviction_policy = eviction_policy
         # AsyncLock defers asyncio.Lock creation until first use — see
         # src.utils.locking policy.
         from src.utils.locking import AsyncLock
@@ -172,14 +201,38 @@ class LRULockCache:
         """Evict the oldest entry with zero references and not currently locked."""
         if len(self._cache) < self._max_size:
             return
+
+        active = len(self._ref_counts)
+        if active > self._max_size * self._pressure_threshold:
+            log.warning(
+                "Lock cache under pressure: %d/%d entries, %d active (%.0f%%). "
+                "Consider raising max_chat_lock_cache_size in config.json.",
+                len(self._cache),
+                self._max_size,
+                active,
+                (active / self._max_size) * 100,
+            )
+
         for k in list(self._cache.keys()):
             if self._ref_counts.get(k, 0) == 0 and not self._cache[k].locked():
                 self._cache.pop(k)
                 self._ref_counts.pop(k, None)
                 return
+
+        # All entries are in-use — apply the configured policy.
+        if self._eviction_policy is EvictionPolicy.REJECT_ON_FULL:
+            raise RuntimeError(
+                f"Lock cache saturated: all {len(self._cache)} entries are in-use "
+                f"(max_size={self._max_size}, active={active}). "
+                f"Raise max_chat_lock_cache_size or switch eviction policy to 'grow'."
+            )
+
         log.warning(
-            "All %d cached locks are in-use; growing cache beyond max_size",
+            "All %d cached locks are in-use; growing cache beyond max_size (%d active). "
+            "Raise max_chat_lock_cache_size in config.json or set eviction policy to "
+            "'reject_on_full' to prevent unbounded growth.",
             len(self._cache),
+            active,
         )
 
     def __len__(self) -> int:
@@ -190,6 +243,26 @@ class LRULockCache:
     def max_size(self) -> int:
         """Return the maximum cache size."""
         return self._max_size
+
+    @property
+    def active_count(self) -> int:
+        """Return the number of locks currently held (ref_count > 0)."""
+        return len(self._ref_counts)
+
+    def stats(self) -> dict[str, int | float]:
+        """Return a snapshot of cache statistics for observability.
+
+        Useful for health endpoints and metrics to help operators tune
+        ``max_chat_lock_cache_size``.
+        """
+        return {
+            "size": len(self._cache),
+            "max_size": self._max_size,
+            "active": len(self._ref_counts),
+            "utilization": len(self._cache) / self._max_size if self._max_size else 0.0,
+            "pressure_threshold": self._pressure_threshold,
+            "eviction_policy": self._eviction_policy.value,
+        }
 
 
 class LRUDict:

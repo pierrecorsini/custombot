@@ -375,10 +375,10 @@ class TestWireScheduler:
         app._wire_scheduler()
 
         on_trigger = mock_scheduler.set_on_trigger.call_args[0][0]
-        await on_trigger("chat-1", "Summarize today's events")
+        await on_trigger("chat-1", "Summarize today's events", None)
 
         mock_components.bot.process_scheduled.assert_awaited_once_with(
-            "chat-1", "Summarize today's events", channel=mock_channel
+            "chat-1", "Summarize today's events", channel=mock_channel, prompt_hmac=None
         )
 
 
@@ -766,6 +766,136 @@ class TestShutdownCleanup:
 
         call_kwargs = mock_ps.call_args[1]
         assert call_kwargs["health_server"] is mock_health
+
+    async def test_config_watcher_timeout_does_not_block_cleanup(
+        self, test_config: Config
+    ) -> None:
+        """A hung config_watcher.stop() is cancelled after the step timeout."""
+        app = Application(test_config)
+
+        mock_components = _make_mock_bot_components()
+        mock_channel = _make_mock_channel()
+        mock_scheduler = _make_mock_scheduler()
+        mock_shutdown = MagicMock()
+
+        # config_watcher.stop() never resolves
+        mock_cw = MagicMock()
+        mock_cw.stop = AsyncMock(side_effect=asyncio.CancelledError)
+        # We want it to actually hang, so use a coroutine that sleeps forever
+        async def _hang_forever():
+            await asyncio.Event().wait()
+
+        mock_cw.stop = AsyncMock(side_effect=_hang_forever)
+        mock_wm = MagicMock()
+        mock_wm.stop = AsyncMock()
+
+        from src.app import AppState
+
+        app._state = AppState(
+            shutdown_mgr=mock_shutdown,
+            components=mock_components,
+            scheduler=mock_scheduler,
+            channel=mock_channel,
+            pipeline=MagicMock(),
+            executor=None,
+            workspace_monitor=mock_wm,
+            config_watcher=mock_cw,
+        )
+        app._health_server = None
+
+        with (
+            patch("src.app.CLEANUP_STEP_TIMEOUT", 0.05),
+            patch("src.app.perform_shutdown", new_callable=AsyncMock) as mock_ps,
+        ):
+            await app._shutdown_cleanup()
+
+        # perform_shutdown still called despite config watcher timeout
+        mock_ps.assert_awaited_once()
+
+    async def test_workspace_monitor_timeout_does_not_block_cleanup(
+        self, test_config: Config
+    ) -> None:
+        """A hung workspace_monitor.stop() is cancelled after the step timeout."""
+        app = Application(test_config)
+
+        mock_components = _make_mock_bot_components()
+        mock_channel = _make_mock_channel()
+        mock_scheduler = _make_mock_scheduler()
+        mock_shutdown = MagicMock()
+
+        mock_cw = MagicMock()
+        mock_cw.stop = AsyncMock()
+        mock_wm = MagicMock()
+
+        async def _hang_forever():
+            await asyncio.Event().wait()
+
+        mock_wm.stop = AsyncMock(side_effect=_hang_forever)
+
+        from src.app import AppState
+
+        app._state = AppState(
+            shutdown_mgr=mock_shutdown,
+            components=mock_components,
+            scheduler=mock_scheduler,
+            channel=mock_channel,
+            pipeline=MagicMock(),
+            executor=None,
+            workspace_monitor=mock_wm,
+            config_watcher=mock_cw,
+        )
+        app._health_server = None
+
+        with (
+            patch("src.app.CLEANUP_STEP_TIMEOUT", 0.05),
+            patch("src.app.perform_shutdown", new_callable=AsyncMock) as mock_ps,
+        ):
+            await app._shutdown_cleanup()
+
+        mock_ps.assert_awaited_once()
+
+    async def test_perform_shutdown_timeout_still_transitions_to_stopped(
+        self, test_config: Config
+    ) -> None:
+        """If perform_shutdown times out, we still transition to STOPPED."""
+        from src.app import AppPhase, AppState
+
+        app = Application(test_config)
+
+        mock_components = _make_mock_bot_components()
+        mock_channel = _make_mock_channel()
+        mock_scheduler = _make_mock_scheduler()
+        mock_shutdown = MagicMock()
+
+        mock_cw = MagicMock()
+        mock_cw.stop = AsyncMock()
+        mock_wm = MagicMock()
+        mock_wm.stop = AsyncMock()
+
+        app._state = AppState(
+            shutdown_mgr=mock_shutdown,
+            components=mock_components,
+            scheduler=mock_scheduler,
+            channel=mock_channel,
+            pipeline=MagicMock(),
+            executor=None,
+            workspace_monitor=mock_wm,
+            config_watcher=mock_cw,
+        )
+        app._health_server = None
+        app._phase = AppPhase.RUNNING
+
+        async def _hang_forever(**_kwargs):
+            await asyncio.Event().wait()
+
+        with (
+            patch("src.app.CLEANUP_STEP_TIMEOUT", 0.05),
+            patch("src.app.perform_shutdown", side_effect=_hang_forever) as mock_ps,
+        ):
+            await app._shutdown_cleanup()
+
+        mock_ps.assert_awaited_once()
+        assert app._phase == AppPhase.STOPPED
 
 
 # ─────────────────────────────────────────────────────────────────────────────

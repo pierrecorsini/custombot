@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from src.constants import (
+    DB_WRITE_MAX_RETRIES,
+    DB_WRITE_RETRY_INITIAL_DELAY,
     DEFAULT_DB_TIMEOUT,
     MAX_LRU_CACHE_SIZE,
 )
@@ -364,7 +366,7 @@ class MessageStore:
         for attempt in range(DB_WRITE_MAX_RETRIES + 1):
             try:
                 await self._guarded_write(
-                    _write_batch(),
+                    _write_batch,
                     timeout=DEFAULT_DB_TIMEOUT,
                     operation="save_messages_batch",
                 )
@@ -481,6 +483,10 @@ class MessageStore:
                         extra=_db_log_extra(chat_id),
                     )
                     corruption_detected = True
+                continue
+
+            # Skip JSONL schema-version header lines
+            if msg.get("type") == "header":
                 continue
 
             # Validate checksum if present

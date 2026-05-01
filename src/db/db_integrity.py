@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from src.db.db_utils import _validate_chat_id
 from src.utils import JSONDecodeError, json_loads
 
 log = logging.getLogger(__name__)
@@ -239,6 +240,14 @@ def validate_all_sync(
 
     for msg_file in messages_dir.glob("*.jsonl"):
         chat_id = msg_file.stem
+        try:
+            _validate_chat_id(chat_id)
+        except ValueError:
+            log.warning(
+                "Skipping message file with invalid chat_id stem: %s",
+                msg_file.name,
+            )
+            continue
         result = detect_corruption_sync(msg_file)
         results[chat_id] = result
 

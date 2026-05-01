@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Optional
 
 if TYPE_CHECKING:
     from src.config import Config
@@ -225,7 +225,7 @@ class IncomingMessage:
     is_historical: bool = False
     acl_passed: bool = False
     correlation_id: Optional[str] = None
-    raw: Optional[dict] = None
+    raw: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         # Defense-in-depth: validate identifiers before they reach any filesystem op.
@@ -254,7 +254,7 @@ class IncomingMessage:
 
 
 # Type alias for the callback the bot registers
-MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
+MessageHandler = Callable[[IncomingMessage], Coroutine[Any, Any, None]]
 
 # Type alias for the media-sending callback injected into skills.
 # Callable(kind: "audio" | "document", path: Path, caption: str) -> Awaitable[None]

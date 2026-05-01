@@ -15,13 +15,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Optional
 
 from src.builder import BotComponents
 from src.channels.base import BaseChannel, IncomingMessage
 from src.config import Config
-from src.constants import DEFAULT_CHANNEL_STARTUP_TIMEOUT
-from src.core.event_bus import Event, EventName, get_event_bus
+from src.constants import CLEANUP_STEP_TIMEOUT, DEFAULT_CHANNEL_STARTUP_TIMEOUT
+from src.core.event_bus import EVENT_ERROR_OCCURRED, Event, get_event_bus
 from src.core.message_pipeline import MessageContext, MessagePipeline
 from src.core.startup import StartupContext, StartupOrchestrator
 from src.core.errors import NonCriticalCategory, log_noncritical
@@ -35,6 +37,7 @@ from src.monitoring import SessionMetrics
 from src.ui.cli_output import cli as cli_output
 
 if TYPE_CHECKING:
+    from src.bot import Bot
     from src.config.config_watcher import ConfigWatcher
     from src.health import HealthServer
     from src.monitoring.workspace_monitor import WorkspaceMonitor
@@ -44,14 +47,62 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+# ── Lifecycle State Machine ──────────────────────────────────────────────
+
+
+class AppPhase(Enum):
+    """Explicit lifecycle phases for the Application state machine.
+
+    Transitions are validated by ``Application._transition()`` so that
+    misuse (e.g. calling ``_on_message`` before startup) is caught with
+    a clear error instead of a confusing ``AttributeError``.
+    """
+
+    CREATED = auto()
+    STARTING = auto()
+    RUNNING = auto()
+    SHUTTING_DOWN = auto()
+    STOPPED = auto()
+
+
+@dataclass(frozen=True)
+class AppComponents:
+    """All components guaranteed non-None after successful startup.
+
+    Constructed atomically from ``StartupContext`` after all startup
+    steps complete — no partially-initialised state is possible.
+    Because the dataclass is frozen, downstream code can trust that
+    every field is populated without null-checks.
+    """
+
+    shutdown_mgr: GracefulShutdown
+    components: BotComponents
+    scheduler: TaskScheduler
+    channel: BaseChannel
+    pipeline: MessagePipeline
+    executor: ThreadPoolExecutor
+    workspace_monitor: WorkspaceMonitor
+    config_watcher: ConfigWatcher
+
+
+# ── Valid phase transitions ──────────────────────────────────────────────
+
+_VALID_TRANSITIONS: dict[AppPhase, set[AppPhase]] = {
+    AppPhase.CREATED: {AppPhase.STARTING},
+    AppPhase.STARTING: {AppPhase.RUNNING, AppPhase.SHUTTING_DOWN},
+    AppPhase.RUNNING: {AppPhase.SHUTTING_DOWN},
+    AppPhase.SHUTTING_DOWN: {AppPhase.STOPPED},
+}
+
+
 class Application:
     """Encapsulates the full bot application lifecycle.
 
     Phases:
-        1. ``_startup()`` — Initialize all components via ``StartupOrchestrator``
-        2. ``run()`` — Start polling, wait for shutdown, then cleanup
-        3. ``_on_message()`` — Handle incoming messages
-        4. ``_shutdown_cleanup()`` — Graceful teardown
+        1. ``CREATED → STARTING`` — ``_startup()`` begins
+        2. ``STARTING → RUNNING`` — all components initialised
+        3. ``RUNNING → SHUTTING_DOWN`` — shutdown requested
+        4. ``SHUTTING_DOWN → STOPPED`` — cleanup complete
     """
 
     def __init__(
@@ -68,46 +119,67 @@ class Application:
         self._session_metrics = SessionMetrics()
         self._initialized_components: list[str] = []
 
-        # Components — set during _startup() by StartupOrchestrator steps
-        self._shutdown_mgr: GracefulShutdown | None = None
-        self._components: BotComponents | None = None
-        self._scheduler: TaskScheduler | None = None
-        self._channel: BaseChannel | None = None
-        self._pipeline: MessagePipeline | None = None
-        self._executor: ThreadPoolExecutor | None = None
-        self._workspace_monitor: WorkspaceMonitor | None = None
-        self._config_watcher: ConfigWatcher | None = None
+        # State machine — components are only available after STARTING → RUNNING
+        self._phase: AppPhase = AppPhase.CREATED
+        self._state: AppComponents | None = None
+        # Health server is optional (only created when --health-port is set)
         self._health_server: HealthServer | None = None
+
+    # ── Phase transitions ────────────────────────────────────────────────
+
+    def _transition(self, new_phase: AppPhase) -> None:
+        """Validate and apply a phase transition.
+
+        Raises ``RuntimeError`` if the transition is not allowed from the
+        current phase, making lifecycle misuse detectable at the call site.
+        """
+        allowed = _VALID_TRANSITIONS.get(self._phase, set())
+        if new_phase not in allowed:
+            raise RuntimeError(
+                f"Invalid phase transition: {self._phase.name} → "
+                f"{new_phase.name}. Current phase does not permit this transition."
+            )
+        log.debug("App phase: %s → %s", self._phase.name, new_phase.name)
+        self._phase = new_phase
+
+    @property
+    def phase(self) -> AppPhase:
+        """The current lifecycle phase (read-only for external consumers)."""
+        return self._phase
+
+    @property
+    def state(self) -> AppComponents:
+        """The initialised components. Raises if accessed before startup completes."""
+        if self._state is None:
+            raise RuntimeError(
+                f"Components not available in {self._phase.name} phase. "
+                "Startup must complete first."
+            )
+        return self._state
+
+    # ── Component accessors ──────────────────────────────────────────────
 
     @property
     def channel(self) -> BaseChannel:
-        """The initialized channel. Raises if called before ``_startup()``."""
-        if self._channel is None:
-            raise RuntimeError("Channel not initialized. Call _startup() first.")
-        return self._channel
+        """The initialised channel. Raises if called before startup completes."""
+        return self.state.channel
 
     @property
     def components(self) -> BotComponents:
-        """The initialized bot components. Raises if called before ``_startup()``."""
-        if self._components is None:
-            raise RuntimeError("Components not initialized. Call _startup() first.")
-        return self._components
+        """The initialised bot components. Raises if called before startup completes."""
+        return self.state.components
 
     @property
     def shutdown_mgr(self) -> GracefulShutdown:
-        """The shutdown manager. Raises if called before ``_startup()``."""
-        if self._shutdown_mgr is None:
-            raise RuntimeError("Shutdown manager not initialized. Call _startup() first.")
-        return self._shutdown_mgr
+        """The shutdown manager. Raises if called before startup completes."""
+        return self.state.shutdown_mgr
 
     @property
     def scheduler(self) -> TaskScheduler:
-        """The task scheduler. Raises if called before ``_startup()``."""
-        if self._scheduler is None:
-            raise RuntimeError("Scheduler not initialized. Call _startup() first.")
-        return self._scheduler
+        """The task scheduler. Raises if called before startup completes."""
+        return self.state.scheduler
 
-    # ── Public API ──────────────────────────────────────────────────────────
+    # ── Public API ──────────────────────────────────────────────────────
 
     async def run(self) -> None:
         """Full lifecycle: startup → listen → shutdown."""
@@ -168,13 +240,19 @@ class Application:
         finally:
             await self._shutdown_cleanup()
 
-    # ── Startup Phase ───────────────────────────────────────────────────────
+    # ── Startup Phase ───────────────────────────────────────────────────
 
     async def _startup(self) -> float:
         """Initialize all components via ``StartupOrchestrator``.
 
+        Transitions ``CREATED → STARTING``, runs all startup steps, then
+        atomically constructs ``AppComponents`` from the context and
+        transitions ``STARTING → RUNNING``.
+
         Returns the startup begin timestamp for duration tracking.
         """
+        self._transition(AppPhase.STARTING)
+
         ctx = StartupContext(
             config=self._config,
             session_metrics=self._session_metrics,
@@ -182,6 +260,10 @@ class Application:
         )
         orchestrator = StartupOrchestrator(ctx)
         startup_time = await orchestrator.run_all()
+
+        # Atomically construct frozen state from the completed context.
+        self._state = self._build_state_from_ctx(ctx)
+        self._health_server = ctx.health_server
 
         # Update the health server with the complete startup durations
         # (the snapshot taken during _step_health_server only covers steps
@@ -192,7 +274,43 @@ class Application:
                 full_durations.update(ctx.components.component_durations)
             self._health_server.update_startup_durations(full_durations)
 
+        self._transition(AppPhase.RUNNING)
         return startup_time
+
+    @staticmethod
+    def _build_state_from_ctx(ctx: StartupContext) -> AppComponents:
+        """Construct ``AppComponents`` from a successfully completed ``StartupContext``.
+
+        Validates that every required component was populated by the
+        startup steps.  Raises ``RuntimeError`` listing any missing
+        components so that startup failures are diagnosed immediately.
+        """
+        required: list[tuple[str, object]] = [
+            ("shutdown_mgr", ctx.shutdown_mgr),
+            ("components", ctx.components),
+            ("scheduler", ctx.scheduler),
+            ("channel", ctx.channel),
+            ("pipeline", ctx.pipeline),
+            ("executor", ctx.executor),
+            ("workspace_monitor", ctx.workspace_monitor),
+            ("config_watcher", ctx.config_watcher),
+        ]
+        missing = [name for name, value in required if value is None]
+        if missing:
+            raise RuntimeError(
+                f"Startup completed but required components are missing: "
+                f"{', '.join(missing)}"
+            )
+        return AppComponents(
+            shutdown_mgr=ctx.shutdown_mgr,  # type: ignore[arg-type]
+            components=ctx.components,  # type: ignore[arg-type]
+            scheduler=ctx.scheduler,  # type: ignore[arg-type]
+            channel=ctx.channel,  # type: ignore[arg-type]
+            pipeline=ctx.pipeline,  # type: ignore[arg-type]
+            executor=ctx.executor,  # type: ignore[arg-type]
+            workspace_monitor=ctx.workspace_monitor,  # type: ignore[arg-type]
+            config_watcher=ctx.config_watcher,  # type: ignore[arg-type]
+        )
 
     @staticmethod
     def _reconfigure_logging(config: Config) -> None:
@@ -208,10 +326,19 @@ class Application:
             log_verbosity=config.log_verbosity,
         )
 
-    # ── Pipeline Construction ────────────────────────────────────────────────
+    # ── Pipeline Construction ───────────────────────────────────────────
 
-    def _build_pipeline(self) -> MessagePipeline:
+    def _build_pipeline(
+        self,
+        *,
+        shutdown_mgr: GracefulShutdown,
+        components: BotComponents,
+        channel: BaseChannel,
+    ) -> MessagePipeline:
         """Build the message-processing middleware chain from config.
+
+        Takes explicit component parameters so it can be called during
+        the ``STARTING`` phase before ``self._state`` is populated.
 
         Uses ``build_pipeline_from_config()`` so the middleware order and
         custom middleware paths are driven by ``config.json``.  Falls back
@@ -221,10 +348,10 @@ class Application:
 
         mw_cfg = self._config.middleware
         deps = PipelineDependencies(
-            shutdown_mgr=self.shutdown_mgr,
+            shutdown_mgr=shutdown_mgr,
             session_metrics=self._session_metrics,
-            bot=self.components.bot,
-            channel=self.channel,
+            bot=components.bot,
+            channel=channel,
             verbose=self._verbose,
         )
         return build_pipeline_from_config(
@@ -233,33 +360,38 @@ class Application:
             deps=deps,
         )
 
-    # ── Wiring ──────────────────────────────────────────────────────────────
+    # ── Wiring ──────────────────────────────────────────────────────────
 
-    def _wire_scheduler(self) -> None:
-        """Wire scheduler callbacks to the WhatsApp channel."""
-        channel = self.channel
-        bot = self.components.bot
+    @staticmethod
+    def _wire_scheduler(
+        *,
+        channel: BaseChannel,
+        bot: Bot,
+        scheduler: TaskScheduler,
+    ) -> None:
+        """Wire scheduler callbacks to the WhatsApp channel.
 
+        Takes explicit parameters so it can be called during the
+        ``STARTING`` phase before ``self._state`` is populated.
+        """
         # skip_delays=True bypasses human-like stealth delays for scheduled messages
-        self.scheduler.set_on_send(
+        scheduler.set_on_send(
             lambda chat_id, text: channel.send_message(chat_id, text, skip_delays=True)
         )
 
-        self.scheduler.set_on_trigger(
-            lambda chat_id, prompt: bot.process_scheduled(
-                chat_id, prompt, channel=channel
+        scheduler.set_on_trigger(
+            lambda chat_id, prompt, prompt_hmac: bot.process_scheduled(
+                chat_id, prompt, channel=channel, prompt_hmac=prompt_hmac
             )
         )
 
-    # ── Message Handler ─────────────────────────────────────────────────────
+    # ── Message Handler ─────────────────────────────────────────────────
 
     async def _on_message(self, msg: IncomingMessage) -> None:
         """Handle incoming message via the middleware pipeline."""
-        if not self.shutdown_mgr.accepting_messages:
+        if not self.state.shutdown_mgr.accepting_messages:
             log.debug("Rejecting message from %s - shutdown in progress", msg.chat_id)
             return
-
-        assert self._pipeline is not None  # set during _startup()
 
         # Propagate correlation ID from the incoming message (or generate a
         # fresh one) so that all downstream logging and event emission can be
@@ -268,14 +400,14 @@ class Application:
 
         ctx = MessageContext(msg=msg)
         try:
-            await self._pipeline.execute(ctx)
+            await self.state.pipeline.execute(ctx)
         except Exception as exc:
             # Emit an error_occurred event so that monitoring subscribers are
             # notified of pipeline failures.  Event emission itself must never
             # break the error-handling path.
             try:
                 await get_event_bus().emit(Event(
-                    name=EventName.ERROR_OCCURRED,
+                    name=EVENT_ERROR_OCCURRED,
                     data={
                         "chat_id": msg.chat_id,
                         "error_type": type(exc).__name__,
@@ -295,37 +427,65 @@ class Application:
         finally:
             clear_correlation_id()
 
-    # ── Shutdown Phase ──────────────────────────────────────────────────────
+    # ── Shutdown Phase ──────────────────────────────────────────────────
 
     async def _shutdown_cleanup(self) -> None:
         """Delegate to the shared ordered-shutdown sequence."""
+        if self._phase == AppPhase.RUNNING:
+            self._transition(AppPhase.SHUTTING_DOWN)
+
+        state = self._state
+        if state is None:
+            # Startup never completed — nothing to clean up.
+            return
+
         # Stop config watcher before general shutdown
-        if self._config_watcher is not None:
-            try:
-                await self._config_watcher.stop()
-            except Exception as e:
-                log.warning("Error stopping config watcher: %s", e)
+        try:
+            await asyncio.wait_for(
+                state.config_watcher.stop(), timeout=CLEANUP_STEP_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "Config watcher stop timed out after %.1fs", CLEANUP_STEP_TIMEOUT
+            )
+        except Exception as e:
+            log.warning("Error stopping config watcher: %s", e)
 
         # Stop workspace monitor before general shutdown
-        if self._workspace_monitor is not None:
-            try:
-                await self._workspace_monitor.stop()
-            except Exception as e:
-                log.warning("Error stopping workspace monitor: %s", e)
+        try:
+            await asyncio.wait_for(
+                state.workspace_monitor.stop(), timeout=CLEANUP_STEP_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "Workspace monitor stop timed out after %.1fs", CLEANUP_STEP_TIMEOUT
+            )
+        except Exception as e:
+            log.warning("Error stopping workspace monitor: %s", e)
 
-        await perform_shutdown(
-            shutdown=self.shutdown_mgr,
-            channel=self.channel,
-            scheduler=self.scheduler,
-            health_server=self._health_server,
-            db=self.components.db,
-            vector_memory=self.components.vector_memory,
-            project_store=self.components.project_store,
-            message_queue=self.components.message_queue,
-            llm=self.components.llm,
-            session_metrics=self._session_metrics.to_dict(),
-            log=log,
-            verbose=self._verbose,
-            bot=self.components.bot,
-            executor=self._executor,
-        )
+        try:
+            await asyncio.wait_for(
+                perform_shutdown(
+                    shutdown=state.shutdown_mgr,
+                    channel=state.channel,
+                    scheduler=state.scheduler,
+                    health_server=self._health_server,
+                    db=state.components.db,
+                    vector_memory=state.components.vector_memory,
+                    project_store=state.components.project_store,
+                    message_queue=state.components.message_queue,
+                    llm=state.components.llm,
+                    session_metrics=self._session_metrics.to_dict(),
+                    log=log,
+                    verbose=self._verbose,
+                    bot=state.components.bot,
+                    executor=state.executor,
+                ),
+                timeout=CLEANUP_STEP_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "Perform shutdown timed out after %.1fs", CLEANUP_STEP_TIMEOUT
+            )
+
+        self._transition(AppPhase.STOPPED)

@@ -34,8 +34,9 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from src.constants import MAX_QUEUED_TEXT_LENGTH
+from src.constants import MAX_QUEUED_TEXT_LENGTH, QUEUE_FSYNC_BATCH_SIZE, QUEUE_FSYNC_INTERVAL_SECONDS
 from src.core.errors import NonCriticalCategory, log_noncritical
+from src.db.db_utils import _validate_chat_id
 from src.utils import JsonParseMode, json_dumps, safe_json_parse
 from src.utils.locking import AsyncLock
 
@@ -98,7 +99,15 @@ class QueuedMessage:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "QueuedMessage":
-        """Create from dictionary (JSON deserialization)."""
+        """Create from dictionary (JSON deserialization).
+
+        Validates ``chat_id`` at the deserialization boundary to prevent
+        malicious values loaded from the on-disk queue file from reaching
+        filesystem operations downstream.  This is the defense-in-depth
+        layer between disk persistence and IncomingMessage construction
+        during crash recovery.
+        """
+        _validate_chat_id(data["chat_id"])
         return cls(
             message_id=data["message_id"],
             chat_id=data["chat_id"],
@@ -220,6 +229,21 @@ class MessageQueue:
         # corruption metadata for observability and health checks.
         self._last_corruption_result: Optional[QueueCorruptionResult] = None
 
+        # ── batched fsync state ───────────────────────────────────────────
+        # Accumulates pending lines for write coalescing.  The buffer is
+        # flushed when: (1) batch size reached, (2) interval elapsed,
+        # (3) close() / _persist_pending() called.
+        self._write_buffer: List[str] = []
+        self._fsync_batch_size: int = QUEUE_FSYNC_BATCH_SIZE
+        self._fsync_interval: float = QUEUE_FSYNC_INTERVAL_SECONDS
+        self._last_flush_time: float = 0.0
+
+        # Background task that periodically flushes the write buffer when
+        # the time-interval threshold is reached but no new enqueue calls
+        # arrive.  Ensures buffered writes are persisted within the
+        # configured interval even during idle periods.
+        self._flush_task: Optional[asyncio.Task[None]] = None
+
     async def connect(self) -> None:
         """
         Initialize queue storage and load pending messages.
@@ -237,6 +261,11 @@ class MessageQueue:
         await self._load_pending()
 
         self._initialized = True
+
+        # Start background flush loop to drain buffered writes on the
+        # time-interval boundary during idle periods.
+        self._flush_task = asyncio.create_task(self._flush_loop())
+
         log.info(
             "Message queue initialized with %d pending messages",
             len(self._pending),
@@ -244,15 +273,29 @@ class MessageQueue:
 
     async def close(self) -> None:
         """
-        Flush pending messages and close queue.
+        Flush pending writes and close queue.
 
-        Ensures all pending messages are persisted to disk.
+        Ensures all pending messages are persisted to disk, including
+        any buffered writes awaiting batch fsync.
 
         Side Effects:
+            - Cancels background flush task
+            - Flushes write buffer to disk
             - Persists pending messages to disk
             - Sets _initialized flag to False
         """
+        # Cancel background flush loop first so it doesn't race with
+        # the final flush below.
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+            self._flush_task = None
+
         async with self._lock:
+            await self._flush_write_buffer()
             await self._persist_pending()
 
         self._initialized = False
@@ -765,40 +808,35 @@ class MessageQueue:
 
     async def _append_to_queue(self, msg: QueuedMessage) -> None:
         """
-        Append a message to the queue file.
+        Append a message to the queue file using batched fsync.
 
-        Uses atomic append with fsync for durability — ensures the
-        message reaches disk before returning so a crash cannot lose
-        the entry that was already reported as enqueued.
+        Instead of issuing os.fsync() on every write, lines are accumulated
+        in an in-memory buffer.  The buffer is flushed when:
+        1. The batch size threshold is reached
+        2. The time interval since the last flush has elapsed
+        3. close() or _persist_pending() is called
 
         Args:
             msg: Message to append.
 
         Side Effects:
-            - Appends to .data/message_queue.jsonl
-            - Flushes and fsyncs to guarantee durability
+            - Buffers line for write coalescing
+            - May flush to .data/message_queue.jsonl with fsync
         """
         try:
             line = json_dumps(msg.to_dict(), ensure_ascii=False) + "\n"
-
-            def _write() -> None:
-                with self._queue_file.open("a", encoding="utf-8") as f:
-                    f.write(line)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-            await asyncio.to_thread(_write)
+            self._write_buffer.append(line)
+            await self._maybe_flush_buffer()
         except Exception as e:
             log.error("Failed to append to queue file: %s", e)
             raise
 
     async def _append_completion(self, message_id: str) -> None:
         """
-        Append a completion marker to the queue file (append-only optimization).
+        Append a completion marker to the queue file using batched fsync.
 
         Instead of rewriting the entire file, we append a completed entry.
-        The next _load_pending call will skip completed entries. Uses
-        fsync to ensure the completion marker reaches disk.
+        The next _load_pending call will skip completed entries.
 
         Args:
             message_id: The ID of the completed message.
@@ -815,30 +853,80 @@ class MessageQueue:
                 )
                 + "\n"
             )
-
-            def _write() -> None:
-                with self._queue_file.open("a", encoding="utf-8") as f:
-                    f.write(entry)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-            await asyncio.to_thread(_write)
+            self._write_buffer.append(entry)
+            await self._maybe_flush_buffer()
         except Exception as e:
             log.error("Failed to append completion to queue file: %s", e)
             # Fall back to full persist on error
+            self._write_buffer.clear()
             await self._persist_pending()
+
+    async def _maybe_flush_buffer(self) -> None:
+        """Flush write buffer if batch-size or time-interval threshold is met."""
+        now = time.monotonic()
+        size_reached = len(self._write_buffer) >= self._fsync_batch_size
+        interval_reached = (
+            self._write_buffer
+            and (now - self._last_flush_time) >= self._fsync_interval
+        )
+        if size_reached or interval_reached:
+            await self._flush_write_buffer()
+
+    async def _flush_write_buffer(self) -> None:
+        """Flush all buffered lines to disk with a single fsync."""
+        if not self._write_buffer:
+            return
+        lines = self._write_buffer
+        self._write_buffer = []
+
+        def _write_batch() -> None:
+            with self._queue_file.open("a", encoding="utf-8") as f:
+                f.writelines(lines)
+                f.flush()
+                os.fsync(f.fileno())
+
+        try:
+            await asyncio.to_thread(_write_batch)
+            self._last_flush_time = time.monotonic()
+        except Exception as e:
+            log.error("Failed to flush write buffer: %s", e)
+            raise
+
+    async def _flush_loop(self) -> None:
+        """Background coroutine that drains the write buffer on a timer.
+
+        Ensures buffered writes are persisted within ``_fsync_interval`` even
+        when no new enqueue calls arrive (e.g. during idle periods).  The
+        loop sleeps in small increments so it can be cancelled promptly by
+        ``close()``.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._fsync_interval)
+                if self._write_buffer:
+                    async with self._lock:
+                        await self._flush_write_buffer()
+        except asyncio.CancelledError:
+            # Expected during close() — suppress gracefully.
+            return
 
     async def _persist_pending(self) -> None:
         """
         Atomically persist all pending messages to queue file.
 
-        Uses atomic write pattern: writes to temp file first, then
-        replaces the target file to prevent corruption.
+        Flushes any buffered writes first, then uses atomic write
+        pattern: writes to temp file first, then replaces the target
+        file to prevent corruption.
 
         Side Effects:
+            - Flushes write buffer
             - Creates/overwrites .data/message_queue.jsonl
             - Creates temporary .data/message_queue.tmp during write
         """
+        # Drain buffer before full rewrite — buffered lines would be
+        # overwritten by the atomic write otherwise.
+        await self._flush_write_buffer()
+
         temp_file = self._queue_file.with_suffix(".tmp")
 
         # Snapshot pending messages to avoid holding lock during I/O

@@ -517,10 +517,10 @@ class TestApplicationRunSchedulerWiring:
 
         # Extract the on_trigger callback and invoke it
         on_trigger = mock_scheduler.set_on_trigger.call_args[0][0]
-        await on_trigger("chat-1", "Summarize today")
+        await on_trigger("chat-1", "Summarize today", None)
 
         mock_components.bot.process_scheduled.assert_awaited_once_with(
-            "chat-1", "Summarize today", channel=mock_channel
+            "chat-1", "Summarize today", channel=mock_channel, prompt_hmac=None
         )
 
 

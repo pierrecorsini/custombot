@@ -16,6 +16,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from src.constants import MAX_LRU_CACHE_SIZE
+from src.security import PathSecurityError, is_path_in_workspace
 from src.utils import JSONDecodeError, json_loads
 from src.utils.path import sanitize_path_component
 
@@ -54,7 +55,20 @@ class TopicCache:
 
     def _summary_path(self, chat_id: str) -> Path:
         safe = sanitize_path_component(chat_id)
-        return self._root / "whatsapp_data" / safe / SUMMARY_FILENAME
+        path = self._root / "whatsapp_data" / safe / SUMMARY_FILENAME
+        self._validate_path(path, chat_id)
+        return path
+
+    def _validate_path(self, path: Path, chat_id: str) -> None:
+        """Ensure resolved path stays within the whatsapp_data workspace."""
+        workspace_data = self._root / "whatsapp_data"
+        if not is_path_in_workspace(workspace_data, path.resolve()):
+            log.warning("Path traversal blocked for chat_id=%s", chat_id)
+            raise PathSecurityError(
+                f"Workspace escape blocked for chat_id={chat_id!r}",
+                path=str(path),
+                reason="path_traversal",
+            )
 
     def _ensure_dir(self, chat_id: str) -> Path:
         d = self._summary_path(chat_id).parent

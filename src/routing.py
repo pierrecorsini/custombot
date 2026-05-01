@@ -7,6 +7,10 @@ routing rules embedded as YAML frontmatter in .md instruction files.
 The engine scans ``workspace/instructions/*.md``, parses the ``routing``
 key from each file's frontmatter, and builds an in-memory rule table.
 Messages are matched against rules in priority order (lower = first).
+
+File-change detection uses OS-native watching (watchdog / inotify /
+ReadDirectoryChanges) when available, with automatic fallback to
+debounced mtime polling.
 """
 
 from __future__ import annotations
@@ -27,6 +31,16 @@ from src.constants import (
 )
 from src.utils import BoundedOrderedDict
 from src.utils.frontmatter import extract_routing_rules, parse_file
+
+# Optional watchdog import — graceful degradation when not installed.
+_HAS_WATCHDOG = False
+try:
+    from watchdog.events import FileSystemEventHandler, FileMovedEvent
+    from watchdog.observers import Observer
+
+    _HAS_WATCHDOG = True
+except ImportError:
+    pass
 
 log = logging.getLogger(__name__)
 
@@ -155,20 +169,18 @@ class RoutingRule:
     toMe: Optional[bool] = None
     skillExecVerbose: str = ""
     showErrors: bool = True
-    # Pre-compiled regex patterns (computed once at construction)
+    # Lazily-compiled regex patterns (populated on first match attempt)
     _compiled_sender: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
     _compiled_recipient: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
     _compiled_channel: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
     _compiled_content: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
     # Pre-computed flag: True when all four match patterns are "*"
     _is_wildcard: bool = field(default=False, repr=False, compare=False)
+    # Tracks whether regex patterns have been compiled yet
+    _compiled: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        # frozen=True requires object.__setattr__ to modify fields
-        object.__setattr__(self, "_compiled_sender", _compile_pattern(self.sender))
-        object.__setattr__(self, "_compiled_recipient", _compile_pattern(self.recipient))
-        object.__setattr__(self, "_compiled_channel", _compile_pattern(self.channel))
-        object.__setattr__(self, "_compiled_content", _compile_pattern(self.content_regex))
+        # Only compute cheap _is_wildcard flag; defer regex compilation to first match
         object.__setattr__(
             self,
             "_is_wildcard",
@@ -177,6 +189,20 @@ class RoutingRule:
             and self.channel == "*"
             and self.content_regex == "*",
         )
+
+    def _ensure_compiled(self) -> None:
+        """Compile regex patterns on first match attempt (lazy initialization).
+
+        Safe for concurrent use: ``_compile_pattern`` is deterministic, so
+        overlapping calls produce identical results (idempotent writes).
+        """
+        if self._compiled:
+            return
+        object.__setattr__(self, "_compiled_sender", _compile_pattern(self.sender))
+        object.__setattr__(self, "_compiled_recipient", _compile_pattern(self.recipient))
+        object.__setattr__(self, "_compiled_channel", _compile_pattern(self.channel))
+        object.__setattr__(self, "_compiled_content", _compile_pattern(self.content_regex))
+        object.__setattr__(self, "_compiled", True)
 
     def __repr__(self) -> str:
         regex_preview = (
@@ -223,19 +249,29 @@ class RoutingEngine:
     rules into memory and evaluates them in priority order.
 
     The engine auto-reloads rules when instruction files change on disk.
-    A debounced mtime check runs before each match, so explicit
-    ``refresh_rules()`` calls are only needed for forced reloads.
+    When *watchdog* is available (default), an OS-native file watcher
+    provides instant change detection with zero polling overhead.
+    When watchdog is not installed, a debounced mtime check runs before
+    each match as a fallback.
 
     The engine no longer depends on the Database for rule storage.
     Instead, it scans the instructions directory directly.
     """
 
-    def __init__(self, instructions_dir: str | Path) -> None:
+    def __init__(
+        self,
+        instructions_dir: str | Path,
+        *,
+        use_watchdog: bool = True,
+    ) -> None:
         """
         Initialize the routing engine.
 
         Args:
             instructions_dir: Path to the directory containing .md instruction files.
+            use_watchdog: When True and watchdog is installed, use OS-native file
+                watching for instant change detection. When False (or watchdog is
+                unavailable), fall back to debounced mtime polling.
         """
         self._instructions_dir = Path(instructions_dir)
         self._rules_list: List[RoutingRule] = []
@@ -249,6 +285,55 @@ class RoutingEngine:
             eviction="half",
             ttl=ROUTING_MATCH_CACHE_TTL_SECONDS,
         )
+
+        # Watchdog-based file watching
+        self._use_watchdog: bool = use_watchdog and _HAS_WATCHDOG
+        self._dirty: bool = False
+        self._observer: Optional[Observer] = None  # type: ignore[name-defined]
+
+    # ── Watchdog file-watching helpers ─────────────────────────────────────
+
+    def _mark_dirty(self) -> None:
+        """Mark instruction files as changed (called from watchdog observer thread)."""
+        self._dirty = True
+
+    def _start_watcher(self) -> None:
+        """Start the OS-native file watcher for the instructions directory."""
+        if not self._use_watchdog or self._observer is not None:
+            return
+        if not self._instructions_dir.is_dir():
+            return
+
+        try:
+            handler = _RoutingFileEventHandler(self)
+            observer = Observer()  # type: ignore[name-defined]
+            observer.schedule(handler, str(self._instructions_dir), recursive=False)
+            observer.daemon = True
+            observer.start()
+            self._observer = observer
+            log.debug("Watchdog observer started for %s", self._instructions_dir)
+        except Exception as exc:
+            log.warning(
+                "Failed to start watchdog observer for %s, falling back to polling: %s",
+                self._instructions_dir,
+                exc,
+            )
+            self._observer = None
+            self._use_watchdog = False
+
+    def _stop_watcher(self) -> None:
+        """Stop the file watcher if running."""
+        if self._observer is not None:
+            try:
+                self._observer.stop()
+                self._observer.join(timeout=2.0)
+            except Exception:
+                pass
+            self._observer = None
+
+    def close(self) -> None:
+        """Stop the file watcher and release resources."""
+        self._stop_watcher()
 
     @property
     def _rules(self) -> List[RoutingRule]:
@@ -265,6 +350,11 @@ class RoutingEngine:
     def rules(self) -> List[RoutingRule]:
         """Read-only access to loaded routing rules."""
         return self._rules_list
+
+    @property
+    def has_rules(self) -> bool:
+        """Whether any routing rules are currently loaded."""
+        return len(self._rules_list) > 0
 
     @property
     def instructions_dir(self) -> Path:
@@ -293,7 +383,19 @@ class RoutingEngine:
         return mtimes
 
     def _is_stale(self) -> bool:
-        """Check whether instruction files have changed since last load (debounced)."""
+        """Check whether instruction files have changed since last load.
+
+        When watchdog is active, returns the ``_dirty`` flag set by the
+        OS-native file watcher — instant check with zero I/O overhead.
+
+        When watchdog is unavailable, falls back to debounced mtime
+        polling (``os.scandir`` + ``stat``).
+        """
+        if self._use_watchdog:
+            dirty = self._dirty
+            self._dirty = False
+            return dirty
+        # Fallback: debounced mtime polling
         now = time.monotonic()
         if now - self._last_stale_check < ROUTING_WATCH_DEBOUNCE_SECONDS:
             return False
@@ -343,11 +445,25 @@ class RoutingEngine:
         self._rules = rules
         self._file_mtimes = self._scan_file_mtimes()
 
-        log.info(
-            "Loaded %d routing rule(s) from %s",
-            len(rules),
-            self._instructions_dir,
-        )
+        # Reset dirty flag after loading fresh state
+        self._dirty = False
+
+        # Start OS-native file watcher if not already running
+        self._start_watcher()
+
+        if len(rules) == 0:
+            log.warning(
+                "No routing rules loaded from %s — messages will not be "
+                "matched. Add at least a 'chat.agent.md' with YAML routing "
+                "frontmatter. See src/templates/instructions/ for examples.",
+                self._instructions_dir,
+            )
+        else:
+            log.info(
+                "Loaded %d routing rule(s) from %s",
+                len(rules),
+                self._instructions_dir,
+            )
 
     def refresh_rules(self) -> None:
         """
@@ -420,6 +536,7 @@ class RoutingEngine:
             # Wildcard-only rules skip all regex/exact matching — fromMe/toMe
             # (checked above) are the only discriminators.
             if not rule._is_wildcard:
+                rule._ensure_compiled()
                 if not _match_compiled(rule._compiled_sender, rule.sender, ctx.sender_id):
                     continue
 
@@ -439,3 +556,41 @@ class RoutingEngine:
         result = (None, None)
         self._match_cache[cache_key] = result
         return result
+
+
+# ── Watchdog event handler ─────────────────────────────────────────────────
+
+
+class _RoutingFileEventHandler(FileSystemEventHandler):  # type: ignore[name-defined]
+    """Watchdog handler that marks the engine dirty when .md files change."""
+
+    def __init__(self, engine: RoutingEngine) -> None:
+        self._engine = engine
+
+    def on_modified(self, event: Any) -> None:
+        if event.is_directory:
+            return
+        if event.src_path.endswith(".md"):
+            self._engine._mark_dirty()
+
+    def on_created(self, event: Any) -> None:
+        if event.is_directory:
+            return
+        if event.src_path.endswith(".md"):
+            self._engine._mark_dirty()
+
+    def on_deleted(self, event: Any) -> None:
+        if event.is_directory:
+            return
+        if event.src_path.endswith(".md"):
+            self._engine._mark_dirty()
+
+    def on_moved(self, event: Any) -> None:
+        if event.is_directory:
+            return
+        # Check both source and destination for .md extension
+        if isinstance(event, FileMovedEvent):  # type: ignore[name-defined]
+            if event.src_path.endswith(".md") or event.dest_path.endswith(".md"):
+                self._engine._mark_dirty()
+        elif event.src_path.endswith(".md"):
+            self._engine._mark_dirty()

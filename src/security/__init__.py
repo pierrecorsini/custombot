@@ -1,9 +1,9 @@
 """
 src/security/__init__.py — Security utilities for workspace confinement.
 
-Provides path validation, command sanitization, and prompt injection defense
-to ensure all file operations remain within the designated workspace directory
-and user input is safely handled.
+Provides path validation, command sanitization, prompt injection defense,
+and payload signing to ensure all file operations remain within the
+designated workspace directory and user input is safely handled.
 """
 
 from src.security.audit import audit_log
@@ -21,6 +21,12 @@ from src.security.prompt_injection import (
     filter_response_content,
     sanitize_user_input,
 )
+from src.security.signing import (
+    IntegrityError,
+    get_scheduler_secret,
+    sign_payload,
+    verify_payload,
+)
 
 __all__ = [
     "audit_log",
@@ -34,4 +40,8 @@ __all__ = [
     "filter_response_content",
     "InjectionDetectionResult",
     "ContentFilterResult",
+    "IntegrityError",
+    "get_scheduler_secret",
+    "sign_payload",
+    "verify_payload",
 ]

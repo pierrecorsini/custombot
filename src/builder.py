@@ -233,12 +233,33 @@ async def _step_memory(ctx: BuilderContext) -> str | None:
 
 async def _step_vector_memory(ctx: BuilderContext) -> str | None:
     """Create VectorMemory with graceful degradation on failure."""
+    import httpx
+    from openai import AsyncOpenAI
     from src.vector_memory import VectorMemory
 
     try:
+        embed_cfg = ctx.config.llm
+        embed_base_url = embed_cfg.embedding_base_url or embed_cfg.base_url
+        embed_api_key = embed_cfg.embedding_api_key or embed_cfg.api_key
+
+        if embed_cfg.embedding_base_url:
+            embed_http = httpx.AsyncClient(
+                limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
+                timeout=httpx.Timeout(timeout=30.0, connect=10.0),
+            )
+            embed_client = AsyncOpenAI(
+                api_key=embed_api_key or "not-configured",
+                base_url=embed_base_url,
+                http_client=embed_http,
+            )
+            embed_source = f"dedicated ({embed_cfg.embedding_base_url})"
+        else:
+            embed_client = ctx.llm.openai_client  # type: ignore[union-attr]
+            embed_source = "shared with LLM"
+
         vm = VectorMemory(
             db_path=str(ctx.workspace / ".data" / "vector_memory.db"),
-            openai_client=ctx.llm.openai_client,  # type: ignore[union-attr]
+            openai_client=embed_client,
             embedding_model=ctx.config.llm.embedding_model,
             embedding_dimensions=ctx.config.llm.embedding_dimensions,
         )
@@ -259,7 +280,7 @@ async def _step_vector_memory(ctx: BuilderContext) -> str | None:
         ctx.vector_memory = vm
         # Wire vector memory into DB for embedding compression summaries
         ctx.db.set_vector_memory(vm)  # type: ignore[union-attr]
-        return f"model={ctx.config.llm.embedding_model}, {probe_msg}"
+        return f"model={ctx.config.llm.embedding_model}, {probe_msg} [{embed_source}]"
     except Exception as exc:
         log.warning(
             "Vector Memory initialization failed — running in degraded mode "
@@ -308,6 +329,26 @@ async def _step_routing(ctx: BuilderContext) -> str | None:
     # Create shared ProjectContextLoader and InstructionLoader
     ctx.project_ctx = ProjectContextLoader(ctx.project_store)  # type: ignore[arg-type]
     ctx.instruction_loader = InstructionLoader(instructions_dir)
+
+    if len(routing.rules) == 0:
+        if not instructions_dir.is_dir():
+            log.warning(
+                "Instructions directory %s does not exist — "
+                "no routing rules loaded. Messages will be ignored "
+                "until rules are added. Create the directory and "
+                "add at least a default 'chat.agent.md' with routing frontmatter. "
+                "See src/templates/instructions/ for examples.",
+                instructions_dir,
+            )
+        else:
+            log.warning(
+                "No routing rules loaded from %s — "
+                "messages will be ignored until rules are added. "
+                "Add at least a 'chat.agent.md' with YAML routing frontmatter. "
+                "See src/templates/instructions/ for examples.",
+                instructions_dir,
+            )
+
     return f"rules={len(routing.rules)}"
 
 
@@ -353,6 +394,14 @@ async def _step_bot(ctx: BuilderContext) -> str | None:
         system_prompt_prefix=ctx.config.llm.system_prompt_prefix,
         stream_response=ctx.config.llm.stream_response,
     )
+    from src.utils import LRULockCache
+    from src.constants import EvictionPolicy
+
+    eviction_policy = EvictionPolicy(ctx.config.max_chat_lock_eviction_policy)
+    chat_locks = LRULockCache(
+        max_size=ctx.config.max_chat_lock_cache_size,
+        eviction_policy=eviction_policy,
+    )
     bot = Bot(
         config=bot_config,
         db=ctx.db,  # type: ignore[arg-type]
@@ -367,6 +416,7 @@ async def _step_bot(ctx: BuilderContext) -> str | None:
         session_metrics=ctx.session_metrics,
         instruction_loader=ctx.instruction_loader,  # type: ignore[arg-type]
         dedup=ctx.dedup,  # type: ignore[arg-type]
+        chat_locks=chat_locks,
     )
     ctx.bot = bot
     return "orchestrator initialized"

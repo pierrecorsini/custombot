@@ -15,7 +15,8 @@ import logging
 import socket
 import threading
 import time
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 from src.channels.stealth import (
     cooldown_remaining,
@@ -122,7 +123,7 @@ def _parse_jid(chat_id: str) -> tuple[str, str]:
     return chat_id, "s.whatsapp.net"
 
 
-def _extract_message(ev) -> Optional[dict]:
+def _extract_message(ev: Any) -> Optional[dict[str, Any]]:
     """Extract a normalized message dict from a neonize MessageEv."""
     try:
         info = ev.Info
@@ -226,12 +227,12 @@ class NeonizeBackend:
 
     def __init__(self, cfg: WhatsAppConfig) -> None:
         self._db_path = cfg.neonize.db_path
-        self._client = None
+        self._client: Any = None
         self._connected = False
         self._connected_at: float = 0.0
         self._ready_event = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._message_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._message_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._connect_thread: Optional[threading.Thread] = None
         # Network outage tracking
         self._disconnect_time: float = 0.0
@@ -247,7 +248,8 @@ class NeonizeBackend:
         if self._client is None:
             return False
         try:
-            return self._client.is_connected
+            connected: bool = bool(self._client.is_connected)
+            return connected
         except Exception as e:
             log.debug("is_connected check failed: %s", e)
             return self._connected
@@ -295,8 +297,8 @@ class NeonizeBackend:
 
         self._client = NewClient(self._db_path, props=props)
 
-        @self._client.event(ConnectedEv)
-        def _on_connected(_, __):
+        @self._client.event(ConnectedEv)  # type: ignore[untyped-decorator]
+        def _on_connected(_: Any, __: Any) -> None:
             self._connected = True
             self._connected_at = time.time()
             self._disconnect_time = 0.0
@@ -304,8 +306,8 @@ class NeonizeBackend:
             self._ready_event.set()
             log.info("WhatsApp connected")
 
-        @self._client.event(MessageEv)
-        def _on_message(client, ev):
+        @self._client.event(MessageEv)  # type: ignore[untyped-decorator]
+        def _on_message(client: Any, ev: Any) -> None:
             msg = _extract_message(ev)
             if msg is None or self._loop is None:
                 return
@@ -318,15 +320,15 @@ class NeonizeBackend:
                 msg["is_historical"] = False
             asyncio.run_coroutine_threadsafe(self._message_queue.put(msg), self._loop)
 
-        @self._client.event(DisconnectedEv)
-        def _on_disconnect(_, __):
+        @self._client.event(DisconnectedEv)  # type: ignore[untyped-decorator]
+        def _on_disconnect(_: Any, __: Any) -> None:
             self._connected = False
             if self._disconnect_time == 0.0:
                 self._disconnect_time = time.time()
             log.warning("WhatsApp disconnected")
 
-        @self._client.event(LoggedOutEv)
-        def _on_logged_out(_, __):
+        @self._client.event(LoggedOutEv)  # type: ignore[untyped-decorator]
+        def _on_logged_out(_: Any, __: Any) -> None:
             self._connected = False
             log.warning("WhatsApp logged out — need re-pair")
 
@@ -448,7 +450,7 @@ class NeonizeBackend:
         except Exception as e:
             log.debug("Failed to set typing presence: %s", e)
 
-    async def poll_message(self) -> Optional[dict]:
+    async def poll_message(self) -> Optional[dict[str, Any]]:
         """Wait for next message from the queue (async, with timeout)."""
         try:
             return await asyncio.wait_for(self._message_queue.get(), timeout=1.0)
@@ -549,7 +551,7 @@ class NeonizeBackend:
 
         log.info("WhatsApp reconnected successfully")
 
-    async def send_audio(self, chat_id: str, file_path: str, ptt: bool = False):
+    async def send_audio(self, chat_id: str, file_path: str, ptt: bool = False) -> Any:
         """Send an audio file via WhatsApp.
 
         Args:
