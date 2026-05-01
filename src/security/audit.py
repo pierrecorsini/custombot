@@ -107,8 +107,8 @@ class SkillAuditLogger(ThreadLockMixin):
 
     @staticmethod
     def hash_args(raw_args: str) -> str:
-        """Return a truncated SHA-256 hex digest of *raw_args*."""
-        return hashlib.sha256(raw_args.encode("utf-8")).hexdigest()[:16]
+        """Return a truncated SHA-256 hex digest of *raw_args* (128 bits)."""
+        return hashlib.sha256(raw_args.encode("utf-8")).hexdigest()[:32]
 
     # ── rotation ─────────────────────────────────────────────────────────
 
