@@ -5,6 +5,8 @@ Split into focused modules:
 - checks: Individual health check functions (database, WhatsApp, LLM)
 - server: HTTP server with /health endpoint
 - models: Data classes (HealthStatus, ComponentHealth, HealthReport)
+- prometheus: Prometheus text exposition format renderer
+- middleware: HTTP middleware (rate limiting, HMAC auth, request size limits)
 """
 
 from src.health.checks import (
