@@ -714,37 +714,37 @@ class TestBackupMemoryFile:
     """Tests for backup_memory_file."""
 
     def test_returns_none_for_nonexistent(self, mem: Memory):
-        result = mem.backup_memory_file("no-such-chat")
+        result = mem._backup_memory_file_sync("no-such-chat")
         assert result is None
 
     def test_creates_backup_file(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "important data")
-        backup_path = mem.backup_memory_file("chat1")
+        backup_path = mem._backup_memory_file_sync("chat1")
         assert backup_path is not None
         assert Path(backup_path).exists()
         assert Path(backup_path).read_text(encoding="utf-8") == "important data"
 
     def test_backup_file_has_bak_extension(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "data")
-        backup_path = mem.backup_memory_file("chat1")
+        backup_path = mem._backup_memory_file_sync("chat1")
         assert backup_path is not None
         assert backup_path.endswith(".md.bak")
 
     def test_backup_file_in_backups_directory(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "data")
-        backup_path = mem.backup_memory_file("chat1")
+        backup_path = mem._backup_memory_file_sync("chat1")
         assert backup_path is not None
         assert BACKUP_DIR in backup_path
 
     def test_backup_file_name_contains_safe_chat_id(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat@1", "data")
-        backup_path = mem.backup_memory_file("chat@1")
+        backup_path = mem._backup_memory_file_sync("chat@1")
         assert backup_path is not None
         assert "chat_at_1" in Path(backup_path).name
 
     def test_backup_file_has_timestamp(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "data")
-        backup_path = mem.backup_memory_file("chat1")
+        backup_path = mem._backup_memory_file_sync("chat1")
         assert backup_path is not None
         # Should contain a YYYYMMDD_HHMMSS timestamp
         name = Path(backup_path).stem  # e.g. "chat1_20260410_143000.md"
@@ -759,10 +759,10 @@ class TestBackupMemoryFile:
         (timestamp may be the same second, so names could collide — but copy2
         would overwrite). Verify at least one backup exists."""
         _write_memory_raw(workspace, "chat1", "data")
-        b1 = mem.backup_memory_file("chat1")
+        b1 = mem._backup_memory_file_sync("chat1")
         # Small sleep to ensure different timestamp
         time.sleep(1.1)
-        b2 = mem.backup_memory_file("chat1")
+        b2 = mem._backup_memory_file_sync("chat1")
         assert b1 is not None
         assert b2 is not None
 
@@ -777,7 +777,7 @@ class TestRepairMemoryFile:
 
     def test_no_repair_when_not_corrupted(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "clean data")
-        result = mem.repair_memory_file("chat1")
+        result = mem._repair_memory_file_sync("chat1")
         assert result.is_corrupted is False
         assert result.repaired is False
         # File should still have content
@@ -787,7 +787,7 @@ class TestRepairMemoryFile:
         _write_memory_raw(workspace, "chat1", "corrupted")
         _checksum_path(workspace, "chat1").write_text("wrong_checksum", encoding="utf-8")
 
-        result = mem.repair_memory_file("chat1")
+        result = mem._repair_memory_file_sync("chat1")
         assert result.repaired is True
         # File should be cleared
         assert _memory_path(workspace, "chat1").read_text() == ""
@@ -796,14 +796,14 @@ class TestRepairMemoryFile:
         _write_memory_raw(workspace, "chat1", "corrupted")
         _checksum_path(workspace, "chat1").write_text("wrong", encoding="utf-8")
 
-        mem.repair_memory_file("chat1")
+        mem._repair_memory_file_sync("chat1")
         assert not _checksum_path(workspace, "chat1").exists()
 
     def test_creates_backup_before_repair(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "corrupted data")
         _checksum_path(workspace, "chat1").write_text("bad", encoding="utf-8")
 
-        result = mem.repair_memory_file("chat1", backup=True)
+        result = mem._repair_memory_file_sync("chat1", backup=True)
         assert result.backup_path is not None
         assert Path(result.backup_path).exists()
         assert Path(result.backup_path).read_text() == "corrupted data"
@@ -812,11 +812,11 @@ class TestRepairMemoryFile:
         _write_memory_raw(workspace, "chat1", "corrupted data")
         _checksum_path(workspace, "chat1").write_text("bad", encoding="utf-8")
 
-        result = mem.repair_memory_file("chat1", backup=False)
+        result = mem._repair_memory_file_sync("chat1", backup=False)
         assert result.backup_path is None
 
     def test_no_repair_for_missing_file(self, mem: Memory):
-        result = mem.repair_memory_file("no-such-chat")
+        result = mem._repair_memory_file_sync("no-such-chat")
         assert result.is_corrupted is False
         assert result.repaired is False
 

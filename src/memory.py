@@ -116,6 +116,7 @@ def _track_cache_event(hit: bool) -> None:
             "Failed to track memory cache %s event",
             "hit" if hit else "miss",
             logger=log,
+            exc_info=True,
         )
 
 
@@ -375,7 +376,7 @@ class Memory:
 
         return result
 
-    def backup_memory_file(self, chat_id: str) -> Optional[str]:
+    def _backup_memory_file_sync(self, chat_id: str) -> Optional[str]:
         """
         Create a backup of a chat's MEMORY.md file.
 
@@ -406,7 +407,7 @@ class Memory:
             return None
 
     async def abackup_memory_file(self, chat_id: str) -> Optional[str]:
-        """Async counterpart of backup_memory_file — offloads I/O to a thread."""
+        """Async counterpart of _backup_memory_file_sync — offloads I/O to a thread."""
         path = self._chat_dir(chat_id) / MEMORY_FILENAME
         if not path.exists():
             return None
@@ -426,7 +427,7 @@ class Memory:
             log.error("Failed to create memory backup: %s", exc)
             return None
 
-    def repair_memory_file(self, chat_id: str, backup: bool = True) -> MemoryCorruptionResult:
+    def _repair_memory_file_sync(self, chat_id: str, backup: bool = True) -> MemoryCorruptionResult:
         """
         Attempt to repair a corrupted MEMORY.md file.
 
@@ -446,7 +447,7 @@ class Memory:
 
         # Create backup if requested
         if backup:
-            result.backup_path = self.backup_memory_file(chat_id)
+            result.backup_path = self._backup_memory_file_sync(chat_id)
 
         # For memory files, we clear the corrupted content
         # The LLM will regenerate it on next interaction
@@ -473,7 +474,7 @@ class Memory:
     async def arepair_memory_file(
         self, chat_id: str, backup: bool = True,
     ) -> MemoryCorruptionResult:
-        """Async counterpart of repair_memory_file — offloads I/O to a thread."""
+        """Async counterpart of _repair_memory_file_sync — offloads I/O to a thread."""
         result = await asyncio.to_thread(self.detect_memory_corruption, chat_id)
 
         if not result.is_corrupted:
@@ -511,7 +512,7 @@ class Memory:
         Returns:
             Memory content or None if corrupted/missing
         """
-        corruption = self.detect_memory_corruption(chat_id)
+        corruption = await asyncio.to_thread(self.detect_memory_corruption, chat_id)
 
         if corruption.is_corrupted:
             log.warning(
@@ -542,6 +543,7 @@ class Memory:
         checksum_path = self._get_checksum_file(chat_id)
         await asyncio.to_thread(checksum_path.write_text, checksum, encoding="utf-8")
 
+        self._memory_cache.invalidate(chat_id)
         log.debug("Memory updated with checksum for chat %s", chat_id)
 
     async def read_agents_md(self, chat_id: str) -> str:

@@ -61,6 +61,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         openai_client: AsyncOpenAI,
         embedding_model: str = "text-embedding-3-small",
         embedding_dimensions: int = 1536,
+        embed_cache_size: int = 256,
     ) -> None:
         self._db_path = Path(db_path)
         self._write_lock = ThreadLock()
@@ -71,7 +72,8 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         self._embedding_model = embedding_model
         self._dimensions = embedding_dimensions
         # LRU cache for embeddings — avoids redundant API calls for identical text
-        self._embed_cache: BoundedOrderedDict[str, list[float]] = BoundedOrderedDict(max_size=256, eviction="half")
+        self._embed_cache_size = embed_cache_size
+        self._embed_cache: BoundedOrderedDict[str, list[float]] = BoundedOrderedDict(max_size=embed_cache_size, eviction="half")
         # In-flight deduplication: tracks pending embedding requests so
         # concurrent calls for the same text share one API call
         self._inflight: dict[str, asyncio.Future[list[float]]] = {}
@@ -132,7 +134,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
     def close(self) -> None:
         """Release all resources: embed cache, in-flight futures, read pool, and DB connection."""
         with self._cache_lock:
-            self._embed_cache = BoundedOrderedDict(max_size=256, eviction="half")
+            self._embed_cache = BoundedOrderedDict(max_size=self._embed_cache_size, eviction="half")
         # Cancel pending batch flush
         if self._flush_handle is not None:
             self._flush_handle.cancel()

@@ -291,7 +291,6 @@ class MessageQueue(AsyncLockMixin):
             self._flush_task = None
 
         async with self._lock:
-            await self._flush_write_buffer()
             await self._persist_pending()
 
         self._initialized = False

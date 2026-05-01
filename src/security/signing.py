@@ -37,6 +37,14 @@ log = logging.getLogger(__name__)
 SCHEDULER_HMAC_SECRET_ENV: Final = "SCHEDULER_HMAC_SECRET"
 
 
+class _Sentinel:
+    """Sentinel to distinguish 'not yet read' from 'cached None'."""
+
+
+_SENTINEL = _Sentinel()
+_cached_secret: str | None | _Sentinel = _SENTINEL
+
+
 class IntegrityError(CustomBotException):
     """Raised when payload HMAC verification fails."""
 
@@ -44,12 +52,17 @@ class IntegrityError(CustomBotException):
 
 
 def get_scheduler_secret() -> str | None:
-    """Load the optional HMAC secret from the environment.
+    """Load the optional HMAC secret from the environment (cached).
 
     Returns ``None`` when signing is disabled (variable unset or empty).
+    The value is read from ``os.environ`` once and cached at module level
+    for the lifetime of the process.
     """
-    secret = os.environ.get(SCHEDULER_HMAC_SECRET_ENV, "").strip()
-    return secret if secret else None
+    global _cached_secret
+    if isinstance(_cached_secret, _Sentinel):
+        secret = os.environ.get(SCHEDULER_HMAC_SECRET_ENV, "").strip()
+        _cached_secret = secret if secret else None
+    return _cached_secret  # type: ignore[return-value]
 
 
 def sign_payload(secret: str, payload: bytes) -> str:

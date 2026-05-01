@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from src.constants import OUTBOUND_DEDUP_MAX_SIZE, OUTBOUND_DEDUP_TTL_SECONDS
@@ -141,10 +141,10 @@ class DeduplicationService:
 
     @property
     def stats(self) -> DedupStats:
-        """Return a snapshot of dedup counters."""
-        return DedupStats(
-            inbound_hits=self._stats.inbound_hits,
-            inbound_misses=self._stats.inbound_misses,
-            outbound_hits=self._stats.outbound_hits,
-            outbound_misses=self._stats.outbound_misses,
-        )
+        """Return a lightweight copy of dedup counters.
+
+        Uses ``dataclasses.replace`` which copies only the four integer
+        fields — cheaper than the previous manual construction and
+        avoids sharing a mutable reference with callers.
+        """
+        return replace(self._stats)

@@ -389,7 +389,7 @@ class TaskScheduler(BaseBackgroundService):
             self._utc_offset_updated_at = now
         return self._cached_utc_offset
 
-    def _is_due(self, task: dict[str, Any]) -> bool:
+    def _is_due(self, task: dict[str, Any], now: datetime | None = None) -> bool:
         """Check if a task is due to run now.
 
         Uses a tolerance window (1.5 × TICK_SECONDS) instead of an exact
@@ -404,7 +404,7 @@ class TaskScheduler(BaseBackgroundService):
         stype = schedule.get("type", "")
         last_run = task.get("last_run")
 
-        now = _now()
+        now = now or _now()
         local_offset = self._get_cached_utc_offset()
         due_window = TICK_SECONDS * 1.5
 
@@ -746,10 +746,11 @@ class TaskScheduler(BaseBackgroundService):
             tick_had_tasks = False
 
             try:
+                now = _now()
                 due_tasks: list[tuple[str, dict[str, Any]]] = []
                 for chat_id, tasks in list(self._tasks.items()):
                     for task in tasks:
-                        if self._is_due(task):
+                        if self._is_due(task, now):
                             due_tasks.append((chat_id, task))
 
                 if due_tasks:
