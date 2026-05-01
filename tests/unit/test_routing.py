@@ -1437,8 +1437,8 @@ class TestRoutingMatchCache:
         engine.refresh_rules()
         assert len(engine._match_cache) == 0
 
-    def test_cache_key_uses_text_prefix(self):
-        """Cache key only uses first 100 chars of text."""
+    def test_cache_key_uses_full_text_hash(self):
+        """Cache key hashes the full text — different suffixes produce distinct keys."""
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(content_regex="*", instruction="prefix.md")]
 
@@ -1449,8 +1449,8 @@ class TestRoutingMatchCache:
 
         engine.match(msg_a)
         engine.match(msg_b)
-        # Same cache key since first 100 chars match
-        assert len(engine._match_cache) == 1
+        # Different cache keys since full text differs (xxhash produces unique hashes)
+        assert len(engine._match_cache) == 2
 
     def test_cache_key_includes_fromMe_toMe_sender_channel(self):
         """Cache key differentiates on fromMe, toMe, sender, channel, chat_id."""

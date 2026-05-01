@@ -451,7 +451,10 @@ class LLMClient:
                 log.debug("LLM stream completed: finish_reason=%s", acc.finish_reason)
                 return completion
         finally:
-            await acc.best_effort_flush()
+            try:
+                await acc.best_effort_flush()
+            except Exception:
+                pass  # best-effort by definition — never mask the original error
 
     def _track_stream_usage(self, usage_data: Any, chat_id: Optional[str]) -> None:
         """Record token usage from stream summary data."""

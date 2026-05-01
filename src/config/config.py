@@ -776,9 +776,10 @@ def save_config(config: Config, path: Path = CONFIG_PATH) -> None:
     # Ensure parent directory exists
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write to file
+    # Atomic write: temp file → rename prevents corruption on crash
     log.debug("Writing configuration to %s", path)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data_with_schema, fh, indent=2)
+    from src.utils.async_file import sync_atomic_write
+
+    sync_atomic_write(path, json.dumps(data_with_schema, indent=2, ensure_ascii=False))
 
     log.info("Configuration saved successfully to %s", path)

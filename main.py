@@ -226,14 +226,14 @@ def start(ctx, config_path, health_port, log_llm, safe_mode):
             stat_result = config_file.stat()
             # Check if group or others have read permission (Unix)
             if sys.platform != "win32" and (stat_result.st_mode & 0o047):
-                log.warning(
-                    "Config file %s has overly permissive permissions (mode=%o). "
-                    "Consider: chmod 600 %s",
+                log.error(
+                    "SECURITY: Config file %s has overly permissive permissions (mode=%o). "
+                    "Local users can read your API key. Fix: chmod 600 %s",
                     config_path,
                     stat_result.st_mode & 0o777,
                     config_path,
                 )
-                cli_output.dim(
+                cli_output.error(
                     f"  ⚠ Config file is readable by others — run: chmod 600 {config_path}"
                 )
         except OSError:

@@ -390,7 +390,13 @@ class TaskScheduler(BaseBackgroundService):
         return self._cached_utc_offset
 
     def _is_due(self, task: dict[str, Any]) -> bool:
-        """Check if a task is due to run now."""
+        """Check if a task is due to run now.
+
+        Uses a tolerance window (1.5 × TICK_SECONDS) instead of an exact
+        minute match so that tasks are not silently skipped when the
+        scheduler tick overshoots the target minute due to backoff or
+        long-running task execution.
+        """
         if not task.get("enabled", True):
             return False
 
@@ -400,16 +406,17 @@ class TaskScheduler(BaseBackgroundService):
 
         now = _now()
         local_offset = self._get_cached_utc_offset()
+        due_window = TICK_SECONDS * 1.5
 
         if stype == "daily":
             target_hour = schedule.get("hour", 0)
             target_min = schedule.get("minute", 0)
-            # Convert target local time to UTC using minutes to handle fractional offsets
             local_total_min = target_hour * 60 + target_min
             utc_total_min = (local_total_min - int(local_offset * 60)) % (24 * 60)
             utc_hour = utc_total_min // 60
             utc_minute = utc_total_min % 60
-            if now.hour == utc_hour and now.minute == utc_minute:
+            target = now.replace(hour=utc_hour, minute=utc_minute, second=0, microsecond=0)
+            if abs((now - target).total_seconds()) < due_window:
                 if not last_run or not _same_day(last_run, now.isoformat()):
                     return True
 
@@ -429,8 +436,8 @@ class TaskScheduler(BaseBackgroundService):
             utc_total_min = (local_total_min - int(local_offset * 60)) % (24 * 60)
             utc_hour = utc_total_min // 60
             utc_minute = utc_total_min % 60
-            # Python weekday: Mon=0..Sun=6
-            if now.weekday() in weekdays and now.hour == utc_hour and now.minute == utc_minute:
+            target = now.replace(hour=utc_hour, minute=utc_minute, second=0, microsecond=0)
+            if now.weekday() in weekdays and abs((now - target).total_seconds()) < due_window:
                 if not last_run or not _same_day(last_run, now.isoformat()):
                     return True
 

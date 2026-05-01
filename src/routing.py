@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import xxhash
+
 from src.channels.base import ChannelType, IncomingMessage
 from src.constants import (
     ROUTING_MATCH_CACHE_MAX_SIZE,
@@ -492,8 +494,14 @@ class RoutingEngine:
         return instruction
 
     def _cache_key(self, ctx: MatchingContext) -> Tuple:
-        """Build a hashable cache key from message signature attributes."""
-        return (ctx.fromMe, ctx.toMe, ctx.sender_id, ctx.chat_id, ctx.channel_type, ctx.text[:100])
+        """Build a hashable cache key from message signature attributes.
+
+        Uses xxhash over the full text to avoid collisions that occurred
+        with the previous text[:100] truncation (long messages with
+        identical prefixes would map to the same cache entry).
+        """
+        text_hash = xxhash.xxh64(ctx.text.encode("utf-8")).hexdigest()
+        return (ctx.fromMe, ctx.toMe, ctx.sender_id, ctx.chat_id, ctx.channel_type, text_hash)
 
     def match_with_rule(
         self, msg: IncomingMessage

@@ -36,9 +36,6 @@ log = logging.getLogger(__name__)
 # Environment variable name for the scheduler HMAC secret.
 SCHEDULER_HMAC_SECRET_ENV: Final = "SCHEDULER_HMAC_SECRET"
 
-# Fixed padding length for timing-safe comparison (SHA-256 hex = 64 chars).
-_PADDED_LEN: Final = 128
-
 
 class IntegrityError(CustomBotException):
     """Raised when payload HMAC verification fails."""
@@ -73,8 +70,9 @@ def sign_payload(secret: str, payload: bytes) -> str:
 def verify_payload(secret: str, payload: bytes, signature: str) -> bool:
     """Verify an HMAC-SHA256 *signature* over *payload*.
 
-    Uses ``hmac.compare_digest`` with fixed-length padding for
-    timing-safe comparison regardless of input length differences.
+    Uses ``hmac.compare_digest`` for timing-safe comparison.
+    Both the expected and provided signatures are always 64-char hex
+    strings (SHA-256), so no additional padding is needed.
 
     Args:
         secret: UTF-8 secret key.
@@ -86,11 +84,7 @@ def verify_payload(secret: str, payload: bytes, signature: str) -> bool:
     """
     expected = sign_payload(secret, payload)
 
-    # Pad both to the same fixed length for constant-time comparison.
-    expected_padded = expected.ljust(_PADDED_LEN)
-    signature_padded = signature.ljust(_PADDED_LEN)
-
-    if not hmac.compare_digest(expected_padded, signature_padded):
+    if not hmac.compare_digest(expected, signature):
         log.warning("Scheduler HMAC verification failed: invalid signature")
         return False
 
