@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import time as _time
+from datetime import timezone
 
 from src.constants import MAX_LRU_CACHE_SIZE, MTIME_CACHE_MISSING_TTL
 from src.core.errors import NonCriticalCategory, log_noncritical
@@ -391,7 +392,7 @@ class Memory:
         if not path.exists():
             return None
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_dir = self._root / BACKUP_DIR
         backup_dir.mkdir(parents=True, exist_ok=True)
 
@@ -412,7 +413,7 @@ class Memory:
         if not path.exists():
             return None
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_dir = self._root / BACKUP_DIR
         backup_dir.mkdir(parents=True, exist_ok=True)
 
@@ -595,7 +596,7 @@ class Memory:
         d = self._ensure_chat_dir(chat_id)
         recovery_path = d / RECOVERY_LOG_FILENAME
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         entry_lines = [
             f"## Recovery Event - {timestamp}",
