@@ -196,7 +196,7 @@ class SlidingWindowTracker:
             Tuple of (allowed, remaining_if_allowed, retry_after_if_denied)
         """
         if now is None:
-            now = time.time()
+            now = time.monotonic()
 
         with self._lock:
             self._prune_old_entries(now)
@@ -222,14 +222,14 @@ class SlidingWindowTracker:
     def record(self, now: Optional[float] = None) -> None:
         """Record a timestamp after check_only() succeeds (write-only)."""
         if now is None:
-            now = time.time()
+            now = time.monotonic()
         with self._lock:
             self._timestamps.append(now)
 
     def get_current_count(self, now: Optional[float] = None) -> int:
         """Get the current count of operations in the window."""
         if now is None:
-            now = time.time()
+            now = time.monotonic()
 
         with self._lock:
             self._prune_old_entries(now)
@@ -338,7 +338,7 @@ class RateLimiter:
             RateLimitResult with allowed status and details
         """
         if now is None:
-            now = time.time()
+            now = time.monotonic()
 
         is_expensive = self.is_expensive_skill(skill_name)
 
