@@ -28,7 +28,7 @@ msgpack~=1.1.0
 
 # OpenTelemetry tracing (optional — graceful degradation if not installed)
 opentelemetry-api~=1.30.0
-opentelemetry-sdk~=1.30.0
+opentelemetry-sdk>=1.30,<1.42
 
 # File system watching for routing rule auto-reload (inotify/ReadDirectoryChanges)
 watchdog>=4.0.0
