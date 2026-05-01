@@ -263,6 +263,42 @@ _SENSITIVE_FILE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-compiled sanitization patterns (module-level for reuse)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Role injection markers
+_ROLE_INJECTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?i)^system\s*:\s*", re.MULTILINE), "[blocked]: "),
+    (re.compile(r"(?i)^assistant\s*:\s*", re.MULTILINE), "[blocked]: "),
+    (re.compile(r"(?i)^user\s*:\s*", re.MULTILINE), "[blocked]: "),
+]
+
+# System tag patterns
+_SYSTEM_TAG_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?i)<\s*/?system\s*>"), ""),
+    (re.compile(r"(?i)\[/?system\]"), ""),
+]
+
+# Injection phrase replacements
+_INJECTION_REPLACEMENTS_COMPILED: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?i)ignore\s+previous\s+instructions?"), "[injection attempt removed]"),
+    (re.compile(r"(?i)ignore\s+all\s+previous"), "[injection attempt removed]"),
+    (re.compile(r"(?i)forget\s+previous\s+instructions?"), "[injection attempt removed]"),
+    (re.compile(r"(?i)disregard\s+(all\s+)?previous\s+(instructions?|rules?)"), "[injection attempt removed]"),
+    (re.compile(r"(?i)override\s+(your\s+)?instructions?"), "[injection attempt removed]"),
+    (re.compile(r"(?i)you\s+are\s+now\s+(?:a\s+)?(?:DAN|unrestricted)"), "[injection attempt removed]"),
+    (re.compile(r"(?i)jailbreak"), "[blocked keyword]"),
+    (re.compile(r"(?i)prompt\s+injection"), "[blocked keyword]"),
+]
+
+# Strict-mode patterns
+_STRICT_INSTRUCTION_PATTERN = re.compile(
+    r"(?i)^(?:note|important|warning|attention)\s*:\s*", re.MULTILINE
+)
+_STRICT_BLOCK_PATTERN = re.compile(r"(?i)---+\s*(?:system|instructions?)\s*---+")
+
+
 def detect_injection(text: str) -> InjectionDetectionResult:
     """
     Detect prompt injection attempts in user input.
@@ -350,41 +386,22 @@ def sanitize_user_input(text: str, *, strict: bool = False) -> str:
     # Normalize Unicode to catch confusable character bypasses
     result = unicodedata.normalize("NFKC", text)
 
-    # Remove role injection markers
-    result = re.sub(r"(?i)^system\s*:\s*", "[blocked]: ", result, flags=re.MULTILINE)
-    result = re.sub(r"(?i)^assistant\s*:\s*", "[blocked]: ", result, flags=re.MULTILINE)
-    result = re.sub(r"(?i)^user\s*:\s*", "[blocked]: ", result, flags=re.MULTILINE)
+    # Remove role injection markers (pre-compiled patterns)
+    for pattern, replacement in _ROLE_INJECTION_PATTERNS:
+        result = pattern.sub(replacement, result)
 
-    # Remove system tag injections
-    result = re.sub(r"(?i)<\s*/?system\s*>", "", result)
-    result = re.sub(r"(?i)\[/?system\]", "", result)
+    # Remove system tag injections (pre-compiled patterns)
+    for pattern, replacement in _SYSTEM_TAG_PATTERNS:
+        result = pattern.sub(replacement, result)
 
-    # Escape common injection phrases (replace with safe alternatives)
-    injection_replacements = {
-        r"(?i)ignore\s+previous\s+instructions?": "[injection attempt removed]",
-        r"(?i)ignore\s+all\s+previous": "[injection attempt removed]",
-        r"(?i)forget\s+previous\s+instructions?": "[injection attempt removed]",
-        r"(?i)disregard\s+(all\s+)?previous\s+(instructions?|rules?)": "[injection attempt removed]",
-        r"(?i)override\s+(your\s+)?instructions?": "[injection attempt removed]",
-        r"(?i)you\s+are\s+now\s+(?:a\s+)?(?:DAN|unrestricted)": "[injection attempt removed]",
-        r"(?i)jailbreak": "[blocked keyword]",
-        r"(?i)prompt\s+injection": "[blocked keyword]",
-    }
-
-    for pattern, replacement in injection_replacements.items():
-        result = re.sub(pattern, replacement, result)
+    # Escape common injection phrases (pre-compiled patterns)
+    for pattern, replacement in _INJECTION_REPLACEMENTS_COMPILED:
+        result = pattern.sub(replacement, result)
 
     # Strict mode: additional sanitization
     if strict:
-        # Remove any remaining instruction-like patterns
-        result = re.sub(
-            r"(?i)^(?:note|important|warning|attention)\s*:\s*",
-            "",
-            result,
-            flags=re.MULTILINE,
-        )
-        # Remove potential multi-line instruction blocks
-        result = re.sub(r"(?i)---+\s*(?:system|instructions?)\s*---+", "", result)
+        result = _STRICT_INSTRUCTION_PATTERN.sub("", result)
+        result = _STRICT_BLOCK_PATTERN.sub("", result)
 
     return result
 
