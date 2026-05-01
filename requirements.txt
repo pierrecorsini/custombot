@@ -34,4 +34,4 @@ opentelemetry-sdk~=1.30.0
 watchdog>=4.0.0
 
 # Fast non-cryptographic hashing for embedding cache keys
-xxhash~=3.5.0
+xxhash>=3.5,<3.8
