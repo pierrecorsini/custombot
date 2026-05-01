@@ -295,14 +295,9 @@ class LLMClient:
         # Log token usage from response
         if response.usage:
             usage = response.usage
-            if isinstance(usage, dict):
-                prompt_tokens = usage.get("prompt_tokens") or 0
-                completion_tokens = usage.get("completion_tokens") or 0
-                total_tokens = usage.get("total_tokens") or (prompt_tokens + completion_tokens)
-            else:
-                prompt_tokens = usage.prompt_tokens or 0
-                completion_tokens = usage.completion_tokens or 0
-                total_tokens = usage.total_tokens or (prompt_tokens + completion_tokens)
+            prompt_tokens = usage.prompt_tokens or 0
+            completion_tokens = usage.completion_tokens or 0
+            total_tokens = usage.total_tokens or (prompt_tokens + completion_tokens)
 
             if chat_id:
                 self._token_usage.add_for_chat(chat_id, prompt_tokens, completion_tokens)
