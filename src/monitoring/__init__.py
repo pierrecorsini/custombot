@@ -76,21 +76,31 @@ from src.monitoring.tracing import (
     tool_calls_span,
 )
 
-# Performance metrics exports
+# Metrics type exports (data models and statistical helpers)
+from src.monitoring.metrics_types import (
+    ChatConversationDepth,
+    ChatMessageCount,
+    ErrorWindowStats,
+    LatencyHistogram,
+    LatencyStats,
+    OversizedArgsSizeStats,
+    PerformanceSnapshot,
+    SessionMetrics,
+    SkillMetrics,
+    SkillTimeoutRatio,
+    calculate_latency_stats,
+    calculate_timeout_ratio,
+    percentile,
+)
+
+# Performance metrics exports (collector, singleton, health check)
 from src.monitoring.performance import (
     DEFAULT_METRICS_LOG_INTERVAL,
     DEFAULT_MAX_TRACKED_CHATS,
     DEFAULT_TOP_CHATS,
     METRICS_HISTORY_SIZE,
     METRICS_SUMMARY_INTERVAL,
-    ChatConversationDepth,
-    ChatMessageCount,
-    LatencyStats,
     PerformanceMetrics,
-    PerformanceSnapshot,
-    SessionMetrics,
-    SkillMetrics,
-    _calculate_latency_stats,
     check_performance_health,
     get_metrics_collector,
     reset_metrics_collector,
@@ -106,14 +116,22 @@ __all__ = [
     "check_memory_health",
     "DEFAULT_MEMORY_WARNING_THRESHOLD",
     "DEFAULT_MEMORY_CHECK_INTERVAL",
-    # Performance metrics
+    # Metrics types (data models and statistical helpers)
     "ChatConversationDepth",
     "ChatMessageCount",
+    "ErrorWindowStats",
+    "LatencyHistogram",
     "LatencyStats",
+    "OversizedArgsSizeStats",
     "PerformanceSnapshot",
-    "PerformanceMetrics",
     "SessionMetrics",
     "SkillMetrics",
+    "SkillTimeoutRatio",
+    "calculate_latency_stats",
+    "calculate_timeout_ratio",
+    "percentile",
+    # Performance metrics (collector, singleton, health check)
+    "PerformanceMetrics",
     "get_metrics_collector",
     "reset_metrics_collector",
     "check_performance_health",
