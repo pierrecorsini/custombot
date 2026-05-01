@@ -28,6 +28,7 @@ from src.channels.stealth import (
 )
 from src.config import WhatsAppConfig
 from src.ui.cli_output import cli as cli_output
+from src.utils import LRUDict
 from src.utils.retry import BACKOFF_MULTIPLIER, calculate_delay_with_jitter
 
 log = logging.getLogger(__name__)
@@ -240,6 +241,9 @@ class NeonizeBackend:
         self._watchdog_gen: int = 0
         # Reconnection backoff state
         self._reconnect_delay: float = _WATCHDOG_INTERVAL
+        # Bounded LRU cache for resolved JIDs — avoids redundant string
+        # parsing and .chat_id file reads on every send/typing call.
+        self._jid_cache: LRUDict = LRUDict(max_size=500)
         # Rate-limit whatsmeow's internal reconnect-error spam (once per minute)
         logging.getLogger("whatsmeow.Client").addFilter(_RateLimitFilter())
 
@@ -258,6 +262,21 @@ class NeonizeBackend:
     def is_ready(self) -> bool:
         """True once the connection callback has fired (message loop is live)."""
         return self._ready_event.is_set()
+
+    def _resolve_jid(self, chat_id: str) -> Any:
+        """Resolve a chat_id string to a neonize JID object (cached).
+
+        Avoids redundant _parse_jid string parsing and potential .chat_id
+        file reads on every send/typing call by caching resolved JIDs in
+        a bounded LRU dict.  The cache is invalidated on reconnection.
+        """
+        cached = self._jid_cache.get(chat_id)
+        if cached is not None:
+            return cached
+        user, server = _parse_jid(chat_id)
+        jid = _build_jid(user, server)
+        self._jid_cache[chat_id] = jid
+        return jid
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         """Set up event handlers and start connect() in a background thread."""
@@ -389,8 +408,7 @@ class NeonizeBackend:
             await self.set_typing(chat_id, composing=True)
 
         try:
-            user, server = _parse_jid(chat_id)
-            jid = _build_jid(user, server)
+            jid = self._resolve_jid(chat_id)
             result = await asyncio.to_thread(self._client.send_message, jid, text)
             # Log server confirmation to distinguish "queued" from "delivered"
             msg_id = getattr(getattr(result, "key", None), "ID", "?")
@@ -409,7 +427,9 @@ class NeonizeBackend:
                     await self._reconnect()
                     # Wait for background device sync to settle before retrying
                     await asyncio.sleep(5)
-                    jid2 = _build_jid(user, server)
+                    # Invalidate JID cache after reconnection (client changed)
+                    self._jid_cache.pop(chat_id, None)
+                    jid2 = self._resolve_jid(chat_id)
                     result2 = await asyncio.to_thread(self._client.send_message, jid2, text)
                     msg_id2 = getattr(getattr(result2, "key", None), "ID", "?")
                     mark_sent(chat_id)
@@ -435,8 +455,7 @@ class NeonizeBackend:
             return
         from neonize.utils.enum import ChatPresence, ChatPresenceMedia
 
-        user, server = _parse_jid(chat_id)
-        jid = _build_jid(user, server)
+        jid = self._resolve_jid(chat_id)
         state = (
             ChatPresence.CHAT_PRESENCE_COMPOSING if composing else ChatPresence.CHAT_PRESENCE_PAUSED
         )
@@ -564,8 +583,7 @@ class NeonizeBackend:
         """
         if not self.is_connected or self._client is None:
             raise RuntimeError("WhatsApp not connected")
-        user, server = _parse_jid(chat_id)
-        jid = _build_jid(user, server)
+        jid = self._resolve_jid(chat_id)
         return await asyncio.to_thread(self._client.send_audio, jid, file_path, ptt)
 
     async def send_document(
@@ -585,8 +603,7 @@ class NeonizeBackend:
         """
         if not self.is_connected or self._client is None:
             raise RuntimeError("WhatsApp not connected")
-        user, server = _parse_jid(chat_id)
-        jid = _build_jid(user, server)
+        jid = self._resolve_jid(chat_id)
         await asyncio.to_thread(
             self._client.send_document,
             jid,
