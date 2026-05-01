@@ -25,14 +25,18 @@ import shlex
 from pathlib import Path
 from typing import Optional, Tuple
 
+from src.exceptions import CustomBotException
+
 log = logging.getLogger(__name__)
 
 
-class PathSecurityError(Exception):
+class PathSecurityError(CustomBotException):
     """Raised when a path violates workspace confinement rules."""
 
+    default_message = "Path violates workspace confinement rules"
+
     def __init__(self, message: str, path: Optional[str] = None, reason: str = ""):
-        super().__init__(message)
+        super().__init__(message=message)
         self.path = path
         self.reason = reason
 

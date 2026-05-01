@@ -29,6 +29,8 @@ import os
 from pathlib import Path
 from typing import Final
 
+from src.exceptions import CustomBotException
+
 log = logging.getLogger(__name__)
 
 # Environment variable name for the scheduler HMAC secret.
@@ -38,8 +40,10 @@ SCHEDULER_HMAC_SECRET_ENV: Final = "SCHEDULER_HMAC_SECRET"
 _PADDED_LEN: Final = 128
 
 
-class IntegrityError(Exception):
+class IntegrityError(CustomBotException):
     """Raised when payload HMAC verification fails."""
+
+    default_message = "Payload integrity verification failed"
 
 
 def get_scheduler_secret() -> str | None:

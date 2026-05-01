@@ -21,6 +21,8 @@ from __future__ import annotations
 from typing import Any, List, Optional, TypedDict
 from urllib.parse import urlparse
 
+from src.exceptions import ConfigurationError
+
 # Schema version for future compatibility
 SCHEMA_VERSION = "1.0"
 
@@ -542,11 +544,12 @@ def format_validation_errors(errors: List[ValidationError]) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class ConfigValidationError(Exception):
+class ConfigValidationError(ConfigurationError):
     """
     Exception raised when configuration validation fails.
 
     Provides detailed, field-level error information for debugging.
+    Inherits from ConfigurationError for consistent hierarchy.
 
     Attributes:
         errors: List of ValidationError dicts with path, message, value.
@@ -557,7 +560,7 @@ class ConfigValidationError(Exception):
         self.errors = errors
         self.schema_version = schema_version
         self.message = format_validation_errors(errors)
-        super().__init__(self.message)
+        super().__init__(message=self.message)
 
     def __str__(self) -> str:
         return self.message
