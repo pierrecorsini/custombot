@@ -344,22 +344,37 @@ class TaskScheduler(BaseBackgroundService):
         return None
 
     async def load_all(self) -> None:
-        """Load tasks for all chats from workspace asynchronously."""
+        """Load tasks for all chats from workspace concurrently.
+
+        Scans workspace directories for task files and loads them in
+        parallel using asyncio.gather for faster startup with many chats.
+        """
         if not self._workspace or not self._workspace.exists():
             return
+
+        # Collect valid chat directories first (synchronous scan is fast)
+        valid_dirs: list[str] = []
         for chat_dir in self._workspace.iterdir():
-            if chat_dir.is_dir():
-                task_file = chat_dir / SCHEDULER_DIR / TASKS_FILE
-                if task_file.exists():
-                    try:
-                        _validate_chat_id(chat_dir.name)
-                    except ValueError:
-                        log.warning(
-                            "Skipping scheduler tasks for invalid chat_id=%r",
-                            chat_dir.name,
-                        )
-                        continue
-                    await self._load(chat_dir.name)
+            if not chat_dir.is_dir():
+                continue
+            task_file = chat_dir / SCHEDULER_DIR / TASKS_FILE
+            if not task_file.exists():
+                continue
+            try:
+                _validate_chat_id(chat_dir.name)
+            except ValueError:
+                log.warning(
+                    "Skipping scheduler tasks for invalid chat_id=%r",
+                    chat_dir.name,
+                )
+                continue
+            valid_dirs.append(chat_dir.name)
+
+        if not valid_dirs:
+            return
+
+        # Load all chat tasks concurrently
+        await asyncio.gather(*(self._load(chat_id) for chat_id in valid_dirs))
 
     # ── scheduling logic ───────────────────────────────────────────────────
 
