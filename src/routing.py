@@ -421,7 +421,7 @@ class RoutingEngine:
             self._rules = rules
             return
 
-        for md_file in sorted(self._instructions_dir.glob("*.md")):
+        for md_file in sorted(self._instructions_dir.glob("*.md"), key=lambda p: p.name):
             try:
                 parsed = parse_file(md_file)
                 rule_dicts = extract_routing_rules(parsed.metadata)
