@@ -95,7 +95,7 @@ class LLMClient:
         if log_llm:
             from src.logging.llm_logging import LLMLogger
 
-            log_dir = f"{WORKSPACE_DIR}/logs/llm"
+            log_dir = str(Path(WORKSPACE_DIR) / "logs" / "llm")
             self._llm_logger = LLMLogger(log_dir)
             log.info("LLM request/response logging enabled → %s", log_dir)
 
