@@ -394,8 +394,12 @@ class RateLimiter:
         if is_expensive:
             skill_limiter.record(now)
 
+        effective_remaining = (
+            min(chat_remaining, skill_remaining) if is_expensive else chat_remaining
+        )
+
         log.debug(
-            "Rate limit check passed for skill %s in chat %s (chat remaining: %d, skill remaining: %d)",
+            "Rate limit check passed for skill %s in chat %s (chat remaining: %d, skill remaining: %s)",
             skill_name,
             chat_id,
             chat_remaining,
@@ -404,7 +408,7 @@ class RateLimiter:
 
         return RateLimitResult(
             allowed=True,
-            remaining=min(chat_remaining, skill_remaining) if is_expensive else chat_remaining,
+            remaining=effective_remaining,
             reset_at=max(chat_reset_at, skill_reset_at) if is_expensive else chat_reset_at,
             retry_after=0.0,
             limit_type="skill" if is_expensive else "chat",
