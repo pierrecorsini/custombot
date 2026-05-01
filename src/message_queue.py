@@ -233,6 +233,10 @@ class MessageQueue(AsyncLockMixin):
         self._fsync_batch_size: int = QUEUE_FSYNC_BATCH_SIZE
         self._fsync_interval: float = QUEUE_FSYNC_INTERVAL_SECONDS
         self._last_flush_time: float = 0.0
+        # Safety cap: if the write buffer grows beyond this size, force a
+        # flush regardless of batch/interval thresholds.  Prevents unbounded
+        # memory growth when disk writes fail silently.
+        self._write_buffer_max_size: int = QUEUE_FSYNC_BATCH_SIZE * 10
 
         # Background task that periodically flushes the write buffer when
         # the time-interval threshold is reached but no new enqueue calls
@@ -857,14 +861,16 @@ class MessageQueue(AsyncLockMixin):
             await self._persist_pending()
 
     async def _maybe_flush_buffer(self) -> None:
-        """Flush write buffer if batch-size or time-interval threshold is met."""
+        """Flush write buffer if batch-size, time-interval, or max-size threshold is met."""
         now = time.monotonic()
         size_reached = len(self._write_buffer) >= self._fsync_batch_size
         interval_reached = (
             self._write_buffer
             and (now - self._last_flush_time) >= self._fsync_interval
         )
-        if size_reached or interval_reached:
+        # Safety valve: force flush if buffer grew beyond max cap
+        max_reached = len(self._write_buffer) >= self._write_buffer_max_size
+        if size_reached or interval_reached or max_reached:
             await self._flush_write_buffer()
 
     async def _flush_write_buffer(self) -> None:
