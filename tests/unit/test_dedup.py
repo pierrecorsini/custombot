@@ -51,12 +51,12 @@ class TestOutboundKey:
     def test_returns_hex_string(self) -> None:
         key = outbound_key("chat_1", "text")
         assert isinstance(key, str)
-        assert len(key) == 64  # SHA-256 hex digest length
+        assert len(key) == 16  # xxHash xxh64 hex digest length
 
     def test_empty_text(self) -> None:
         """Empty text still produces a valid key."""
         key = outbound_key("chat_1", "")
-        assert len(key) == 64
+        assert len(key) == 16
 
 
 # ===========================================================================
