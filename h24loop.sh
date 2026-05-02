@@ -26,7 +26,7 @@ while true; do
         log "🔍 No pending tasks found. Generating new ones..."
 
         timeout "$TASK_TIMEOUT" opencode run "${OPENCODE_ARGS[@]}" "
-            You are a senior technical lead project owner and CEO. Review the current codebase.
+            You are a senior technical lead project owner, engineer and CEO. Review the current codebase.
             Identify several meaningful improvements (e.g., refactoring, performance optimization, error handling, or test coverage). 
             Append these tasks to PLAN.md using '- [ ] Task description' syntax.
             Do not write any implementation code, ONLY update PLAN.md.
@@ -54,10 +54,13 @@ while true; do
     if (( TASK_COUNTER % 10 == 0 )); then
         log "🧹 10-task milestone! Running context harvest..."
 
-        timeout "$TASK_TIMEOUT" opencode run "${OPENCODE_ARGS[@]}" "/context harvest" || true
-        timeout "$TASK_TIMEOUT" opencode run "${OPENCODE_ARGS[@]}" "/add-context --update" || true
+        timeout "$TASK_TIMEOUT" opencode run "${OPENCODE_ARGS[@]}" "
+            Execute autonomously the following two commands, in this order, without asking for user permission, make the decision yourself and run untill completion:
+            1. /context harvest
+            2. /add-context --update
+        " || true
 
-        log "✨ Context harvested successfully."
+        log "✨ Context updated."
     fi
 
     log "💤 Sleeping ${SLEEP_SECONDS}s before next iteration..."
