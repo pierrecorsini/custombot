@@ -225,6 +225,10 @@ class Memory:
         self._memory_cache = MtimeCache(max_size=MAX_LRU_CACHE_SIZE)
         self._agents_cache = MtimeCache(max_size=MAX_LRU_CACHE_SIZE)
         self._path_cache: LRUDict = LRUDict(max_size=MAX_LRU_CACHE_SIZE)
+        # Bounded set of chat_ids whose directories are known to exist on disk.
+        # Avoids repeated mkdir(parents=True, exist_ok=True) syscalls on the
+        # hot write path.
+        self._known_dirs: LRUDict = LRUDict(max_size=MAX_LRU_CACHE_SIZE)
 
     # ── internal ───────────────────────────────────────────────────────────
 
@@ -243,9 +247,16 @@ class Memory:
         return self._resolve_chat_path(chat_id)
 
     def _ensure_chat_dir(self, chat_id: str) -> Path:
-        """Return the chat directory path, creating it if needed."""
+        """Return the chat directory path, creating it if needed.
+
+        Caches known-existing directories to skip the ``mkdir`` syscall
+        on subsequent calls for the same *chat_id*.
+        """
+        if self._known_dirs.get(chat_id) is not None:
+            return self._resolve_chat_path(chat_id)
         d = self._resolve_chat_path(chat_id)
         d.mkdir(parents=True, exist_ok=True)
+        self._known_dirs[chat_id] = True
         return d
 
     def _validate_path(self, path: Path, chat_id: str) -> None:
@@ -272,6 +283,7 @@ class Memory:
         # Invalidate path cache so ensure_workspace forces a fresh resolve
         # with full validation before creating directories on disk.
         self._path_cache.pop(chat_id, None)
+        self._known_dirs.pop(chat_id, None)
         d = self._ensure_chat_dir(chat_id)
         if self._atomic_seed(d / AGENTS_FILENAME, _DEFAULT_AGENTS_MD):
             self._agents_cache.invalidate(chat_id)

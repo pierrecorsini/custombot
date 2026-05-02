@@ -1386,3 +1386,93 @@ class TestResolveChatPathCaching:
         assert mem._path_cache.get("chat-0000") is not None
         # chat-0001 was the oldest after refresh, so it gets evicted
         assert mem._path_cache.get("chat-0001") is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ensure Chat Dir Caching
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEnsureChatDirCaching:
+    """Verify _ensure_chat_dir() caches known-existing directories.
+
+    Covers:
+      (a) First call creates the directory and caches the chat_id
+      (b) Subsequent calls skip mkdir() (directory is cached)
+      (c) Cache is bounded and evicts oldest entries
+      (d) ensure_workspace() invalidates the known-dirs cache
+    """
+
+    def test_first_call_creates_and_caches(self, mem: Memory):
+        """The first call creates the directory and adds to _known_dirs."""
+        assert mem._known_dirs.get("chat1") is None
+        d = mem._ensure_chat_dir("chat1")
+        assert d.is_dir()
+        assert mem._known_dirs.get("chat1") is True
+
+    def test_subsequent_call_uses_cache(self, mem: Memory):
+        """Subsequent calls return the path without re-invoking mkdir."""
+        first = mem._ensure_chat_dir("chat1")
+        assert mem._known_dirs.get("chat1") is True
+
+        # Replace mkdir with a sentinel that fails if called again
+        mkdir_called = False
+        original_mkdir = first.__class__.mkdir
+
+        def _sentinel(self_inner, *args, **kwargs):
+            nonlocal mkdir_called
+            mkdir_called = True
+            return original_mkdir(self_inner, *args, **kwargs)
+
+        import unittest.mock
+
+        with unittest.mock.patch.object(Path, "mkdir", _sentinel):
+            second = mem._ensure_chat_dir("chat1")
+            assert not mkdir_called
+            assert second == first
+
+    def test_different_chat_ids_cached_independently(self, mem: Memory):
+        """Each chat_id gets its own cache entry."""
+        mem._ensure_chat_dir("alice")
+        mem._ensure_chat_dir("bob")
+        assert mem._known_dirs.get("alice") is True
+        assert mem._known_dirs.get("bob") is True
+
+    def test_ensure_workspace_invalidates_known_dirs(self, mem: Memory):
+        """ensure_workspace() pops the _known_dirs entry so it re-validates."""
+        mem._ensure_chat_dir("chat1")
+        assert mem._known_dirs.get("chat1") is True
+
+        mem.ensure_workspace("chat1")
+        # After ensure_workspace, _ensure_chat_dir was called again internally
+        # and the entry should be repopulated
+        assert mem._known_dirs.get("chat1") is True
+        assert (mem._root / "whatsapp_data" / _safe_name("chat1")).is_dir()
+
+    def test_cache_respects_max_size_bound(self, mem: Memory):
+        """_known_dirs evicts oldest entries when max_size is exceeded."""
+        max_size = 10
+        mem._known_dirs = LRUDict(max_size=max_size)
+
+        for i in range(max_size + 5):
+            mem._ensure_chat_dir(f"chat-{i:04d}")
+
+        assert len(mem._known_dirs) <= max_size
+        # Most recent entry should be present
+        assert mem._known_dirs.get("chat-0014") is not None
+        # Oldest entry should be evicted
+        assert mem._known_dirs.get("chat-0000") is None
+
+    def test_cache_invalidation_allows_recreation(self, mem: Memory):
+        """After popping from _known_dirs, mkdir runs again."""
+        d = mem._ensure_chat_dir("chat1")
+        assert d.is_dir()
+
+        # Manually pop from cache
+        mem._known_dirs.pop("chat1")
+        assert mem._known_dirs.get("chat1") is None
+
+        # Calling again should still work (mkdir is idempotent)
+        d2 = mem._ensure_chat_dir("chat1")
+        assert d2.is_dir()
+        assert mem._known_dirs.get("chat1") is True

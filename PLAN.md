@@ -63,7 +63,7 @@ _Round 5 — Senior technical review (2026-05-02). 22 items across 6 categories.
 
 ## Performance & Scalability
 
-- [ ] Cache known-existing chat directories in `Memory._ensure_chat_dir()` — currently `mkdir(parents=True, exist_ok=True)` runs on every `write_memory()` and `write_memory_with_checksum()` call even when the directory already exists. A bounded set of known directories would eliminate the syscall overhead on the hot write path.
+- [x] Cache known-existing chat directories in `Memory._ensure_chat_dir()` — currently `mkdir(parents=True, exist_ok=True)` runs on every `write_memory()` and `write_memory_with_checksum()` call even when the directory already exists. A bounded set of known directories would eliminate the syscall overhead on the hot write path.
 - [ ] Deduplicate outbound hash computation in `TaskScheduler._execute_task()` — `DeduplicationService.check_outbound_duplicate()` computes `xxhash.xxh64` and then `record_outbound()` computes it again for the same text. Add a `check_and_record_outbound()` method that computes the hash once, reducing per-delivery CPU cost by ~50%.
 - [ ] Lazy-load `MessageQueue` pending messages instead of reading the full JSONL at startup — `_load_pending()` reads the entire file into memory. For high-throughput deployments the file can grow large. Use streaming JSONL parsing (read line-by-line) and stop after loading only PENDING entries, skipping completed entries without materializing them.
 
