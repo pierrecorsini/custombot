@@ -275,7 +275,12 @@ class RateLimiter:
         self._limiters_lock = ThreadLock()
 
     def _get_or_create_chat_limiter(self, chat_id: str) -> SlidingWindowTracker:
-        """Get or create a rate limiter for a chat (LRU: move to end on access)."""
+        """Get or create a rate limiter for a chat (LRU: move to end on access).
+
+        Minimises lock scope: the global lock is held only for dict
+        operations (lookup / move_to_end / insert), not for tracker
+        operations which have their own internal lock.
+        """
         with self._limiters_lock:
             if chat_id in self._chat_limiters:
                 # Move to end (most recently used) for LRU eviction
@@ -286,11 +291,12 @@ class RateLimiter:
             if len(self._chat_limiters) >= MAX_TRACKED_CHATS:
                 self._prune_inactive_chats()
 
-            self._chat_limiters[chat_id] = SlidingWindowTracker(
+            limiter = SlidingWindowTracker(
                 window_size_seconds=self._config.window_size_seconds,
                 max_limit=self._config.chat_rate_limit,
             )
-            return self._chat_limiters[chat_id]
+            self._chat_limiters[chat_id] = limiter
+            return limiter
 
     def _get_or_create_skill_limiter(self, skill_name: str) -> SlidingWindowTracker:
         """Get or create a rate limiter for a skill."""
