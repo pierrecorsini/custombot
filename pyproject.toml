@@ -12,9 +12,11 @@ dependencies = [
     "python-dotenv~=1.2.0",
     "psutil~=6.0.0",
     "pyyaml~=6.0.0",
-    "neonize~=0.3.16",
+    # Pinned to exact versions — native deps with frequent breaking changes.
+    # Bump manually and test thoroughly; not covered by Dependabot.
+    "neonize==0.3.17.post0",
     "duckduckgo-search~=8.1.0",
-    "sqlite-vec~=0.1.7",
+    "sqlite-vec==0.1.9",
     "orjson~=3.10.0",
     "msgpack~=1.1.0",
     "opentelemetry-api~=1.30.0",
@@ -37,6 +39,7 @@ dev = [
     "hypothesis>=6.152.0",
     "pytest-benchmark>=4.0.0",
     "pip-audit>=2.10.0",
+    "pip-tools>=7.4.0",
 ]
 
 [project.scripts]
