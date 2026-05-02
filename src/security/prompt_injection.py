@@ -259,9 +259,20 @@ _REDACTABLE_ALL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     *_SECRET_PATTERNS,
     *_PII_PATTERNS,
 ]
+
+
+def _strip_flags(pat: str) -> str:
+    """Remove leading (?i) from a pattern so it can be embedded in an alternation."""
+    return pat.removeprefix("(?i)")
+
+
+# Build combined pattern with global (?i) flag at the start.
+# Individual patterns may have embedded (?i) which must be stripped
+# to avoid 'global flags not at the start' errors.
 _REDACTABLE_COMBINED = re.compile(
-    "|".join(
-        f"(?P<_r{i}>{p.pattern})"
+    "(?i)"
+    + "|".join(
+        f"(?P<_r{i}>{_strip_flags(p.pattern)})"
         for i, (p, _) in enumerate(_REDACTABLE_ALL_PATTERNS)
     )
 )
