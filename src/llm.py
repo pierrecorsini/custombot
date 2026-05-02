@@ -10,6 +10,7 @@ Just set base_url + api_key in config.json.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path as _Path
@@ -118,6 +119,14 @@ class LLMClient:
         hostname = (parsed.hostname or "").lower()
         if hostname in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
             return "not-configured"  # local servers typically ignore the key
+
+        # Allow empty key for RFC 1918 private network addresses (LAN LLM servers)
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if addr.is_private:
+                return "not-configured"
+        except ValueError:
+            pass  # Not an IP address — proceed to raise
 
         raise ConfigurationError(
             "API key is required for remote LLM providers",
