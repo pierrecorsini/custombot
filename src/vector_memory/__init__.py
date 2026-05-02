@@ -75,8 +75,13 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         self._embed_cache_size = embed_cache_size
         self._embed_cache: BoundedOrderedDict[str, list[float]] = BoundedOrderedDict(max_size=embed_cache_size, eviction="half")
         # In-flight deduplication: tracks pending embedding requests so
-        # concurrent calls for the same text share one API call
+        # concurrent calls for the same text share one API call.  Bounded
+        # by _MAX_INFLIGHT to prevent unbounded memory growth under high
+        # concurrency — additional callers wait on the semaphore instead
+        # of creating new Future entries.
         self._inflight: dict[str, asyncio.Future[list[float]]] = {}
+        self._MAX_INFLIGHT = 64
+        self._inflight_semaphore = asyncio.Semaphore(self._MAX_INFLIGHT)
         # Per-thread read connection pool — each thread reuses one read-only
         # connection instead of opening/closing per query, eliminating
         # ~5ms sqlite-vec extension loading overhead on every read.
@@ -117,6 +122,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         sqlite_vec.load(self._db)
         self._db.enable_load_extension(False)
         self._ensure_schema()
+        self._load_retry_queue()
 
     def warmup(self) -> None:
         """Pre-warm one read connection so the first user query avoids the
@@ -144,12 +150,9 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
             if not future.done():
                 future.cancel()
         self._pending_saves.clear()
-        # Report and clear any queued retry saves
+        # Report and persist any queued retry saves so they survive restart
         if self._pending_retries:
-            log.info(
-                "VectorMemory shutting down with %d queued retry saves (dropped)",
-                len(self._pending_retries),
-            )
+            self._persist_retry_queue()
             self._pending_retries.clear()
         # Cancel any pending in-flight embedding futures
         for key, future in list(self._inflight.items()):
@@ -159,6 +162,66 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         self._close_read_connections()
         super().close()
         log.debug("VectorMemory closed (cache cleared, read pool released, DB connection released)")
+
+    # ── retry queue persistence ──────────────────────────────────────────
+
+    _RETRY_QUEUE_FILE = "_retry_queue.json"
+
+    def _persist_retry_queue(self) -> None:
+        """Write pending retry saves to a JSON sidecar file for next startup."""
+        if not self._pending_retries:
+            return
+        import json
+
+        retry_path = self._db_path.parent / self._RETRY_QUEUE_FILE
+        try:
+            data = [
+                {"chat_id": cid, "text": txt, "category": cat, "queued_at": ts}
+                for cid, txt, cat, ts in self._pending_retries
+            ]
+            retry_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            log.info(
+                "Persisted %d retry saves to %s for next startup",
+                len(data),
+                retry_path,
+            )
+        except OSError as exc:
+            log.warning("Failed to persist retry queue: %s", exc)
+
+    def _load_retry_queue(self) -> None:
+        """Reload persisted retry saves from a previous shutdown."""
+        import json
+
+        from src.utils import safe_json_parse, JsonParseMode
+
+        retry_path = self._db_path.parent / self._RETRY_QUEUE_FILE
+        if not retry_path.exists():
+            return
+        try:
+            data = safe_json_parse(
+                retry_path.read_text(encoding="utf-8"),
+                default=[],
+                expected_type=list,
+                mode=JsonParseMode.STRICT,
+            )
+            if isinstance(data, list):
+                for entry in data:
+                    if isinstance(entry, dict) and all(k in entry for k in ("chat_id", "text")):
+                        self._pending_retries.append((
+                            entry["chat_id"],
+                            entry["text"],
+                            entry.get("category", ""),
+                            entry.get("queued_at", time.time()),
+                        ))
+                if self._pending_retries:
+                    log.info(
+                        "Loaded %d retry saves from previous session",
+                        len(self._pending_retries),
+                    )
+            # Clean up the file after loading
+            retry_path.unlink()
+        except OSError as exc:
+            log.warning("Failed to load retry queue: %s", exc)
 
     async def probe_embedding_model(self, timeout: float = 10.0) -> tuple[bool, str]:
         """Probe the embedding API to validate the configured model is reachable.
@@ -338,11 +401,12 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         self._inflight[cache_key] = future
 
         try:
-            resp = await self._client.embeddings.create(
-                model=self._embedding_model,
-                input=text,
-            )
-            embedding = resp.data[0].embedding
+            async with self._inflight_semaphore:
+                resp = await self._client.embeddings.create(
+                    model=self._embedding_model,
+                    input=text,
+                )
+                embedding = resp.data[0].embedding
 
             await self._mark_embedding_api_healthy()
 
