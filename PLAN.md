@@ -84,7 +84,7 @@ _Round 5 — Senior technical review (2026-05-02). 22 items across 6 categories.
 ## Security
 
 - [x] Verify `HealthServer` binds to `127.0.0.1` (localhost only) by default — the `--health-port` flag creates an HTTP server that could expose operational metrics and component status. Confirm it doesn't bind to `0.0.0.0` which would be reachable from the network. Add a `--health-host` config option with safe default.
-- [ ] Add rate limiting to `HealthServer` endpoints — an unauthenticated health endpoint can be abused for DoS if exposed. Add a simple per-IP rate limit or request throttling to the health check handler.
+- [x] Add rate limiting to `HealthServer` endpoints — an unauthenticated health endpoint can be abused for DoS if exposed. Add a simple per-IP rate limit or request throttling to the health check handler.
 - [ ] Audit `ConfigChangeApplier` for race conditions during hot-reload — `_update_app_config()` mutates multiple fields on the live `Config` object non-atomically. Under concurrent message processing, a coroutine could observe a partially-updated config (e.g. new `llm.temperature` but old `llm.timeout`). Use a config swap pattern (replace the entire reference atomically).
 
 ## DevOps & CI
