@@ -27,16 +27,14 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy dependency manifests first for layer caching
-COPY requirements.txt requirements-dev.txt* ./
+COPY requirements.txt pyproject.toml ./
 
 # Install production dependencies into a clean prefix
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # Install dev dependencies into a separate prefix (for optional test stage)
-RUN if [ -f requirements-dev.txt ]; then \
-      pip install --no-cache-dir --prefix=/install-dev \
-        -r requirements.txt -r requirements-dev.txt; \
-    fi
+RUN pip install --no-cache-dir --prefix=/install-dev \
+      -r requirements.txt ".[dev]"
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime — minimal production image

@@ -142,14 +142,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: "pip"
           cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
+            pyproject.toml
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-          pip install hypothesis==6.152.3
+          pip install ".[dev]"
 
       # Coverage Threshold Roadmap:
       #   Phase 9-11: 60% (baseline — locked)
@@ -195,14 +193,12 @@ jobs:
           python-version: "3.13"
           cache: "pip"
           cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
+            pyproject.toml
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-          pip install hypothesis==6.152.3
+          pip install ".[dev]"
 
       - name: Run tests (verbose, JUnit output)
         run: |
@@ -311,13 +307,12 @@ jobs:
           python-version: "3.11"
           cache: "pip"
           cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
+            pyproject.toml
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          pip install ".[dev]"
 
       - name: Restore benchmark baseline
         uses: actions/cache@v4
