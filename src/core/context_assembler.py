@@ -176,6 +176,25 @@ class ContextAssembler:
             channel_prompt=channel_prompt,
         )
 
+    def update_config(self, new_cfg: BotConfig) -> None:
+        """Replace the internal config reference with *new_cfg*.
+
+        Called by :class:`Bot.update_config` during hot-reload so that
+        subsequent context assembly uses the updated values immediately.
+
+        Args:
+            new_cfg: The new :class:`BotConfig` to apply.
+
+        Raises:
+            TypeError: If *new_cfg* is not a :class:`BotConfig` instance.
+        """
+        if not isinstance(new_cfg, BotConfig):
+            raise TypeError(
+                f"Expected BotConfig, got {type(new_cfg).__name__}"
+            )
+        self._config = new_cfg
+        log.info("ContextAssembler config updated")
+
     def finalize_turn(self, chat_id: str, response_text: str) -> str:
         """Parse topic META from LLM response and update the topic cache.
 

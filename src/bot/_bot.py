@@ -100,7 +100,7 @@ log = logging.getLogger(__name__)
 
 lifecycle_log = logging.getLogger("lifecycle.bot")
 
-__all__ = ["Bot", "BotConfig", "TurnContext"]
+__all__ = ["Bot", "BotConfig", "BotDeps", "TurnContext"]
 
 # LLM error codes that are transient and worth retrying.
 _RETRYABLE_LLM_ERROR_CODES: frozenset[ErrorCode] = frozenset({
@@ -150,41 +150,55 @@ class BotConfig:
     stream_response: bool = False
 
 
+@dataclass(slots=True)
+class BotDeps:
+    """Structured parameter bag for ``Bot.__init__``.
+
+    Replaces the former 15-parameter constructor signature with a single
+    dataclass, mirroring ``ShutdownContext`` from ``src/lifecycle.py``.
+    Required fields correspond to components that are always available;
+    optional fields default to ``None`` and the ``Bot`` constructor
+    supplies sensible fallbacks (e.g. ``LRULockCache`` for ``chat_locks``).
+    """
+
+    # Required
+    config: BotConfig
+    db: Database
+    llm: LLMProvider
+    memory: MemoryProtocol
+    skills: SkillRegistry
+
+    # Optional — Bot supplies defaults when not provided
+    routing: RoutingEngine | None = None
+    instructions_dir: str = ""
+    message_queue: MessageQueue | None = None
+    project_store: ProjectStore | None = None
+    project_ctx: ProjectContextLoader | None = None
+    session_metrics: "SessionMetrics | None" = None
+    instruction_loader: InstructionLoader | None = None
+    chat_locks: LockProvider | None = None
+    dedup: DeduplicationService | None = None
+
+
 class Bot:
-    def __init__(
-        self,
-        config: BotConfig,
-        db: Database,
-        llm: LLMProvider,
-        memory: MemoryProtocol,
-        skills: SkillRegistry,
-        routing: RoutingEngine | None = None,
-        instructions_dir: str = "",
-        message_queue: MessageQueue | None = None,
-        project_store: ProjectStore | None = None,
-        project_ctx: ProjectContextLoader | None = None,
-        session_metrics: "SessionMetrics | None" = None,
-        instruction_loader: InstructionLoader | None = None,
-        chat_locks: LockProvider | None = None,
-        dedup: DeduplicationService | None = None,
-    ) -> None:
-        self._cfg = config
-        self._db = db
-        self._llm = llm
-        self._memory = memory
-        self._skills = skills
-        self._routing = routing
-        self._instructions_dir = Path(instructions_dir)
-        self._message_queue = message_queue
-        self._project_store = project_store
+    def __init__(self, deps: BotDeps) -> None:
+        self._cfg = deps.config
+        self._db = deps.db
+        self._llm = deps.llm
+        self._memory = deps.memory
+        self._skills = deps.skills
+        self._routing = deps.routing
+        self._instructions_dir = Path(deps.instructions_dir)
+        self._message_queue = deps.message_queue
+        self._project_store = deps.project_store
         # Semaphore: only one active LLM call per chat at a time (bounded LRU cache)
         self._chat_locks: LockProvider = (
-            chat_locks if chat_locks is not None else LRULockCache(max_size=DEFAULT_CHAT_LOCK_CACHE_SIZE)
+            deps.chat_locks if deps.chat_locks is not None else LRULockCache(max_size=DEFAULT_CHAT_LOCK_CACHE_SIZE)
         )
         # Unified dedup service — wraps both inbound (message-id) and outbound
         # (content-hash) strategies.  Falls back to direct DB check when not
         # provided (backward-compat for tests that construct Bot directly).
-        self._dedup: DeduplicationService | None = dedup
+        self._dedup: DeduplicationService | None = deps.dedup
         # Unified rate limiter for both skill execution and per-chat message
         # rate limiting.
         self._rate_limiter = RateLimiter()
@@ -194,21 +208,21 @@ class Bot:
         self._metrics: PerformanceMetrics = get_metrics_collector()
         # Tool executor (delegates to skill registry with rate limiting and error handling)
         self._tool_executor = ToolExecutor(
-            skills_registry=skills,
+            skills_registry=deps.skills,
             rate_limiter=self._rate_limiter,
             metrics=self._metrics,
-            on_skill_executed=session_metrics.increment_skills if session_metrics else None,
+            on_skill_executed=deps.session_metrics.increment_skills if deps.session_metrics else None,
             audit_log_dir=Path(WORKSPACE_DIR) / "logs",
         )
         # Instruction file loader (mtime-cached) — prefer injected shared instance
-        self._instruction_loader = instruction_loader or InstructionLoader(self._instructions_dir)
+        self._instruction_loader = deps.instruction_loader or InstructionLoader(self._instructions_dir)
         # Project context loader — prefer injected shared instance
-        self._project_ctx = project_ctx or _ProjectContextLoaderImpl(project_store)
+        self._project_ctx = deps.project_ctx or _ProjectContextLoaderImpl(deps.project_store)
         # Context assembler (stateless service — owns topic cache lifecycle)
         self._context_assembler = ContextAssembler(
-            db=db,
-            config=config,
-            memory=memory,
+            db=deps.db,
+            config=deps.config,
+            memory=deps.memory,
             project_ctx=self._project_ctx,
             workspace_root=WORKSPACE_DIR,
         )
@@ -216,12 +230,12 @@ class Bot:
         # Log bot initialization with component summary
         lifecycle_log.info(
             "Bot instance created - components: db=%s, llm=%s, memory=%s, skills=%d, routing=%s, projects=%s",
-            type(db).__name__,
-            type(llm).__name__,
-            type(memory).__name__,
-            len(skills.all()),
-            "enabled" if routing else "disabled",
-            "enabled" if project_store else "disabled",
+            type(deps.db).__name__,
+            type(deps.llm).__name__,
+            type(deps.memory).__name__,
+            len(deps.skills.all()),
+            "enabled" if deps.routing else "disabled",
+            "enabled" if deps.project_store else "disabled",
         )
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
@@ -806,7 +820,7 @@ class Bot:
         channel: "BaseChannel | None" = None,
         stream_callback: StreamCallback | None = None,
         generation: int = 0,
-    ) -> str:
+    ) -> str | None:
         log.debug(
             "Starting _process for chat %s",
             msg.chat_id,
@@ -856,7 +870,7 @@ class Bot:
             channel=channel,
         )
 
-        return await self._finalize_response(
+        return await self._deliver_response(
             chat_id=msg.chat_id,
             raw_response=raw_response,
             tool_log=tool_log,
@@ -865,7 +879,7 @@ class Bot:
             verbose=verbose,
         )
 
-    async def _finalize_response(
+    async def _deliver_response(
         self,
         chat_id: str,
         raw_response: str,
@@ -873,8 +887,23 @@ class Bot:
         buffered_persist: list[dict],
         generation: int,
         verbose: str,
-    ) -> str:
-        """Post-ReAct finalization: topic, filtering, summary, persist, event."""
+    ) -> str | None:
+        """Post-ReAct response delivery: format, dedup, persist, emit.
+
+        Handles the full delivery pipeline after the ReAct loop produces a
+        raw response:
+
+        1. Finalize turn (topic extraction via context assembler)
+        2. Filter sensitive content from response
+        3. Append tool-log summary (when verbose == "summary")
+        4. Check outbound dedup — suppress duplicate delivery
+        5. Persist assistant message to DB (with generation-conflict detection)
+        6. Record outbound for future dedup checks
+        7. Emit ``response_sent`` event
+
+        Returns the final response text, or *None* if suppressed by outbound
+        dedup.
+        """
         response_text = self._context_assembler.finalize_turn(chat_id, raw_response)
 
         filter_result = filter_response_content(response_text)
@@ -892,6 +921,15 @@ class Bot:
         if verbose == "summary" and tool_log:
             response_text = format_response_with_tool_log(response_text, tool_log)
 
+        # Outbound dedup: suppress duplicate responses to the same chat.
+        if self._dedup and self._dedup.check_outbound_duplicate(chat_id, response_text):
+            log.info(
+                "Outbound dedup suppressed duplicate response for chat %s",
+                chat_id,
+                extra={"chat_id": chat_id},
+            )
+            return None
+
         batch = [*buffered_persist, {"role": "assistant", "content": response_text}]
         if not self._db.check_generation(chat_id, generation):
             log.warning(
@@ -902,10 +940,14 @@ class Bot:
             )
         await self._db.save_messages_batch(chat_id=chat_id, messages=batch)
 
+        # Record outbound so near-future duplicates are caught.
+        if self._dedup:
+            self._dedup.record_outbound(chat_id, response_text)
+
         await get_event_bus().emit(Event(
             name="response_sent",
             data={"chat_id": chat_id, "response_length": len(response_text)},
-            source="Bot._finalize_response",
+            source="Bot._deliver_response",
             correlation_id=get_correlation_id(),
         ))
 
@@ -966,7 +1008,7 @@ class Bot:
         old_cfg = self._cfg
         self._cfg = new_cfg
         # Propagate to ContextAssembler so context assembly uses updated values
-        self._context_assembler._config = new_cfg
+        self._context_assembler.update_config(new_cfg)
         log.info(
             "Bot config updated: max_tool_iterations=%d → %d, "
             "memory_max_history=%d → %d",
