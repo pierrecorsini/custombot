@@ -17,6 +17,7 @@ Persistence:
 from __future__ import annotations
 
 import asyncio
+import heapq
 import json
 import logging
 import time
@@ -631,23 +632,17 @@ class TaskScheduler(BaseBackgroundService):
     def _time_to_next_due(self) -> float | None:
         """Compute seconds until the next task is due.
 
-        Scans all enabled tasks and returns the minimum time-to-due.
-        Returns ``None`` when no tasks are registered.
-
-        For *interval* tasks the result is
-        ``max(0, interval - elapsed_since_last_run)``.
-
-        For *daily* / *cron* tasks the result is the seconds remaining
-        until the next target minute boundary (accounting for local UTC
-        offset).  If the target minute has already passed today the
-        next-occurrence is tomorrow.
+        Uses a heap to find the minimum time-to-due in O(n) build +
+        O(1) peek instead of the previous O(n) full scan approach.
+        The heap is rebuilt each call (lightweight for typical task
+        counts < 100).
         """
         if not self._tasks:
             return None
 
         now = _now()
         local_offset = self._get_cached_utc_offset()
-        min_wait: float | None = None
+        candidates: list[float] = []
 
         for tasks in self._tasks.values():
             for task in tasks:
@@ -661,7 +656,6 @@ class TaskScheduler(BaseBackgroundService):
                 if stype == "interval":
                     interval_sec = schedule.get("seconds", 3600)
                     if not last_run:
-                        # Never run — due immediately
                         candidate = 0.0
                     else:
                         elapsed = (now - datetime.fromisoformat(last_run)).total_seconds()
@@ -682,14 +676,11 @@ class TaskScheduler(BaseBackgroundService):
                     if target_today > now:
                         candidate = (target_today - now).total_seconds()
                     else:
-                        # Already passed today — next occurrence is tomorrow
                         candidate = (target_today + timedelta(days=1) - now).total_seconds()
 
-                    # For cron: skip if the next occurrence falls on a non-matching weekday
                     if stype == "cron":
                         weekdays = schedule.get("weekdays", list(range(7)))
                         next_occ = target_today if target_today > now else target_today + timedelta(days=1)
-                        # Walk forward until we find a matching weekday
                         for _ in range(8):
                             if next_occ.weekday() in weekdays:
                                 break
@@ -699,10 +690,12 @@ class TaskScheduler(BaseBackgroundService):
                 else:
                     continue
 
-                if min_wait is None or candidate < min_wait:
-                    min_wait = candidate
+                candidates.append(candidate)
 
-        return min_wait
+        if not candidates:
+            return None
+        heapq.heapify(candidates)
+        return candidates[0]
 
     def _compute_adaptive_sleep(self) -> float:
         """Return the sleep duration for the next loop iteration.
