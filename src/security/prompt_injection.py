@@ -253,6 +253,21 @@ _PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b"), "email"),
 ]
 
+# Combined single-pass detection pattern for all redactable categories.
+# Maps named group index to category name for O(1) lookup.
+_REDACTABLE_ALL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    *_API_KEY_PATTERNS,
+    *_SECRET_PATTERNS,
+    *_PII_PATTERNS,
+]
+_REDACTABLE_COMBINED = re.compile(
+    "|".join(
+        f"(?P<_r{i}>{p.pattern})"
+        for i, (p, _) in enumerate(_REDACTABLE_ALL_PATTERNS)
+    )
+)
+_REDACTABLE_NAMES = [name for _, name in _REDACTABLE_ALL_PATTERNS]
+
 # Sensitive file extensions in content
 _SENSITIVE_FILE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)\.env\b"), "env_file"),
@@ -444,9 +459,11 @@ def filter_response_content(content: str, *, redact: bool = True) -> ContentFilt
     Detects PII, API keys, secrets, and other sensitive data in
     responses. Optionally redacts the sensitive portions.
 
-    Uses a single-pass approach: detection and redaction happen in one
-    regex sweep per pattern, avoiding the previous two-phase design
-    that scanned all patterns twice.
+    Optimisation strategy:
+    - ``redact=True``  — sequential per-pattern ``subn()`` (required for
+      per-category replacement strings).
+    - ``redact=False`` — single-pass scan via ``_REDACTABLE_COMBINED``
+      alternation regex, turning O(n × m) into O(n).
 
     Args:
         content: The LLM response text to check.
@@ -461,23 +478,23 @@ def filter_response_content(content: str, *, redact: bool = True) -> ContentFilt
     categories: set[str] = set()
     result = content
 
-    # Single pass: detect + redact in one sweep per pattern list.
-    # Pattern order matters: _API_KEY_PATTERNS first (most specific),
-    # then _SECRET_PATTERNS, then _PII_PATTERNS.
-    redactable_patterns: list[tuple[re.Pattern[str], str]] = [
-        *_API_KEY_PATTERNS,
-        *_SECRET_PATTERNS,
-        *_PII_PATTERNS,
-    ]
-
-    for pattern, category in redactable_patterns:
-        if redact:
+    if redact:
+        # Redaction must run per-pattern for proper replacement text.
+        # Pattern order matters: _API_KEY_PATTERNS first (most specific),
+        # then _SECRET_PATTERNS, then _PII_PATTERNS.
+        for pattern, category in _REDACTABLE_ALL_PATTERNS:
             new_result, count = pattern.subn(f"[REDACTED_{category.upper()}]", result)
             if count > 0:
                 categories.add(category)
                 result = new_result
-        elif pattern.search(result):
-            categories.add(category)
+    else:
+        # Detection-only: single-pass scan via combined alternation regex.
+        for m in _REDACTABLE_COMBINED.finditer(result):
+            if m.lastgroup:
+                idx_str = m.lastgroup.lstrip("_r")
+                idx = int(idx_str) if idx_str.isdigit() else -1
+                if 0 <= idx < len(_REDACTABLE_NAMES):
+                    categories.add(_REDACTABLE_NAMES[idx])
 
     # Detection-only scan for sensitive file extensions (no redaction needed)
     for pattern, category in _SENSITIVE_FILE_PATTERNS:
