@@ -25,7 +25,6 @@ Usage::
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -33,6 +32,7 @@ import xxhash
 
 from src.constants import OUTBOUND_DEDUP_MAX_SIZE, OUTBOUND_DEDUP_TTL_SECONDS
 from src.exceptions import DatabaseError
+from src.utils import BoundedOrderedDict
 
 if TYPE_CHECKING:
     from src.utils.protocols import Storage
@@ -78,7 +78,7 @@ class DeduplicationService:
     guaranteed, so no additional locking is needed for the outbound cache.
     """
 
-    __slots__ = ("_db", "_outbound_cache", "_outbound_ttl", "_stats")
+    __slots__ = ("_db", "_outbound_cache", "_stats")
 
     def __init__(
         self,
@@ -86,11 +86,10 @@ class DeduplicationService:
         outbound_max_size: int = OUTBOUND_DEDUP_MAX_SIZE,
         outbound_ttl: float = OUTBOUND_DEDUP_TTL_SECONDS,
     ) -> None:
-        from src.utils import LRUDict
-
         self._db = db
-        self._outbound_cache: LRUDict = LRUDict(max_size=outbound_max_size)
-        self._outbound_ttl = outbound_ttl
+        self._outbound_cache: BoundedOrderedDict[str, bool] = BoundedOrderedDict(
+            max_size=outbound_max_size, ttl=outbound_ttl,
+        )
         self._stats = DedupStats()
 
     # ── Inbound dedup (message-id based, persistent) ────────────────────────
@@ -129,11 +128,11 @@ class DeduplicationService:
         :meth:`record_outbound` after the send succeeds to populate
         the cache.  This two-phase API prevents false positives when
         the send fails after the check passes.
+
+        TTL expiry is handled lazily by ``BoundedOrderedDict``.
         """
         key = outbound_key(chat_id, text)
-        now = time.monotonic()
-        sent_at = self._outbound_cache.get(key)
-        if sent_at is not None and (now - sent_at) < self._outbound_ttl:
+        if self._outbound_cache.get(key) is not None:
             self._stats.outbound_hits += 1
             return True
         self._stats.outbound_misses += 1
@@ -142,7 +141,7 @@ class DeduplicationService:
     def is_outbound_duplicate(self, chat_id: str, text: str) -> bool:
         """Return ``True`` if *text* was recently sent to *chat_id*.
 
-        Records the current timestamp on miss so subsequent calls detect it
+        Records the entry on miss so subsequent calls detect it
         within the TTL window.
 
         .. deprecated::
@@ -152,12 +151,10 @@ class DeduplicationService:
             false positives if the send subsequently fails.
         """
         key = outbound_key(chat_id, text)
-        now = time.monotonic()
-        sent_at = self._outbound_cache.get(key)
-        if sent_at is not None and (now - sent_at) < self._outbound_ttl:
+        if self._outbound_cache.get(key) is not None:
             self._stats.outbound_hits += 1
             return True
-        self._outbound_cache[key] = now
+        self._outbound_cache[key] = True
         self._stats.outbound_misses += 1
         return False
 
@@ -165,10 +162,10 @@ class DeduplicationService:
         """Explicitly record that *text* was sent to *chat_id*.
 
         Call this **after** the send succeeds to populate the dedup cache.
-        Safe to call multiple times — overwrites the previous timestamp.
+        Safe to call multiple times — overwrites the previous entry.
         """
         key = outbound_key(chat_id, text)
-        self._outbound_cache[key] = time.monotonic()
+        self._outbound_cache[key] = True
 
     def check_and_record_outbound(self, chat_id: str, text: str) -> bool:
         """Combined check + record: returns ``True`` if duplicate.
@@ -179,12 +176,10 @@ class DeduplicationService:
         :meth:`record_outbound` to avoid redundant xxh64 computation.
         """
         key = outbound_key(chat_id, text)
-        now = time.monotonic()
-        sent_at = self._outbound_cache.get(key)
-        if sent_at is not None and (now - sent_at) < self._outbound_ttl:
+        if self._outbound_cache.get(key) is not None:
             self._stats.outbound_hits += 1
             return True
-        self._outbound_cache[key] = now
+        self._outbound_cache[key] = True
         self._stats.outbound_misses += 1
         return False
 
