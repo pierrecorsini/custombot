@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol,
 
 from src.config.config import (
     Config,
+    LLMConfig,
     _from_dict,
     _load_and_validate_file,
     _log_effective_config,
@@ -161,6 +162,7 @@ class ConfigChangeApplier:
         llm: LLMProvider,
         shutdown_mgr: GracefulShutdown,
         reconfigure_logging: Callable[[Config], None],
+        on_config_swap: Callable[[Config], None] | None = None,
     ) -> None:
         self._config = app_config
         self._bot = bot
@@ -168,9 +170,20 @@ class ConfigChangeApplier:
         self._llm = llm
         self._shutdown_mgr = shutdown_mgr
         self._reconfigure_logging = reconfigure_logging
+        self._on_config_swap = on_config_swap
 
     def apply(self, old_config: Config, new_config: Config) -> None:
-        """Detect changes between *old_config* and *new_config* and apply safe ones."""
+        """Detect changes between *old_config* and *new_config* and apply safe ones.
+
+        The config reference is swapped **before** component updates so that
+        concurrent coroutines reading ``self._config`` never observe a state
+        where components have new values but the reference still points to the
+        old config.  Component updates are idempotent — if a component update
+        fails, the config reference has already been swapped and the system
+        remains in a consistent (new-config, partially-updated-components)
+        state, which is preferable to the old (old-config, new-components)
+        inconsistency.
+        """
         old_flat = _flatten_config(old_config)
         new_flat = _flatten_config(new_config)
         safe, destructive, unknown = _diff_configs(old_flat, new_flat)
@@ -206,15 +219,22 @@ class ConfigChangeApplier:
         if not safe:
             return
 
+        # Swap the config reference FIRST so that self._config always
+        # reflects the latest state for concurrent readers.
+        self._update_app_config(new_config)
+
+        # Capture the old LLM config BEFORE the swap for use by
+        # _apply_llm_config, which must preserve destructive fields
+        # from the old config even though self._config now points to new.
+        old_llm_cfg = old_config.llm
+
+        # Then propagate to individual components.
         self._apply_bot_config(new_config, safe)
         self._apply_channel_config(new_config, safe)
-        self._apply_llm_config(new_config, safe)
+        self._apply_llm_config(new_config, safe, old_llm_cfg=old_llm_cfg)
         self._apply_shutdown_config(new_config, safe)
         self._apply_logging_config(old_config, new_config, safe)
         self._apply_shell_config(new_config, safe)
-
-        # Update the application-level config reference
-        self._update_app_config(new_config)
 
         for field_path in sorted(safe):
             log.info("Applied config change: '%s'", field_path)
@@ -245,12 +265,35 @@ class ConfigChangeApplier:
         """Delegate channel-specific config changes to the channel."""
         self._channel.apply_channel_config(new_config, changed)
 
-    def _apply_llm_config(self, new_config: Config, changed: Set[str]) -> None:
-        """Update LLM client config (temperature, timeout)."""
+    def _apply_llm_config(
+        self,
+        new_config: Config,
+        changed: Set[str],
+        *,
+        old_llm_cfg: LLMConfig,
+    ) -> None:
+        """Update LLM client config (temperature, timeout).
+
+        Only safe LLM fields are forwarded to the provider.  Destructive
+        fields (model, api_key, etc.) are preserved from the *old* config
+        (via ``old_llm_cfg`` captured before the swap) so that the live
+        component never sees an unintended destructive change.
+        """
         if "llm.temperature" not in changed and "llm.timeout" not in changed:
             return
 
-        self._llm.update_config(new_config.llm)
+        from dataclasses import replace as _dc_replace
+
+        # Use the OLD LLM config as the base and overlay only safe fields.
+        # This ensures destructive fields (model, api_key, etc.) are never
+        # propagated to the live LLM provider, even though self._config
+        # has already been swapped to the new config.
+        safe_cfg = _dc_replace(
+            old_llm_cfg,
+            temperature=new_config.llm.temperature,
+            timeout=new_config.llm.timeout,
+        )
+        self._llm.update_config(safe_cfg)
 
     def _apply_shutdown_config(
         self, new_config: Config, changed: Set[str]
@@ -298,13 +341,18 @@ class ConfigChangeApplier:
         )
 
     def _update_app_config(self, new_config: Config) -> None:
-        """Replace the application-level config reference.
+        """Atomically replace the application-level config reference.
 
-        Validates *new_config* via :func:`is_valid_config` before mutation as
+        Validates *new_config* via :func:`is_valid_config` before swapping as
         a defense-in-depth check.  Even though ``ConfigWatcher._load_new_config``
         validates at load time, this guard ensures that any future code path
         that bypasses the loader cannot apply an invalid config to live
         components.
+
+        Uses a single reference swap instead of mutating individual fields so
+        that concurrent coroutines never observe a partially-updated config
+        (e.g. new ``llm.temperature`` but old ``llm.timeout``).  Mirrors the
+        pattern in :meth:`Bot.update_config` and :meth:`LLMClient.update_config`.
         """
         if not is_valid_config(new_config):
             log.error(
@@ -316,16 +364,13 @@ class ConfigChangeApplier:
                 config_key="config_watcher",
             )
 
-        # Update the Config dataclass fields in-place
-        self._config.llm = new_config.llm
-        self._config.whatsapp = new_config.whatsapp
-        self._config.shell = new_config.shell
-        self._config.memory_max_history = new_config.memory_max_history
-        self._config.log_verbosity = new_config.log_verbosity
-        self._config.log_incoming_messages = new_config.log_incoming_messages
-        self._config.log_routing_info = new_config.log_routing_info
-        self._config.log_llm = new_config.log_llm
-        self._config.shutdown_timeout = new_config.shutdown_timeout
+        # Atomic reference swap — single attribute assignment is safe under the
+        # GIL and guarantees no coroutine sees a hybrid old+new config state.
+        self._config = new_config
+
+        # Propagate to Application._config if a swap callback was provided.
+        if self._on_config_swap is not None:
+            self._on_config_swap(new_config)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
