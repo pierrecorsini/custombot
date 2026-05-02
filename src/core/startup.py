@@ -84,6 +84,71 @@ class StartupContext:
     initialized_components: list[str] = field(default_factory=list)
     component_durations: dict[str, float] = field(default_factory=dict)
 
+    def validate_populated(self) -> _PopulatedStartupContext:
+        """Validate that all required components have been populated.
+
+        Raises ``RuntimeError`` listing any missing components so that
+        startup failures are diagnosed immediately.
+
+        Returns a ``_PopulatedStartupContext`` with non-optional types,
+        enabling type-safe downstream access without Optional unwrapping.
+        """
+        required: list[tuple[str, object]] = [
+            ("shutdown_mgr", self.shutdown_mgr),
+            ("components", self.components),
+            ("scheduler", self.scheduler),
+            ("channel", self.channel),
+            ("pipeline", self.pipeline),
+            ("executor", self.executor),
+            ("workspace_monitor", self.workspace_monitor),
+            ("config_watcher", self.config_watcher),
+        ]
+        missing = [name for name, value in required if value is None]
+        if missing:
+            raise RuntimeError(
+                f"Startup completed but required components are missing: "
+                f"{', '.join(missing)}"
+            )
+        # The loop above guarantees all values are non-None.
+        # Assert per-field so mypy narrows Optional[X] → X.
+        assert self.shutdown_mgr is not None
+        assert self.components is not None
+        assert self.scheduler is not None
+        assert self.channel is not None
+        assert self.pipeline is not None
+        assert self.executor is not None
+        assert self.workspace_monitor is not None
+        assert self.config_watcher is not None
+        return _PopulatedStartupContext(
+            shutdown_mgr=self.shutdown_mgr,
+            components=self.components,
+            scheduler=self.scheduler,
+            channel=self.channel,
+            pipeline=self.pipeline,
+            executor=self.executor,
+            workspace_monitor=self.workspace_monitor,
+            config_watcher=self.config_watcher,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _PopulatedStartupContext:
+    """StartupContext with all required components guaranteed non-None.
+
+    Constructed via ``StartupContext.validate_populated()`` after all
+    startup steps complete successfully.  Enables type-safe downstream
+    access without Optional unwrapping or ``type: ignore`` directives.
+    """
+
+    shutdown_mgr: GracefulShutdown
+    components: BotComponents
+    scheduler: TaskScheduler
+    channel: BaseChannel
+    pipeline: MessagePipeline
+    executor: ThreadPoolExecutor
+    workspace_monitor: WorkspaceMonitor
+    config_watcher: ConfigWatcher
+
 
 class StartupStepFactory(Protocol):
     """Protocol for a factory that initialises one startup component."""
@@ -236,6 +301,8 @@ async def _step_health_server(ctx: StartupContext) -> str | None:
     if not health_port:
         return None
 
+    health_host = ctx.app._health_host
+
     from src.health import HealthServer
 
     # Merge sub-component durations from the builder into the
@@ -265,11 +332,11 @@ async def _step_health_server(ctx: StartupContext) -> str | None:
             vector_memory=ctx.components.vector_memory,
             sqlite_pool=sqlite_pool,
         )
-        await health_server.start(port=health_port)
+        await health_server.start(port=health_port, host=health_host)
         ctx.health_server = health_server
         ctx.app._health_server = health_server
         ctx.initialized_components.append(f"Health Server (port {health_port})")
-        return f"port={health_port}"
+        return f"port={health_port}, host={health_host}"
     except Exception as exc:
         log.warning("Failed to start health server on port %d: %s", health_port, exc)
         ctx.app._health_server = None

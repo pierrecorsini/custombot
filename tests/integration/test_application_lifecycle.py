@@ -571,8 +571,8 @@ class TestApplicationRunHealthServer:
         assert hs_kwargs["db"] is mock_components.db
         assert hs_kwargs["scheduler"] is mock_scheduler
 
-        # HealthServer.start was called with the configured port
-        mock_health_server.start.assert_awaited_once_with(port=9876)
+        # HealthServer.start was called with the configured port and safe default host
+        mock_health_server.start.assert_awaited_once_with(port=9876, host="127.0.0.1")
 
         # perform_shutdown received the health server
         ps_kwargs = mock_ps.call_args[1]
@@ -1070,6 +1070,7 @@ class TestConfigHotReload:
 
         mock_llm = MagicMock()
         mock_llm._cfg = initial_config.llm
+        mock_llm.update_config = MagicMock()
 
         shutdown_mgr = GracefulShutdown(timeout=30.0)
         reconfigure_logging = MagicMock()
@@ -1113,11 +1114,8 @@ class TestConfigHotReload:
 
             await asyncio.sleep(0.5)
 
-            # ── Assert: LLM config was updated ──
-            assert mock_llm._cfg.temperature == 0.3, (
-                f"Expected temperature=0.3 after hot-reload, "
-                f"got {mock_llm._cfg.temperature}"
-            )
+            # ── Assert: LLM update_config was called with the new config ──
+            mock_llm.update_config.assert_called_with(updated_config.llm)
         finally:
             await watcher.stop()
 

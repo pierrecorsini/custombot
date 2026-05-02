@@ -110,11 +110,13 @@ class Application:
         config: Config,
         verbose: bool = False,
         health_port: Optional[int] = None,
+        health_host: str = "127.0.0.1",
         safe_mode: bool = False,
     ) -> None:
         self._config = config
         self._verbose = verbose
         self._health_port = health_port
+        self._health_host = health_host
         self._safe_mode = safe_mode
         self._session_metrics = SessionMetrics()
         self._initialized_components: list[str] = []
@@ -285,35 +287,20 @@ class Application:
     def _build_state_from_ctx(ctx: StartupContext) -> AppComponents:
         """Construct ``AppComponents`` from a successfully completed ``StartupContext``.
 
-        Validates that every required component was populated by the
-        startup steps.  Raises ``RuntimeError`` listing any missing
-        components so that startup failures are diagnosed immediately.
+        Delegates validation to ``StartupContext.validate_populated()`` which
+        raises ``RuntimeError`` listing any missing components so that startup
+        failures are diagnosed immediately.
         """
-        required: list[tuple[str, object]] = [
-            ("shutdown_mgr", ctx.shutdown_mgr),
-            ("components", ctx.components),
-            ("scheduler", ctx.scheduler),
-            ("channel", ctx.channel),
-            ("pipeline", ctx.pipeline),
-            ("executor", ctx.executor),
-            ("workspace_monitor", ctx.workspace_monitor),
-            ("config_watcher", ctx.config_watcher),
-        ]
-        missing = [name for name, value in required if value is None]
-        if missing:
-            raise RuntimeError(
-                f"Startup completed but required components are missing: "
-                f"{', '.join(missing)}"
-            )
+        populated = ctx.validate_populated()
         return AppComponents(
-            shutdown_mgr=ctx.shutdown_mgr,  # type: ignore[arg-type]
-            components=ctx.components,  # type: ignore[arg-type]
-            scheduler=ctx.scheduler,  # type: ignore[arg-type]
-            channel=ctx.channel,  # type: ignore[arg-type]
-            pipeline=ctx.pipeline,  # type: ignore[arg-type]
-            executor=ctx.executor,  # type: ignore[arg-type]
-            workspace_monitor=ctx.workspace_monitor,  # type: ignore[arg-type]
-            config_watcher=ctx.config_watcher,  # type: ignore[arg-type]
+            shutdown_mgr=populated.shutdown_mgr,
+            components=populated.components,
+            scheduler=populated.scheduler,
+            channel=populated.channel,
+            pipeline=populated.pipeline,
+            executor=populated.executor,
+            workspace_monitor=populated.workspace_monitor,
+            config_watcher=populated.config_watcher,
         )
 
     @staticmethod

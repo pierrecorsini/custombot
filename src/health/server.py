@@ -610,6 +610,7 @@ async def run_health_server(
     db: Optional["Database"] = None,
     neonize_backend: Optional["NeonizeBackend"] = None,
     port: int = 8080,
+    host: str = "127.0.0.1",
     check_whatsapp: bool = True,
     token_usage: Any = None,
 ) -> HealthServer:
@@ -620,5 +621,5 @@ async def run_health_server(
         check_whatsapp=check_whatsapp,
         token_usage=token_usage,
     )
-    await server.start(port=port)
+    await server.start(port=port, host=host)
     return server

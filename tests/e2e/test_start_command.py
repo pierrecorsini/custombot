@@ -452,6 +452,7 @@ def test_start_command_help(cli_runner: CliRunner):
     assert "start" in result.output.lower()
     assert "--config" in result.output
     assert "--health-port" in result.output
+    assert "--health-host" in result.output
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -95,6 +95,7 @@ async def _run_bot(
     config: Config,
     verbose: bool = False,
     health_port: Optional[int] = None,
+    health_host: str = "127.0.0.1",
     safe_mode: bool = False,
 ) -> None:
     """Run the bot with all components and graceful shutdown handling."""
@@ -102,6 +103,7 @@ async def _run_bot(
         config,
         verbose=verbose,
         health_port=health_port,
+        health_host=health_host,
         safe_mode=safe_mode,
     )
     await app.run()
@@ -182,6 +184,13 @@ def cli(ctx, verbose, verbosity, log_format):
     help="Port for health check HTTP server (disabled if not specified)",
 )
 @click.option(
+    "--health-host",
+    "health_host",
+    default="127.0.0.1",
+    show_default=True,
+    help="Host/IP to bind the health check server to. Use 0.0.0.0 to expose to all interfaces.",
+)
+@click.option(
     "--log-llm",
     "log_llm",
     is_flag=True,
@@ -196,7 +205,7 @@ def cli(ctx, verbose, verbosity, log_format):
     help="Confirm every outgoing message before sending (Y/N prompt)",
 )
 @click.pass_context
-def start(ctx, config_path, health_port, log_llm, safe_mode):
+def start(ctx, config_path, health_port, health_host, log_llm, safe_mode):
     """
     Start the bot and listen for WhatsApp messages.
 
@@ -208,6 +217,7 @@ def start(ctx, config_path, health_port, log_llm, safe_mode):
     Examples:
         python main.py start
         python main.py start --health-port 8080
+        python main.py start --health-port 8080 --health-host 0.0.0.0
         python main.py start --config my_config.json
         python main.py start --log-llm
     """
@@ -291,6 +301,7 @@ def start(ctx, config_path, health_port, log_llm, safe_mode):
                 cfg,
                 verbose=ctx.obj["verbose"],
                 health_port=health_port,
+                health_host=health_host,
                 safe_mode=safe_mode,
             )
         )
