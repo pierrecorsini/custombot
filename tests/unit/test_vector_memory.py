@@ -3404,3 +3404,116 @@ class TestConcurrentReadWriteIsolation:
         # Fresh search should see all committed entries
         fresh_results = vm._search_sync("chat1", query_vec, 10)
         assert len(fresh_results) == num_initial + num_new
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Embedding model change detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEmbeddingModelTracking:
+    """Tests for detecting embedding model changes across restarts."""
+
+    def test_stores_model_on_first_connect(self, vm: VectorMemory):
+        """A fresh database should record the embedding model in _schema_meta."""
+        assert vm._db is not None
+        row = vm._db.execute(
+            "SELECT value FROM _schema_meta WHERE key = 'embedding_model'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == EMBEDDING_MODEL
+
+    def test_stores_dimensions_on_first_connect(self, vm: VectorMemory):
+        """A fresh database should record the embedding dimensions in _schema_meta."""
+        assert vm._db is not None
+        row = vm._db.execute(
+            "SELECT value FROM _schema_meta WHERE key = 'embedding_dimensions'"
+        ).fetchone()
+        assert row is not None
+        assert int(row[0]) == EMBEDDING_DIM
+
+    def test_no_warning_when_model_matches(self, db_path: Path, mock_client, caplog):
+        """Reconnecting with the same model should not emit a warning."""
+        import logging
+
+        vm1 = VectorMemory(str(db_path), mock_client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm1.connect()
+        vm1.close()
+
+        with caplog.at_level(logging.WARNING, logger="src.vector_memory"):
+            vm2 = VectorMemory(
+                str(db_path), mock_client, EMBEDDING_MODEL, EMBEDDING_DIM
+            )
+            vm2.connect()
+            vm2.close()
+
+        model_warnings = [
+            r for r in caplog.records if "Embedding model changed" in r.message
+        ]
+        dims_warnings = [
+            r for r in caplog.records if "Embedding dimensions changed" in r.message
+        ]
+        assert len(model_warnings) == 0
+        assert len(dims_warnings) == 0
+
+    def test_warns_on_model_change(self, db_path: Path, mock_client, caplog):
+        """Reconnecting with a different model should emit a WARNING."""
+        import logging
+
+        vm1 = VectorMemory(str(db_path), mock_client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm1.connect()
+        vm1.close()
+
+        with caplog.at_level(logging.WARNING, logger="src.vector_memory"):
+            vm2 = VectorMemory(
+                str(db_path), mock_client, "text-embedding-3-large", EMBEDDING_DIM
+            )
+            vm2.connect()
+            vm2.close()
+
+        model_warnings = [
+            r for r in caplog.records if "Embedding model changed" in r.message
+        ]
+        assert len(model_warnings) == 1
+        assert "text-embedding-3-small" in model_warnings[0].message
+        assert "text-embedding-3-large" in model_warnings[0].message
+
+    def test_warns_on_dimensions_change(self, db_path: Path, mock_client, caplog):
+        """Reconnecting with different dimensions should emit a WARNING."""
+        import logging
+
+        vm1 = VectorMemory(str(db_path), mock_client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm1.connect()
+        vm1.close()
+
+        with caplog.at_level(logging.WARNING, logger="src.vector_memory"):
+            vm2 = VectorMemory(
+                str(db_path), mock_client, EMBEDDING_MODEL, 3072
+            )
+            vm2.connect()
+            vm2.close()
+
+        dims_warnings = [
+            r for r in caplog.records if "Embedding dimensions changed" in r.message
+        ]
+        assert len(dims_warnings) == 1
+        assert str(EMBEDDING_DIM) in dims_warnings[0].message
+        assert "3072" in dims_warnings[0].message
+
+    def test_stamps_current_model_after_check(self, db_path: Path, mock_client):
+        """After _check_embedding_model(), the stored model should match current config."""
+        vm1 = VectorMemory(str(db_path), mock_client, EMBEDDING_MODEL, EMBEDDING_DIM)
+        vm1.connect()
+        vm1.close()
+
+        # Connect with a different model — it should stamp the new model
+        vm2 = VectorMemory(
+            str(db_path), mock_client, "text-embedding-3-large", EMBEDDING_DIM
+        )
+        vm2.connect()
+        assert vm2._db is not None
+        row = vm2._db.execute(
+            "SELECT value FROM _schema_meta WHERE key = 'embedding_model'"
+        ).fetchone()
+        assert row[0] == "text-embedding-3-large"
+        vm2.close()

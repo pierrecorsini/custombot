@@ -122,6 +122,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         sqlite_vec.load(self._db)
         self._db.enable_load_extension(False)
         self._ensure_schema()
+        self._check_embedding_model()
         self._load_retry_queue()
 
     def warmup(self) -> None:
@@ -367,6 +368,60 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         self._db.execute(
             "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('version', ?)",
             (str(_SCHEMA_VERSION),),
+        )
+        self._db.commit()
+
+    def _check_embedding_model(self) -> None:
+        """Detect embedding model changes across restarts.
+
+        Stores the configured embedding model name and dimensions in
+        ``_schema_meta`` on first write.  On subsequent startups, compares
+        the stored values against the current configuration and emits a
+        loud warning when they differ — existing vectors become silently
+        incompatible when the model or dimensionality changes.
+        """
+        assert self._db is not None
+        stored_model = self._db.execute(
+            "SELECT value FROM _schema_meta WHERE key = 'embedding_model'"
+        ).fetchone()
+        stored_dims = self._db.execute(
+            "SELECT value FROM _schema_meta WHERE key = 'embedding_dimensions'"
+        ).fetchone()
+
+        model_changed = (
+            stored_model is not None and stored_model[0] != self._embedding_model
+        )
+        dims_changed = (
+            stored_dims is not None and int(stored_dims[0]) != self._dimensions
+        )
+
+        if model_changed:
+            log.warning(
+                "Embedding model changed since last run: "
+                "stored=%r, current=%r. Existing vectors are INCOMPATIBLE "
+                "and will return incorrect results. Consider re-indexing "
+                "or deleting the vector memory database.",
+                stored_model[0],
+                self._embedding_model,
+            )
+        if dims_changed:
+            log.warning(
+                "Embedding dimensions changed since last run: "
+                "stored=%s, current=%d. Existing vectors are INCOMPATIBLE "
+                "and will return incorrect results. Consider re-indexing "
+                "or deleting the vector memory database.",
+                stored_dims[0],
+                self._dimensions,
+            )
+
+        # Always stamp current config so a fresh DB records the model on first run
+        self._db.execute(
+            "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('embedding_model', ?)",
+            (self._embedding_model,),
+        )
+        self._db.execute(
+            "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('embedding_dimensions', ?)",
+            (str(self._dimensions),),
         )
         self._db.commit()
 
