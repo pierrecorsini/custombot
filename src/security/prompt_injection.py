@@ -332,20 +332,20 @@ def detect_injection(text: str) -> InjectionDetectionResult:
     max_confidence = 0.0
 
     # Single-pass scan using combined alternation regex (much faster than
-    # iterating N patterns sequentially — one regex engine pass per tier)
+    # iterating N patterns sequentially — one regex engine pass per tier).
+    # Uses m.lastindex for O(1) lookup instead of iterating all groups.
     m = _HIGH_COMBINED.search(normalized)
     if m:
-        # Determine which named group matched
-        for i, name in enumerate(_HIGH_NAMES):
-            if m.group(f"_{i}") is not None:
-                matched.append(name)
+        idx = (m.lastindex or 0) - 1  # lastindex is 1-based group index
+        if 0 <= idx < len(_HIGH_NAMES):
+            matched.append(_HIGH_NAMES[idx])
         max_confidence = 0.9
 
     m = _MEDIUM_COMBINED.search(normalized)
     if m:
-        for i, name in enumerate(_MEDIUM_NAMES):
-            if m.group(f"_{i}") is not None:
-                matched.append(name)
+        idx = (m.lastindex or 0) - 1
+        if 0 <= idx < len(_MEDIUM_NAMES):
+            matched.append(_MEDIUM_NAMES[idx])
         max_confidence = max(max_confidence, 0.6)
 
     if matched:
