@@ -100,6 +100,8 @@ log = logging.getLogger(__name__)
 
 lifecycle_log = logging.getLogger("lifecycle.bot")
 
+__all__ = ["Bot", "BotConfig", "TurnContext"]
+
 # LLM error codes that are transient and worth retrying.
 _RETRYABLE_LLM_ERROR_CODES: frozenset[ErrorCode] = frozenset({
     ErrorCode.LLM_RATE_LIMITED,

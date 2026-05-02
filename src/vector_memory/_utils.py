@@ -11,6 +11,8 @@ from src.core.errors import NonCriticalCategory, log_noncritical
 
 _log = logging.getLogger(__name__)
 
+__all__ = ["_cache_key", "_serialize_f32", "_track_embed_cache_event"]
+
 
 def _cache_key(text: str) -> str:
     """Return a fast non-cryptographic hash for embedding cache deduplication.

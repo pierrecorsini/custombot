@@ -28,6 +28,18 @@ from src.core.errors import NonCriticalCategory, log_noncritical
 
 log = logging.getLogger(__name__)
 
+__all__ = [
+    "_check_deprecated_options",
+    "_check_unknown_keys",
+    "_collect_known_field_names",
+    "_get_default_values",
+    "_get_suggestion_for_error",
+    "_log_default_values_used",
+    "_log_effective_config",
+    "_log_validation_errors",
+    "_redact_secrets",
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Deprecated option checks
