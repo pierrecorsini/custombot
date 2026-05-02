@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -272,29 +273,40 @@ class Memory:
         # with full validation before creating directories on disk.
         self._path_cache.pop(chat_id, None)
         d = self._ensure_chat_dir(chat_id)
-        agents_path = d / AGENTS_FILENAME
-        if not agents_path.exists():
-            # Atomic write: temp file → rename prevents corruption from
-            # concurrent calls for the same new chat
-            try:
-                tmp = d / f"{AGENTS_FILENAME}.tmp"
-                tmp.write_text(_DEFAULT_AGENTS_MD, encoding="utf-8")
-                tmp.rename(agents_path)
-            except FileExistsError:
-                # Another coroutine won the race — that's fine
-                pass
+        if self._atomic_seed(d / AGENTS_FILENAME, _DEFAULT_AGENTS_MD):
             self._agents_cache.invalidate(chat_id)
-            log.debug("Seeded %s", agents_path)
+            log.debug("Seeded %s", d / AGENTS_FILENAME)
         # Store original chat_id for reverse lookup (JID reconstruction)
-        origin_path = d / self.ORIGIN_ID_FILENAME
-        if not origin_path.exists():
-            try:
-                tmp = d / f"{self.ORIGIN_ID_FILENAME}.tmp"
-                tmp.write_text(chat_id, encoding="utf-8")
-                tmp.rename(origin_path)
-            except FileExistsError:
-                pass
+        self._atomic_seed(d / self.ORIGIN_ID_FILENAME, chat_id)
         return d
+
+    @staticmethod
+    def _atomic_seed(path: Path, content: str) -> bool:
+        """Atomically create *path* with *content* if it doesn't exist.
+
+        Uses ``os.O_EXCL | os.O_CREAT`` on a temp file then renames,
+        eliminating the TOCTOU window of an ``exists()`` check.
+
+        Returns ``True`` if the file was created, ``False`` if it already
+        existed.
+        """
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            # Another coroutine is already writing — it will finish.
+            return False
+        try:
+            os.write(fd, content.encode("utf-8"))
+        finally:
+            os.close(fd)
+        try:
+            tmp.rename(path)
+        except FileExistsError:
+            # Final file appeared (another writer finished first) — clean up.
+            tmp.unlink(missing_ok=True)
+            return False
+        return True
 
     async def read_memory(self, chat_id: str) -> Optional[str]:
         """Return the contents of MEMORY.md, or None if it doesn't exist."""
