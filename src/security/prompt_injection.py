@@ -30,7 +30,6 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Optional
 
 log = logging.getLogger(__name__)
 

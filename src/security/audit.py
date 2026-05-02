@@ -78,7 +78,11 @@ class SkillAuditLogger(ThreadLockMixin):
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "audit.jsonl"
         self._chain_hashes = chain_hashes
-        self._prev_hash: str | None = hmac.new(self._CHAIN_KEY, b"", hashlib.sha256).hexdigest() if chain_hashes else None
+        self._prev_hash: str | None = (
+            hmac.new(self._CHAIN_KEY, b"", hashlib.sha256).hexdigest()
+            if chain_hashes
+            else None
+        )
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -103,7 +107,9 @@ class SkillAuditLogger(ThreadLockMixin):
             entry["_prev_hash"] = self._prev_hash
         line = json.dumps(entry, default=str)
         if self._prev_hash is not None:
-            self._prev_hash = hmac.new(self._CHAIN_KEY, line.encode("utf-8"), hashlib.sha256).hexdigest()
+            self._prev_hash = hmac.new(
+                self._CHAIN_KEY, line.encode("utf-8"), hashlib.sha256
+            ).hexdigest()
         with self._lock:
             if self._path is None:
                 return  # logger has been closed

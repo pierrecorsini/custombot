@@ -21,11 +21,12 @@ Usage::
 
 from __future__ import annotations
 
-import xxhash
 import logging
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
+
+import xxhash
 
 from src.constants import OUTBOUND_DEDUP_MAX_SIZE, OUTBOUND_DEDUP_TTL_SECONDS
 from src.exceptions import DatabaseError
@@ -44,7 +45,7 @@ def outbound_key(chat_id: str, text: str) -> str:
     xxHash is ~10× faster than SHA-256 and sufficient for a TTL-bounded
     LRU cache key (not a cryptographic use case).
     """
-    return xxhash.xxh64(f"{chat_id}\x00{text}".encode("utf-8")).hexdigest()
+    return xxhash.xxh64(f"{chat_id}\x00{text}".encode()).hexdigest()
 
 
 @dataclass(slots=True)
