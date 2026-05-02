@@ -95,10 +95,13 @@ jobs:
       - name: mypy
         run: mypy src main.py
 
-  # Progressive type-safety gate — runs mypy --strict on critical modules.
-  # Non-blocking (continue-on-error) until the subset is fully annotated.
+  # Progressive type-safety gate — runs mypy --strict on all of src/.
+  # Non-blocking (continue-on-error) until all modules are fully annotated.
+  # Tracks strict-typing violations so they can be fixed incrementally without
+  # blocking PRs.  When the job passes consistently, promote it to a hard gate
+  # by removing continue-on-error.
   typecheck-strict:
-    name: Strict Type Check (opt-in)
+    name: Strict Type Check (non-blocking)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -115,8 +118,8 @@ jobs:
           pip install -r requirements.txt
           pip install mypy==1.20.2
 
-      - name: mypy --strict on critical modules
-        run: mypy --strict src/core src/bot.py src/channels src/security src/monitoring
+      - name: mypy --strict on src/
+        run: mypy --strict src
 
   test:
     name: Test (Python ${{ matrix.python-version }})
