@@ -378,14 +378,10 @@ class Memory:
         return result
 
     def _backup_memory_file_sync(self, chat_id: str) -> Optional[str]:
-        """
-        Create a backup of a chat's MEMORY.md file.
+        """Create a backup of a chat's MEMORY.md file (shared implementation).
 
-        Args:
-            chat_id: Chat/group ID
-
-        Returns:
-            Path to backup file, or None if backup failed
+        Both the sync and async backup paths delegate here so the logic
+        is defined once.
         """
         path = self._chat_dir(chat_id) / MEMORY_FILENAME
 
@@ -408,25 +404,8 @@ class Memory:
             return None
 
     async def abackup_memory_file(self, chat_id: str) -> Optional[str]:
-        """Async counterpart of _backup_memory_file_sync — offloads I/O to a thread."""
-        path = self._chat_dir(chat_id) / MEMORY_FILENAME
-        if not path.exists():
-            return None
-
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_dir = self._root / BACKUP_DIR
-        backup_dir.mkdir(parents=True, exist_ok=True)
-
-        safe_id = sanitize_path_component(chat_id)
-        backup_file = backup_dir / f"{safe_id}_{timestamp}.md.bak"
-
-        try:
-            await asyncio.to_thread(shutil.copy2, path, backup_file)
-            log.info("Created memory backup: %s", backup_file)
-            return str(backup_file)
-        except OSError as exc:
-            log.error("Failed to create memory backup: %s", exc)
-            return None
+        """Async counterpart — offloads backup I/O to a thread."""
+        return await asyncio.to_thread(self._backup_memory_file_sync, chat_id)
 
     def _repair_memory_file_sync(self, chat_id: str, backup: bool = True) -> MemoryCorruptionResult:
         """
