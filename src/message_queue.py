@@ -520,7 +520,7 @@ class MessageQueue(AsyncLockMixin):
             result.total_lines += 1
 
             data = safe_json_parse(
-                line, default=None, log_errors=False, mode=JsonParseMode.LINE
+                line, default=None, log_errors=True, mode=JsonParseMode.LINE
             )
             if data is None:
                 result.corrupted_lines.append(line_num)
@@ -630,7 +630,7 @@ class MessageQueue(AsyncLockMixin):
 
         for line in content.splitlines():
             data = safe_json_parse(
-                line, default=None, log_errors=False, mode=JsonParseMode.LINE
+                line, default=None, log_errors=True, mode=JsonParseMode.LINE
             )
             if data is None:
                 continue
