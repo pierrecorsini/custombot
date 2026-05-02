@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -107,6 +108,8 @@ class SkillAuditLogger(ThreadLockMixin):
             try:
                 with open(self._path, "a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
                 self._maybe_rotate()
             except OSError as exc:
                 log.warning("Failed to write audit entry: %s", exc)
