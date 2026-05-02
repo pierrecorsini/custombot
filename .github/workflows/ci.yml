@@ -344,6 +344,27 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
+  # Docker build smoke test.
+  # Verifies the built image can start and respond to --help, catching
+  # dependency or import errors before deployment.
+  # ---------------------------------------------------------------------------
+  docker-smoke:
+    name: Docker Smoke Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t custombot:smoke .
+
+      - name: Smoke test — verify --help exits cleanly
+        run: docker run --rm custombot:smoke --help
+
+      - name: Smoke test — verify application imports
+        run: docker run --rm --entrypoint python custombot:smoke -c "import src; print('imports OK')"
+
+  # ---------------------------------------------------------------------------
   # Docker image vulnerability scanning with Trivy.
   # Builds the production image and scans it for OS and library CVEs.
   # Non-blocking initially — once baseline is established, remove
