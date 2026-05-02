@@ -425,7 +425,11 @@ class TaskScheduler(BaseBackgroundService):
             interval_sec = schedule.get("seconds", 3600)
             if not last_run:
                 return True
-            elapsed = (now - datetime.fromisoformat(last_run)).total_seconds()
+            last_run_epoch = task.get("last_run_epoch")
+            if last_run_epoch is not None:
+                elapsed = now.timestamp() - last_run_epoch
+            else:
+                elapsed = (now - datetime.fromisoformat(last_run)).total_seconds()
             if elapsed >= interval_sec:
                 return True
 
@@ -535,7 +539,9 @@ class TaskScheduler(BaseBackgroundService):
                 ) from None
 
             task["last_result"] = (result or "")[:2000]
-            task["last_run"] = _now().isoformat()
+            now_dt = _now()
+            task["last_run"] = now_dt.isoformat()
+            task["last_run_epoch"] = now_dt.timestamp()
 
             # Deliver result — transport layer handles reconnection
             if not result:
@@ -658,7 +664,11 @@ class TaskScheduler(BaseBackgroundService):
                     if not last_run:
                         candidate = 0.0
                     else:
-                        elapsed = (now - datetime.fromisoformat(last_run)).total_seconds()
+                        last_run_epoch = task.get("last_run_epoch")
+                        if last_run_epoch is not None:
+                            elapsed = now.timestamp() - last_run_epoch
+                        else:
+                            elapsed = (now - datetime.fromisoformat(last_run)).total_seconds()
                         candidate = max(0.0, interval_sec - elapsed)
 
                 elif stype in ("daily", "cron"):
