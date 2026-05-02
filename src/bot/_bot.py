@@ -940,6 +940,42 @@ class Bot:
             channel=channel,
         )
 
+    # ── config hot-reload ──────────────────────────────────────────────────
+
+    def update_config(self, new_cfg: BotConfig) -> None:
+        """Update the bot config with validation.
+
+        Validates *new_cfg* (positive ``max_tool_iterations``, non-negative
+        ``memory_max_history``) and replaces the internal config reference.
+        Propagates the change to the :class:`ContextAssembler` so subsequent
+        message processing picks up the new values immediately.
+
+        Called by :class:`ConfigChangeApplier` during hot-reload — **do not**
+        use ``object.__setattr__`` to mutate ``_cfg`` directly.
+        """
+        if not isinstance(new_cfg, BotConfig):
+            raise TypeError(f"Expected BotConfig, got {type(new_cfg).__name__}")
+        if new_cfg.max_tool_iterations <= 0:
+            raise ValueError(
+                f"max_tool_iterations must be positive, got {new_cfg.max_tool_iterations}"
+            )
+        if new_cfg.memory_max_history < 0:
+            raise ValueError(
+                f"memory_max_history must be non-negative, got {new_cfg.memory_max_history}"
+            )
+        old_cfg = self._cfg
+        self._cfg = new_cfg
+        # Propagate to ContextAssembler so context assembly uses updated values
+        self._context_assembler._config = new_cfg
+        log.info(
+            "Bot config updated: max_tool_iterations=%d → %d, "
+            "memory_max_history=%d → %d",
+            old_cfg.max_tool_iterations,
+            new_cfg.max_tool_iterations,
+            old_cfg.memory_max_history,
+            new_cfg.memory_max_history,
+        )
+
     # ── helpers ────────────────────────────────────────────────────────────
 
     def _load_instruction(self, filename: str) -> str:

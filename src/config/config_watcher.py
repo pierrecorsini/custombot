@@ -220,7 +220,7 @@ class ConfigChangeApplier:
     # ── Per-component appliers ────────────────────────────────────────────
 
     def _apply_bot_config(self, new_config: Config, changed: Set[str]) -> None:
-        """Rebuild ``BotConfig`` and replace on the bot instance."""
+        """Rebuild ``BotConfig`` and apply via :meth:`Bot.update_config`."""
         from src.bot import BotConfig
 
         bot_fields = {
@@ -237,28 +237,18 @@ class ConfigChangeApplier:
             system_prompt_prefix=new_config.llm.system_prompt_prefix,
             stream_response=self._bot._cfg.stream_response,  # destructive — keep old
         )
-        object.__setattr__(self._bot, "_cfg", new_bot_cfg)
-        log.debug(
-            "BotConfig updated: max_tool_iterations=%d, memory_max_history=%d",
-            new_bot_cfg.max_tool_iterations,
-            new_bot_cfg.memory_max_history,
-        )
+        self._bot.update_config(new_bot_cfg)
 
     def _apply_channel_config(self, new_config: Config, changed: Set[str]) -> None:
         """Delegate channel-specific config changes to the channel."""
         self._channel.apply_channel_config(new_config, changed)
 
     def _apply_llm_config(self, new_config: Config, changed: Set[str]) -> None:
-        """Update LLM client config (temperature)."""
+        """Update LLM client config (temperature, timeout)."""
         if "llm.temperature" not in changed and "llm.timeout" not in changed:
             return
 
-        self._llm._cfg = new_config.llm
-        log.debug(
-            "LLM config updated: temperature=%.2f, timeout=%.1f",
-            new_config.llm.temperature,
-            new_config.llm.timeout,
-        )
+        self._llm.update_config(new_config.llm)
 
     def _apply_shutdown_config(
         self, new_config: Config, changed: Set[str]

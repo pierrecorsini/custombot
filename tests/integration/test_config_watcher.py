@@ -55,6 +55,12 @@ def _make_applier(config: Config):
         stream_response=False,
     )
 
+    # Wire update_config to actually replace _cfg, mirroring Bot.update_config()
+    def _bot_update_config(new_cfg: BotConfig) -> None:
+        mock_bot._cfg = new_cfg
+
+    mock_bot.update_config = _bot_update_config
+
     mock_channel = MagicMock()
     mock_channel.apply_channel_config = MagicMock()
 
