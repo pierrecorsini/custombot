@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.builder import BotComponents, build_bot
+from src.builder import BotComponents, BuilderContext, build_bot, _step_vector_memory
 from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
 from src.skills import SkillRegistry
 from src.skills.base import BaseSkill
@@ -382,3 +382,146 @@ class TestWireLLMClientsResilience:
         assert any(getattr(r, "skill", None) == "skill_b" for r in caplog.records)
         error_msgs = [r.message for r in caplog.records]
         assert any("Failed to wire" in msg for msg in error_msgs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: VectorMemory startup degradation path
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestVectorMemoryStartupDegradation:
+    """Tests for _step_vector_memory() graceful degradation on probe failure.
+
+    The builder step has complex error handling when the embedding model
+    probe fails: it must close the partially-initialized VectorMemory,
+    set the context field to None, and return a DEGRADED status — all
+    without crashing the overall build process.
+
+    This path is distinct from constructor failure (tested in
+    ``TestVectorMemoryConstruction.test_vm_degrades_gracefully_on_failure``)
+    because VectorMemory is fully constructed and connected before the
+    probe rejects it.
+    """
+
+    @staticmethod
+    def _make_probe_fail_vm() -> MagicMock:
+        """Create a VectorMemory mock whose embedding probe returns failure."""
+        vm = MagicMock()
+        vm.connect = MagicMock()
+        vm.close = MagicMock()
+        vm.probe_embedding_model = AsyncMock(return_value=(False, "Connection refused"))
+        return vm
+
+    @staticmethod
+    def _make_mock_spinner() -> MagicMock:
+        """Async context manager mock for maybe_spinner_async."""
+        spinner = MagicMock()
+        spinner.__aenter__ = AsyncMock(return_value=None)
+        spinner.__aexit__ = AsyncMock(return_value=False)
+        return spinner
+
+    @pytest.fixture
+    def degradation_ctx(self, tmp_path: Path, test_config: Config) -> BuilderContext:
+        """BuilderContext with LLM mock but no vector_memory set."""
+        mock_llm = MagicMock()
+        mock_llm.openai_client = MagicMock()
+        return BuilderContext(
+            config=test_config,
+            workspace=tmp_path,
+            llm=mock_llm,
+            db=AsyncMock(),
+        )
+
+    async def test_probe_failure_sets_vector_memory_none(
+        self, degradation_ctx: BuilderContext
+    ):
+        """When embedding probe fails, vector_memory should be None."""
+        vm_mock = self._make_probe_fail_vm()
+        spinner = self._make_mock_spinner()
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+        ):
+            await _step_vector_memory(degradation_ctx)
+
+        assert degradation_ctx.vector_memory is None
+
+    async def test_probe_failure_closes_vm(self, degradation_ctx: BuilderContext):
+        """Probe failure should close the partially-initialized VectorMemory."""
+        vm_mock = self._make_probe_fail_vm()
+        spinner = self._make_mock_spinner()
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+        ):
+            await _step_vector_memory(degradation_ctx)
+
+        vm_mock.close.assert_called_once()
+
+    async def test_probe_failure_returns_degraded_status(
+        self, degradation_ctx: BuilderContext
+    ):
+        """Step should return DEGRADED status string on probe failure."""
+        vm_mock = self._make_probe_fail_vm()
+        spinner = self._make_mock_spinner()
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+        ):
+            result = await _step_vector_memory(degradation_ctx)
+
+        assert result is not None
+        assert "DEGRADED" in result
+
+    async def test_probe_failure_logs_warning(
+        self, degradation_ctx: BuilderContext, caplog
+    ):
+        """Degradation should be logged at WARNING level for observability."""
+        vm_mock = self._make_probe_fail_vm()
+        spinner = self._make_mock_spinner()
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+        ):
+            with caplog.at_level("WARNING", logger="src.builder"):
+                await _step_vector_memory(degradation_ctx)
+
+        warning_msgs = [r.message for r in caplog.records if r.levelno >= 30]
+        assert any("degraded" in msg.lower() for msg in warning_msgs)
+
+    async def test_close_failure_during_cleanup_still_degrades(
+        self, degradation_ctx: BuilderContext
+    ):
+        """If vm.close() also raises during probe cleanup, still degrade gracefully."""
+        vm_mock = self._make_probe_fail_vm()
+        vm_mock.close.side_effect = RuntimeError("DB lock")
+        spinner = self._make_mock_spinner()
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+        ):
+            result = await _step_vector_memory(degradation_ctx)
+
+        assert degradation_ctx.vector_memory is None
+        assert result is not None
+        assert "DEGRADED" in result
+
+    async def test_db_not_wired_on_probe_failure(
+        self, degradation_ctx: BuilderContext
+    ):
+        """set_vector_memory() should NOT be called when probe fails."""
+        vm_mock = self._make_probe_fail_vm()
+        spinner = self._make_mock_spinner()
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+        ):
+            await _step_vector_memory(degradation_ctx)
+
+        degradation_ctx.db.set_vector_memory.assert_not_called()
