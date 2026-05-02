@@ -39,41 +39,31 @@ jobs:
       - name: Ruff format check
         run: ruff format --check src tests main.py
 
-  # Verify that requirements.txt and pyproject.toml [project.dependencies]
-  # declare the same dependency set (name + version constraint).  Catches
-  # silent drift between the two files before it reaches production.
+  # Verify that requirements.txt and requirements-lock.txt are generated
+  # from pyproject.toml via pip-compile.  Regenerates both files and diffs
+  # against the committed versions — catches hand-edits and drift before
+  # they reach production.
   check-deps-sync:
     name: Dependency Sync Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify requirements.txt ↔ pyproject.toml sync
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install pip-tools
+        run: pip install pip-tools
+
+      - name: Verify generated requirements are in sync
         run: |
-          # Extract deps from pyproject.toml — only lines with a quoted package spec
-          toml_deps=$(sed -n '/^dependencies = \[/,/^\]/p' pyproject.toml \
-            | grep '"' \
-            | sed 's/.*"\([^"]*\)".*/\1/' \
-            | sort)
-
-          # Extract deps from requirements.txt (skip comments/blanks)
-          req_deps=$(grep -v '^\s*#\|^$' requirements.txt | sort)
-
-          if [ "$toml_deps" = "$req_deps" ]; then
-            echo "✅ requirements.txt and pyproject.toml are in sync"
-          else
-            echo "❌ Dependency mismatch detected!"
-            echo ""
-            echo "--- pyproject.toml only ---"
-            diff <(echo "$req_deps") <(echo "$toml_deps") | grep '^>' || true
-            echo ""
-            echo "--- requirements.txt only ---"
-            diff <(echo "$req_deps") <(echo "$toml_deps") | grep '^<' || true
-            echo ""
-            echo "Full diff:"
-            diff <(echo "$req_deps") <(echo "$toml_deps") || true
-            exit 1
-          fi
+          pip-compile --strip-extras --output-file=requirements.txt pyproject.toml --quiet
+          pip-compile --generate-hashes --output-file=requirements-lock.txt requirements.txt --quiet
+          git diff --exit-code requirements.txt requirements-lock.txt \
+            || (echo "ERROR: requirements files are out of sync with pyproject.toml. Run 'make requirements-all' to regenerate." && exit 1)
+          echo "✅ requirements.txt and requirements-lock.txt match pyproject.toml"
 
   typecheck:
     name: Type Check
