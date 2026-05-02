@@ -13,8 +13,11 @@ Usage::
     # Inbound check (called from Bot)
     if await dedup.is_inbound_duplicate("msg_123"):
         return
-    # Outbound check (called from Scheduler)
-    if dedup.is_outbound_duplicate("chat_1", "response text"):
+    # Outbound check + record (called from Scheduler — single hash computation)
+    if dedup.check_and_record_outbound("chat_1", "response text"):
+        return
+    # Or two-phase for when recording must happen after a successful send:
+    if dedup.check_outbound_duplicate("chat_1", "response text"):
         return
     dedup.record_outbound("chat_1", "response text")
 """
@@ -166,6 +169,24 @@ class DeduplicationService:
         """
         key = outbound_key(chat_id, text)
         self._outbound_cache[key] = time.monotonic()
+
+    def check_and_record_outbound(self, chat_id: str, text: str) -> bool:
+        """Combined check + record: returns ``True`` if duplicate.
+
+        Computes the content hash **once** and performs both the duplicate
+        check and (on miss) the recording in a single pass.  Use this
+        instead of calling :meth:`check_outbound_duplicate` followed by
+        :meth:`record_outbound` to avoid redundant xxh64 computation.
+        """
+        key = outbound_key(chat_id, text)
+        now = time.monotonic()
+        sent_at = self._outbound_cache.get(key)
+        if sent_at is not None and (now - sent_at) < self._outbound_ttl:
+            self._stats.outbound_hits += 1
+            return True
+        self._outbound_cache[key] = now
+        self._stats.outbound_misses += 1
+        return False
 
     # ── Stats ───────────────────────────────────────────────────────────────
 

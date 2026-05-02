@@ -568,7 +568,7 @@ class TaskScheduler(BaseBackgroundService):
                 # Outbound dedup: skip sending if the same content was
                 # already delivered to this chat within the TTL window.
                 # Uses the unified DeduplicationService.
-                if self._dedup and self._dedup.check_outbound_duplicate(chat_id, formatted):
+                if self._dedup and self._dedup.check_and_record_outbound(chat_id, formatted):
                     log.info(
                         "Scheduled task %s response suppressed (duplicate outbound) for chat %s",
                         task_id,
@@ -615,8 +615,6 @@ class TaskScheduler(BaseBackgroundService):
         for attempt in range(max_attempts):
             try:
                 await self._on_send(chat_id, formatted)
-                if self._dedup:
-                    self._dedup.record_outbound(chat_id, formatted)
                 log.info(
                     "Delivered scheduled task %s to chat %s",
                     task_id,
