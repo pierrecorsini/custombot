@@ -310,6 +310,10 @@ class RoutingEngine:
         self._rules_by_channel: dict[str, list[RoutingRule]] = {}
         self._wildcard_rules: list[RoutingRule] = []
         self._regex_channel_rules: list[RoutingRule] = []
+        # Pre-computed merged candidate lists per channel (built once on
+        # rebuild, avoiding per-message list allocation in match_with_rule).
+        self._candidates_by_channel: dict[str, list[RoutingRule]] = {}
+        self._default_candidates: list[RoutingRule] = []
         # TTL-bounded LRU cache for match results (delegated to BoundedOrderedDict).
         # Key: (fromMe, toMe, sender_id, chat_id, channel_type, text[:100])
         # Value: (rule | None, instruction | None)
@@ -423,6 +427,19 @@ class RoutingEngine:
         self._rules_by_channel = by_channel
         self._wildcard_rules = wildcard
         self._regex_channel_rules = regex_channel
+        # Pre-compute merged candidate lists so match_with_rule() can
+        # do a single dict lookup instead of two _merge_priority_sorted
+        # calls per message.
+        self._candidates_by_channel = {
+            channel: _merge_priority_sorted(
+                _merge_priority_sorted(rules, wildcard),
+                regex_channel,
+            )
+            for channel, rules in by_channel.items()
+        }
+        # Default candidates for channels not present in the index
+        # (wildcard + regex-channel rules only).
+        self._default_candidates = _merge_priority_sorted(wildcard, regex_channel)
 
     def _scan_file_mtimes(self) -> dict[str, float]:
         """Collect current mtimes for all .md files in the instructions directory.
@@ -591,15 +608,13 @@ class RoutingEngine:
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        # Evaluate rules using channel-grouped index
+        # Evaluate rules using pre-computed channel-grouped index
         channel_str = str(ctx.channel_type)
-        # Merge channel-specific rules + wildcard rules + regex-channel
-        # rules, preserving priority order
-        channel_rules = self._rules_by_channel.get(channel_str, [])
-        candidate_rules = _merge_priority_sorted(
-            _merge_priority_sorted(channel_rules, self._wildcard_rules),
-            self._regex_channel_rules,
-        )
+        candidates = self._candidates_by_channel.get(channel_str)
+        if candidates is not None:
+            candidate_rules = candidates
+        else:
+            candidate_rules = self._default_candidates
 
         for rule in candidate_rules:
             if not rule.enabled:
