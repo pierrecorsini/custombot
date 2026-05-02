@@ -498,14 +498,22 @@ class TaskScheduler(BaseBackgroundService):
     async def _execute_task(self, chat_id: str, task: dict[str, Any]) -> None:
         """Execute a due task by invoking the bot.
 
+        All reads from the shared ``task`` dict are snapshot at entry (before
+        any ``await``) so that concurrent ``asyncio.gather`` executions never
+        observe partially-mutated state.  Mutations (``last_result``,
+        ``last_run``, ``last_run_epoch``) are written back in a single
+        synchronous block after execution completes.
+
         Note: the caller (_loop) is responsible for persisting updated task
         state to disk after all tasks in a tick have completed.  This allows
         batching — one write per unique chat_id instead of one per task.
         """
+        # ── snapshot all reads from the shared dict (no awaits above) ──
+        task_id: str = task.get("task_id", "unknown")
         prompt = task.get("prompt", "")
         compare = task.get("compare", False)
         last_result = task.get("last_result")
-        task_label = task.get("label", task.get("task_id", "unknown"))
+        task_label = task.get("label", task_id)
 
         log.info(
             "━━━ ⏰ RUNNING SCHEDULED TASK '%s' ━━━  [chat: %s]",
@@ -522,24 +530,25 @@ class TaskScheduler(BaseBackgroundService):
 
         try:
             if not self._on_trigger:
-                log.warning("No on_trigger callback — skipping task %s", task.get("task_id"))
+                log.warning("No on_trigger callback — skipping task %s", task_id)
                 return
 
             try:
                 result = await asyncio.wait_for(
-                    self._trigger_with_retry(chat_id, prompt, task.get("task_id", "")),
+                    self._trigger_with_retry(chat_id, prompt, task_id),
                     timeout=DEFAULT_SCHEDULER_TASK_TIMEOUT,
                 )
             except asyncio.CancelledError:
                 raise
             except asyncio.TimeoutError:
                 raise RuntimeError(
-                    f"Scheduled task {task.get('task_id', '?')} timed out after "
+                    f"Scheduled task {task_id} timed out after "
                     f"{DEFAULT_SCHEDULER_TASK_TIMEOUT}s"
                 ) from None
 
-            task["last_result"] = (result or "")[:2000]
+            # Write results back to shared dict in one synchronous block
             now_dt = _now()
+            task["last_result"] = (result or "")[:2000]
             task["last_run"] = now_dt.isoformat()
             task["last_run_epoch"] = now_dt.timestamp()
 
@@ -547,37 +556,35 @@ class TaskScheduler(BaseBackgroundService):
             if not result:
                 log.warning(
                     "Scheduled task %s produced empty result — nothing to send",
-                    task["task_id"],
+                    task_id,
                 )
             elif not self._on_send:
                 log.warning(
                     "No on_send callback — result for task %s not delivered",
-                    task["task_id"],
+                    task_id,
                 )
             else:
-                formatted = f"⏰ **{task.get('label', 'Tâche planifiée')}**\n\n{result}"
+                formatted = f"⏰ **{task_label}**\n\n{result}"
                 # Outbound dedup: skip sending if the same content was
                 # already delivered to this chat within the TTL window.
                 # Uses the unified DeduplicationService.
                 if self._dedup and self._dedup.check_outbound_duplicate(chat_id, formatted):
                     log.info(
                         "Scheduled task %s response suppressed (duplicate outbound) for chat %s",
-                        task["task_id"],
+                        task_id,
                         chat_id,
                     )
                 else:
-                    await self._deliver_with_retry(
-                        chat_id, formatted, task.get("task_id", "")
-                    )
+                    await self._deliver_with_retry(chat_id, formatted, task_id)
 
             log.info(
                 "━━━ ✔ SCHEDULED TASK '%s' DONE ━━━  [chat: %s]",
-                task.get("label", task["task_id"]),
+                task_label,
                 chat_id,
             )
             self._success_count += 1
             self._recent_executions.append({
-                "task_id": task["task_id"],
+                "task_id": task_id,
                 "chat_id": chat_id,
                 "status": "success",
                 "timestamp": _now().isoformat(),
@@ -586,13 +593,13 @@ class TaskScheduler(BaseBackgroundService):
         except Exception as exc:
             self._failure_count += 1
             self._recent_executions.append({
-                "task_id": task.get("task_id", "unknown"),
+                "task_id": task_id,
                 "chat_id": chat_id,
                 "status": "failure",
                 "timestamp": _now().isoformat(),
                 "error_summary": f"{type(exc).__name__}: {exc}"[:200],
             })
-            log.error("Error executing task %s: %s", task.get("task_id"), exc, exc_info=True)
+            log.error("Error executing task %s: %s", task_id, exc, exc_info=True)
 
     async def _deliver_with_retry(
         self, chat_id: str, formatted: str, task_id: str,
