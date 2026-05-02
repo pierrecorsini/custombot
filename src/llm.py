@@ -223,6 +223,30 @@ class LLMClient:
         """Token usage statistics for this client instance."""
         return self._token_usage
 
+    def update_config(self, new_cfg: LLMConfig) -> None:
+        """Update the LLM config with validation.
+
+        Validates *new_cfg* via :func:`is_llm_config` and applies it.
+        Also adjusts the httpx timeout to match the new config so that
+        subsequent calls pick up the change immediately.
+        """
+        if not is_llm_config(new_cfg):
+            raise ValueError(f"Invalid LLMConfig: {new_cfg!r}")
+        old_cfg = self._cfg
+        self._cfg = new_cfg
+        # Adjust httpx timeout to reflect the new config value
+        timeout_seconds = new_cfg.timeout if new_cfg.timeout else 120.0
+        self._http_client.timeout = httpx.Timeout(
+            timeout=timeout_seconds, connect=10.0,
+        )
+        log.debug(
+            "LLM config updated: temperature=%.2f → %.2f, timeout=%.1f → %.1f",
+            old_cfg.temperature,
+            new_cfg.temperature,
+            old_cfg.timeout,
+            new_cfg.timeout,
+        )
+
     async def warmup(self) -> bool:
         """Pre-establish the TCP + TLS connection to the LLM provider.
 
@@ -456,8 +480,12 @@ class LLMClient:
         finally:
             try:
                 await acc.best_effort_flush()
-            except Exception:
-                pass  # best-effort by definition — never mask the original error
+            except Exception as flush_exc:
+                log.warning(
+                    "best_effort_flush() failed during stream teardown: %s: %s",
+                    type(flush_exc).__name__,
+                    flush_exc,
+                )
 
     def _track_stream_usage(self, usage_data: Any, chat_id: Optional[str]) -> None:
         """Record token usage from stream summary data."""
