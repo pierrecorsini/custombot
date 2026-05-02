@@ -12,9 +12,9 @@ handling logging, timing, and progress-bar advancement.
 
 Usage::
 
-    from src.builder import _build_bot, BotComponents
+    from src.builder import build_bot, BotComponents
 
-    components: BotComponents = await _build_bot(config, session_metrics=metrics)
+    components: BotComponents = await build_bot(config, session_metrics=metrics)
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class BotComponents:
-    """Named container for the components returned by _build_bot()."""
+    """Named container for the components returned by build_bot()."""
 
     bot: Bot
     db: Database
@@ -521,7 +521,7 @@ class BuilderOrchestrator(StepOrchestrator[BuilderContext, BuilderComponentSpec]
 # ── Public entry point ──────────────────────────────────────────────────
 
 
-async def _build_bot(config: Config, session_metrics: "SessionMetrics | None" = None) -> BotComponents:
+async def build_bot(config: Config, session_metrics: "SessionMetrics | None" = None) -> BotComponents:
     """Instantiate and wire all components with progress indicators."""
     workspace = Path(WORKSPACE_DIR)
     workspace.mkdir(parents=True, exist_ok=True)

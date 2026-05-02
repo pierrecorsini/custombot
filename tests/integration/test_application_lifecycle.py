@@ -175,7 +175,7 @@ class TestApplicationRunLifecycle:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -259,7 +259,7 @@ class TestApplicationRunLifecycle:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -302,7 +302,7 @@ class TestApplicationRunLifecycle:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -349,7 +349,7 @@ class TestApplicationRunLifecycle:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -410,7 +410,7 @@ class TestApplicationRunLifecycle:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -459,7 +459,7 @@ class TestApplicationRunSchedulerWiring:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -502,7 +502,7 @@ class TestApplicationRunSchedulerWiring:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -551,7 +551,7 @@ class TestApplicationRunHealthServer:
         mock_channel.start = _immediate_shutdown
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -599,7 +599,7 @@ class TestApplicationRunHealthServer:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -659,7 +659,7 @@ class TestApplicationRunShutdownDuringQRWait:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -716,7 +716,7 @@ class TestApplicationRunShutdownDuringQRWait:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -758,7 +758,7 @@ class TestApplicationRunShutdownDuringQRWait:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -816,7 +816,7 @@ class TestApplicationRunShutdownDuringQRWait:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),
@@ -894,7 +894,7 @@ class TestApplicationRunShutdownDuringQRWait:
         app._health_server = None
 
         with (
-            patch("src.app._build_bot", return_value=mock_components),
+            patch("src.builder.build_bot", return_value=mock_components),
             patch("src.channels.whatsapp.WhatsAppChannel", return_value=mock_channel),
             patch("src.app.TaskScheduler", return_value=mock_scheduler),
             patch("src.app.set_scheduler_instance"),

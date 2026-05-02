@@ -1,7 +1,7 @@
 """
 src/workspace_integrity.py — Startup workspace integrity verification.
 
-Runs before component initialization in ``_build_bot()`` to detect and
+Runs before component initialization in ``build_bot()`` to detect and
 auto-repair common workspace issues: stale temp files, corrupt JSONL
 databases, and locked SQLite files.
 

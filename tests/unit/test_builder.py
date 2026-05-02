@@ -1,13 +1,13 @@
 """
-Tests for src/builder.py — _build_bot() wiring correctness.
+Tests for src/builder.py — build_bot() wiring correctness.
 
-Verifies that _build_bot() correctly instantiates and interconnects
+Verifies that build_bot() correctly instantiates and interconnects
 all 8 components: Database, LLM, Memory, VectorMemory, ProjectStore,
 RoutingEngine, SkillRegistry, and the Bot orchestrator.
 
-Since _build_bot() uses deferred imports (inside the function body),
+Since build_bot() uses deferred imports (inside the function body),
 we patch at the source module paths (e.g. src.db.Database) so that
-the import statements within _build_bot() resolve to our mocks.
+the import statements within build_bot() resolve to our mocks.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.builder import BotComponents, _build_bot
+from src.builder import BotComponents, build_bot
 from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
 from src.skills import SkillRegistry
 from src.skills.base import BaseSkill
@@ -54,7 +54,7 @@ def test_config(tmp_path: Path) -> Config:
 
 
 def _make_mocks() -> dict:
-    """Create mock objects for every component _build_bot() instantiates."""
+    """Create mock objects for every component build_bot() instantiates."""
     mock_db = AsyncMock()
     mock_db.connect = AsyncMock()
 
@@ -125,7 +125,7 @@ def _make_mocks() -> dict:
 
 
 async def _run_build_bot(test_config: Config, tmp_path: Path) -> tuple[BotComponents, dict]:
-    """Execute _build_bot with all deps mocked; return result + mocks."""
+    """Execute build_bot with all deps mocked; return result + mocks."""
     mocks = _make_mocks()
 
     with ExitStack() as stack:
@@ -142,7 +142,7 @@ async def _run_build_bot(test_config: Config, tmp_path: Path) -> tuple[BotCompon
         stack.enter_context(patch("src.builder.WORKSPACE_DIR", str(tmp_path)))
         stack.enter_context(patch("src.core.instruction_loader.InstructionLoader", MagicMock()))
         stack.enter_context(patch("src.core.project_context.ProjectContextLoader", MagicMock()))
-        result = await _build_bot(test_config)
+        result = await build_bot(test_config)
 
     return result, mocks
 
@@ -229,7 +229,7 @@ class TestVectorMemoryConstruction:
             stack.enter_context(patch("src.builder.WORKSPACE_DIR", str(tmp_path)))
             stack.enter_context(patch("src.core.instruction_loader.InstructionLoader", MagicMock()))
             stack.enter_context(patch("src.core.project_context.ProjectContextLoader", MagicMock()))
-            result = await _build_bot(test_config)
+            result = await build_bot(test_config)
 
         assert result.vector_memory is None
 

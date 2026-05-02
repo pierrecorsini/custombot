@@ -163,9 +163,9 @@ async def _step_thread_pool(ctx: StartupContext) -> str | None:
 
 async def _step_bot_components(ctx: StartupContext) -> str | None:
     """Build and validate all bot sub-components."""
-    from src.builder import _build_bot
+    from src.builder import build_bot
 
-    components = await _build_bot(ctx.config, session_metrics=ctx.session_metrics)
+    components = await build_bot(ctx.config, session_metrics=ctx.session_metrics)
     components.bot.validate_wiring()
     ctx.components = components
     ctx.app._components = components
