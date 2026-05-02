@@ -333,17 +333,20 @@ def detect_injection(text: str) -> InjectionDetectionResult:
 
     # Single-pass scan using combined alternation regex (much faster than
     # iterating N patterns sequentially — one regex engine pass per tier).
-    # Uses m.lastindex for O(1) lookup instead of iterating all groups.
+    # Uses m.lastgroup for O(1) lookup instead of iterating all groups.
+    # Named groups are "_0", "_1", etc. — extract the index to find the name.
     m = _HIGH_COMBINED.search(normalized)
-    if m:
-        idx = (m.lastindex or 0) - 1  # lastindex is 1-based group index
+    if m and m.lastgroup:
+        idx_str = m.lastgroup.lstrip("_")
+        idx = int(idx_str) if idx_str.isdigit() else -1
         if 0 <= idx < len(_HIGH_NAMES):
             matched.append(_HIGH_NAMES[idx])
         max_confidence = 0.9
 
     m = _MEDIUM_COMBINED.search(normalized)
-    if m:
-        idx = (m.lastindex or 0) - 1
+    if m and m.lastgroup:
+        idx_str = m.lastgroup.lstrip("_")
+        idx = int(idx_str) if idx_str.isdigit() else -1
         if 0 <= idx < len(_MEDIUM_NAMES):
             matched.append(_MEDIUM_NAMES[idx])
         max_confidence = max(max_confidence, 0.6)
