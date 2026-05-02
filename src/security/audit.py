@@ -9,6 +9,7 @@ Provides:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -69,6 +70,7 @@ class SkillAuditLogger(ThreadLockMixin):
 
     MAX_FILE_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB
     MAX_ROTATED_FILES: int = 5
+    _CHAIN_KEY: bytes = b"custombot.audit.chain.v1"
 
     def __init__(self, log_dir: str | Path, *, chain_hashes: bool = False) -> None:
         super().__init__()
@@ -76,7 +78,7 @@ class SkillAuditLogger(ThreadLockMixin):
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "audit.jsonl"
         self._chain_hashes = chain_hashes
-        self._prev_hash: str | None = hashlib.sha256(b"").hexdigest() if chain_hashes else None
+        self._prev_hash: str | None = hmac.new(self._CHAIN_KEY, b"", hashlib.sha256).hexdigest() if chain_hashes else None
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -101,7 +103,7 @@ class SkillAuditLogger(ThreadLockMixin):
             entry["_prev_hash"] = self._prev_hash
         line = json.dumps(entry, default=str)
         if self._prev_hash is not None:
-            self._prev_hash = hashlib.sha256(line.encode("utf-8")).hexdigest()
+            self._prev_hash = hmac.new(self._CHAIN_KEY, line.encode("utf-8"), hashlib.sha256).hexdigest()
         with self._lock:
             if self._path is None:
                 return  # logger has been closed
