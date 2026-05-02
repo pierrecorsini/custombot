@@ -294,6 +294,12 @@ CONFIG_SCHEMA: dict[str, Any] = {
             "maximum": 256,
             "description": "Maximum worker threads for asyncio ThreadPoolExecutor (null uses system default)",
         },
+        "max_concurrent_messages": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "description": "Maximum messages processed concurrently by _on_message() (default: 10). Caps memory usage and LLM rate-limit pressure under load.",
+        },
     },
     "required": ["llm", "whatsapp"],
     "additionalProperties": False,

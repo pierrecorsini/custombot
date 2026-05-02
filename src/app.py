@@ -27,7 +27,7 @@ from src.core.event_bus import EVENT_ERROR_OCCURRED, Event, get_event_bus
 from src.core.message_pipeline import MessageContext, MessagePipeline
 from src.core.startup import StartupContext, StartupOrchestrator
 from src.core.errors import NonCriticalCategory, log_noncritical
-from src.lifecycle import _log_component_init, _log_component_ready, _log_startup_complete, perform_shutdown
+from src.lifecycle import ShutdownContext, _log_component_init, _log_component_ready, _log_startup_complete, perform_shutdown
 from src.logging.logging_config import (
     clear_correlation_id,
     get_correlation_id,
@@ -124,6 +124,10 @@ class Application:
         self._state: AppComponents | None = None
         # Health server is optional (only created when --health-port is set)
         self._health_server: HealthServer | None = None
+
+        # Bounded concurrency — caps concurrent message processing to avoid
+        # exhausting memory and LLM rate limits under load.
+        self._message_semaphore = asyncio.Semaphore(config.max_concurrent_messages)
 
     # ── Phase transitions ────────────────────────────────────────────────
 
@@ -404,39 +408,45 @@ class Application:
             log.debug("Rejecting message from %s - shutdown in progress", msg.chat_id)
             return
 
-        # Propagate correlation ID from the incoming message (or generate a
-        # fresh one) so that all downstream logging and event emission can be
-        # traced back to this message.
-        set_correlation_id(msg.correlation_id)
+        async with self._message_semaphore:
+            # Re-check after acquiring — shutdown may have started while queued.
+            if not self.state.shutdown_mgr.accepting_messages:
+                log.debug("Rejecting message from %s - shutdown while queued", msg.chat_id)
+                return
 
-        ctx = MessageContext(msg=msg)
-        try:
-            await self.state.pipeline.execute(ctx)
-        except Exception as exc:
-            # Emit an error_occurred event so that monitoring subscribers are
-            # notified of pipeline failures.  Event emission itself must never
-            # break the error-handling path.
+            # Propagate correlation ID from the incoming message (or generate a
+            # fresh one) so that all downstream logging and event emission can be
+            # traced back to this message.
+            set_correlation_id(msg.correlation_id)
+
+            ctx = MessageContext(msg=msg)
             try:
-                await get_event_bus().emit(Event(
-                    name=EVENT_ERROR_OCCURRED,
-                    data={
-                        "chat_id": msg.chat_id,
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                    },
-                    source="Application._on_message",
-                    correlation_id=get_correlation_id(),
-                ))
-            except Exception:
-                log_noncritical(
-                    NonCriticalCategory.EVENT_EMISSION,
-                    "Failed to emit error_occurred event for chat %s",
-                    msg.chat_id,
-                    logger=log,
-                )
-            raise
-        finally:
-            clear_correlation_id()
+                await self.state.pipeline.execute(ctx)
+            except Exception as exc:
+                # Emit an error_occurred event so that monitoring subscribers are
+                # notified of pipeline failures.  Event emission itself must never
+                # break the error-handling path.
+                try:
+                    await get_event_bus().emit(Event(
+                        name=EVENT_ERROR_OCCURRED,
+                        data={
+                            "chat_id": msg.chat_id,
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc),
+                        },
+                        source="Application._on_message",
+                        correlation_id=get_correlation_id(),
+                    ))
+                except Exception:
+                    log_noncritical(
+                        NonCriticalCategory.EVENT_EMISSION,
+                        "Failed to emit error_occurred event for chat %s",
+                        msg.chat_id,
+                        logger=log,
+                    )
+                raise
+            finally:
+                clear_correlation_id()
 
     # ── Shutdown Phase ──────────────────────────────────────────────────
 
@@ -476,7 +486,7 @@ class Application:
 
         try:
             await asyncio.wait_for(
-                perform_shutdown(
+                perform_shutdown(ShutdownContext(
                     shutdown=state.shutdown_mgr,
                     channel=state.channel,
                     scheduler=state.scheduler,
@@ -491,7 +501,7 @@ class Application:
                     verbose=self._verbose,
                     bot=state.components.bot,
                     executor=state.executor,
-                ),
+                )),
                 timeout=CLEANUP_STEP_TIMEOUT,
             )
         except asyncio.TimeoutError:

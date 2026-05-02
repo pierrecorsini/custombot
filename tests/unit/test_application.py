@@ -435,6 +435,111 @@ class TestOnMessageDelegation:
             await app._on_message(msg)
 
 
+class TestOnMessageConcurrency:
+    """Tests for the bounded concurrency semaphore in _on_message()."""
+
+    async def test_semaphore_limits_concurrency(self, test_config: Config) -> None:
+        """At most max_concurrent_messages are processed simultaneously."""
+        test_config.max_concurrent_messages = 2
+        app = Application(test_config)
+
+        mock_shutdown = MagicMock()
+        mock_shutdown.accepting_messages = True
+
+        in_flight = 0
+        max_in_flight = 0
+        block = asyncio.Event()
+
+        async def _track_execute(ctx: Any) -> None:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            if in_flight > max_in_flight:
+                max_in_flight = in_flight
+            await block.wait()
+            in_flight -= 1
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.execute = _track_execute
+
+        state = _make_mock_app_components(
+            pipeline=mock_pipeline,
+            shutdown_mgr=mock_shutdown,
+        )
+        app._state = state
+
+        # Launch 5 messages — only 2 should run at once.
+        tasks = [
+            asyncio.create_task(app._on_message(_make_msg(message_id=f"msg-{i}")))
+            for i in range(5)
+        ]
+        await asyncio.sleep(0.05)  # Let them hit the semaphore.
+
+        assert max_in_flight <= 2, f"Expected ≤2 concurrent, got {max_in_flight}"
+
+        block.set()
+        await asyncio.gather(*tasks)
+
+        assert max_in_flight == 2
+
+    async def test_semaphore_default_value(self, test_config: Config) -> None:
+        """Default semaphore is initialised from config.max_concurrent_messages."""
+        from src.constants import DEFAULT_MAX_CONCURRENT_MESSAGES
+
+        app = Application(test_config)
+        assert app._message_semaphore._value == test_config.max_concurrent_messages
+        assert test_config.max_concurrent_messages == DEFAULT_MAX_CONCURRENT_MESSAGES
+
+    async def test_rejects_after_acquiring_semaphore_during_shutdown(
+        self, test_config: Config
+    ) -> None:
+        """Messages that were queued at the semaphore are rejected if shutdown starts."""
+        test_config.max_concurrent_messages = 1
+        app = Application(test_config)
+
+        mock_shutdown = MagicMock()
+        block = asyncio.Event()
+        call_count = 0
+
+        async def _slow_execute(ctx: Any) -> None:
+            nonlocal call_count
+            call_count += 1
+            await block.wait()
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.execute = _slow_execute
+
+        mock_shutdown.accepting_messages = True
+        state = _make_mock_app_components(
+            pipeline=mock_pipeline,
+            shutdown_mgr=mock_shutdown,
+        )
+        app._state = state
+
+        # First message occupies the single semaphore slot.
+        first = asyncio.create_task(app._on_message(_make_msg(message_id="msg-1")))
+        await asyncio.sleep(0.05)
+
+        # Second message queues at the semaphore.
+        second = asyncio.create_task(app._on_message(_make_msg(message_id="msg-2")))
+
+        # Now trigger shutdown while second is queued.
+        mock_shutdown.accepting_messages = False
+        await asyncio.sleep(0.05)
+
+        # Unblock the first message.
+        block.set()
+        await asyncio.sleep(0.05)
+
+        # First message ran; second was rejected after acquiring the semaphore.
+        assert call_count == 1
+        second.cancel()
+        try:
+            await second
+        except asyncio.CancelledError:
+            pass
+        await first
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests: _shutdown_cleanup()
 # ─────────────────────────────────────────────────────────────────────────────
@@ -472,18 +577,18 @@ class TestShutdownCleanup:
             await app._shutdown_cleanup()
 
         mock_ps.assert_awaited_once()
-        call_kwargs = mock_ps.call_args[1]
-        assert call_kwargs["shutdown"] is mock_shutdown
-        assert call_kwargs["channel"] is mock_channel
-        assert call_kwargs["scheduler"] is mock_scheduler
-        assert call_kwargs["db"] is mock_components.db
-        assert call_kwargs["vector_memory"] is mock_components.vector_memory
-        assert call_kwargs["project_store"] is mock_components.project_store
-        assert call_kwargs["message_queue"] is mock_components.message_queue
-        assert call_kwargs["llm"] is mock_components.llm
-        assert call_kwargs["bot"] is mock_components.bot
-        assert call_kwargs["executor"] is mock_executor
-        assert "session_metrics" in call_kwargs
+        ctx = mock_ps.call_args[0][0]
+        assert ctx.shutdown is mock_shutdown
+        assert ctx.channel is mock_channel
+        assert ctx.scheduler is mock_scheduler
+        assert ctx.db is mock_components.db
+        assert ctx.vector_memory is mock_components.vector_memory
+        assert ctx.project_store is mock_components.project_store
+        assert ctx.message_queue is mock_components.message_queue
+        assert ctx.llm is mock_components.llm
+        assert ctx.bot is mock_components.bot
+        assert ctx.executor is mock_executor
+        assert ctx.session_metrics is not None
 
     async def test_passes_health_server(self, test_config: Config) -> None:
         app = Application(test_config)
@@ -511,8 +616,8 @@ class TestShutdownCleanup:
         with patch("src.app.perform_shutdown", new_callable=AsyncMock) as mock_ps:
             await app._shutdown_cleanup()
 
-        call_kwargs = mock_ps.call_args[1]
-        assert call_kwargs["health_server"] is mock_health
+        ctx = mock_ps.call_args[0][0]
+        assert ctx.health_server is mock_health
 
     async def test_config_watcher_timeout_does_not_block_cleanup(
         self, test_config: Config
@@ -630,7 +735,7 @@ class TestShutdownCleanup:
         app._health_server = None
         app._phase = AppPhase.RUNNING
 
-        async def _hang_forever(**_kwargs):
+        async def _hang_forever(*_args, **_kwargs):
             await asyncio.Event().wait()
 
         with (

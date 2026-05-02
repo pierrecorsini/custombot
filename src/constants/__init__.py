@@ -170,6 +170,7 @@ from src.constants.skills import (  # noqa: F401
 
 from src.constants.shutdown import (  # noqa: F401
     CLEANUP_STEP_TIMEOUT,
+    DEFAULT_MAX_CONCURRENT_MESSAGES,
     DEFAULT_SHUTDOWN_TIMEOUT,
     SHUTDOWN_LOG_INTERVAL,
 )
