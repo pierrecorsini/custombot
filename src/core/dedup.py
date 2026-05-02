@@ -5,7 +5,7 @@ Consolidates inbound (message-id) and outbound (content-hash) dedup
 strategies behind a single service with unified stats tracking.
 
 - Inbound: checks message_id against the database's persistent index.
-- Outbound: SHA-256 content hash with TTL-based LRU cache.
+- Outbound: xxHash (xxh64) content hash with TTL-based LRU cache.
 
 Usage::
 
@@ -21,7 +21,7 @@ Usage::
 
 from __future__ import annotations
 
-import hashlib
+import xxhash
 import logging
 import time
 from dataclasses import dataclass, field, replace
@@ -37,12 +37,14 @@ log = logging.getLogger(__name__)
 
 
 def outbound_key(chat_id: str, text: str) -> str:
-    """Content-addressable key via SHA-256.
+    """Content-addressable key via xxHash (xxh64).
 
     Deterministic hash combining *chat_id* and *text* so identical
     outbound messages to the same chat produce the same key.
+    xxHash is ~10× faster than SHA-256 and sufficient for a TTL-bounded
+    LRU cache key (not a cryptographic use case).
     """
-    return hashlib.sha256(f"{chat_id}\x00{text}".encode("utf-8")).hexdigest()
+    return xxhash.xxh64(f"{chat_id}\x00{text}".encode("utf-8")).hexdigest()
 
 
 @dataclass(slots=True)
