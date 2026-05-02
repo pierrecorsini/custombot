@@ -14,7 +14,9 @@ from src.config.config_schema_defs import (
     RENAMED_OPTIONS,
     Config,
     LLMConfig,
+    MiddlewareConfig,
     NeonizeConfig,
+    ShellConfig,
     WhatsAppConfig,
 )
 from src.config.config_loader import load_config, save_config
@@ -31,6 +33,8 @@ __all__ = [
     "LLMConfig",
     "WhatsAppConfig",
     "NeonizeConfig",
+    "ShellConfig",
+    "MiddlewareConfig",
     "load_config",
     "save_config",
     "CONFIG_PATH",

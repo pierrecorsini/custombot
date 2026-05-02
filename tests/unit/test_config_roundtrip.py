@@ -16,9 +16,11 @@ from dataclasses import asdict, fields
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
-from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
-from src.config.config import load_config, save_config
+from src.config import Config, LLMConfig, MiddlewareConfig, NeonizeConfig, ShellConfig, WhatsAppConfig
+from src.config.config import _from_dict, load_config, save_config
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -502,3 +504,117 @@ class TestConfigUnknownKeyWarnings:
 
         unknown_warnings = [r for r in caplog.records if "unknown config key" in r.message.lower()]
         assert unknown_warnings == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Property-based roundtrip tests (Hypothesis)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# JSON-safe floats — exclude NaN/inf which break equality comparisons.
+_safe_float = st.floats(
+    min_value=0.0,
+    max_value=1e6,
+    allow_nan=False,
+    allow_infinity=False,
+)
+
+# ── Sub-config dict strategies ────────────────────────────────────────────────
+
+_neonize_dicts = st.fixed_dictionaries({
+    "db_path": st.text(min_size=1, max_size=300),
+})
+
+_shell_dicts = st.fixed_dictionaries({
+    "command_denylist": st.lists(st.text(min_size=1, max_size=100), max_size=10),
+    "command_allowlist": st.lists(st.text(min_size=1, max_size=100), max_size=10),
+})
+
+_middleware_dicts = st.fixed_dictionaries({
+    "middleware_order": st.lists(st.text(min_size=1, max_size=80), max_size=10),
+    "extra_middleware_paths": st.lists(st.text(min_size=1, max_size=120), max_size=10),
+})
+
+_llm_dicts = st.fixed_dictionaries({
+    "model": st.text(min_size=1, max_size=100),
+    "base_url": st.text(min_size=0, max_size=200),
+    "api_key": st.text(min_size=0, max_size=100),
+    "temperature": _safe_float,
+    "max_tokens": st.one_of(st.none(), st.integers(min_value=1, max_value=128_000)),
+    "timeout": _safe_float,
+    "system_prompt_prefix": st.text(min_size=0, max_size=500),
+    "max_tool_iterations": st.integers(min_value=1, max_value=50),
+    "embedding_model": st.text(min_size=1, max_size=100),
+    "embedding_dimensions": st.integers(min_value=1, max_value=8192),
+    "embedding_base_url": st.text(min_size=0, max_size=200),
+    "embedding_api_key": st.text(min_size=0, max_size=100),
+    "stream_response": st.booleans(),
+})
+
+_whatsapp_dicts = st.fixed_dictionaries({
+    "provider": st.text(min_size=1, max_size=50),
+    "neonize": _neonize_dicts,
+    "allowed_numbers": st.lists(st.text(min_size=1, max_size=20), max_size=20),
+    "allow_all": st.booleans(),
+})
+
+# ── Full Config dict strategy ─────────────────────────────────────────────────
+
+_config_dicts = st.fixed_dictionaries({
+    "llm": _llm_dicts,
+    "whatsapp": _whatsapp_dicts,
+    "shell": _shell_dicts,
+    "middleware": _middleware_dicts,
+    "load_history": st.booleans(),
+    "memory_max_history": st.integers(min_value=1, max_value=10000),
+    "skills_auto_load": st.booleans(),
+    "skills_user_directory": st.text(min_size=0, max_size=300),
+    "log_incoming_messages": st.booleans(),
+    "log_routing_info": st.booleans(),
+    "shutdown_timeout": _safe_float,
+    "log_format": st.sampled_from(["text", "json"]),
+    "log_file": st.text(min_size=0, max_size=300),
+    "log_max_bytes": st.integers(min_value=1024, max_value=100_000_000),
+    "log_backup_count": st.integers(min_value=0, max_value=100),
+    "log_verbosity": st.sampled_from(["quiet", "normal", "verbose"]),
+    "log_llm": st.booleans(),
+    "max_thread_pool_workers": st.one_of(st.none(), st.integers(min_value=1, max_value=256)),
+    "max_chat_lock_cache_size": st.integers(min_value=1, max_value=100_000),
+    "max_chat_lock_eviction_policy": st.sampled_from(["grow", "reject_on_full"]),
+    "max_concurrent_messages": st.integers(min_value=1, max_value=10000),
+})
+
+
+class TestFromDictPropertyBased:
+    """Hypothesis-driven tests for _from_dict() ↔ asdict() roundtrip."""
+
+    @given(d=_config_dicts)
+    @settings(max_examples=200)
+    def test_config_roundtrip_idempotent(self, d: dict) -> None:
+        """_from_dict → asdict → _from_dict produces identical Config."""
+        first = _from_dict(Config, d)
+        second = _from_dict(Config, asdict(first))
+        assert asdict(first) == asdict(second)
+
+    @given(d=_llm_dicts)
+    @settings(max_examples=200)
+    def test_llm_config_roundtrip(self, d: dict) -> None:
+        """LLMConfig roundtrips: asdict(_from_dict(d)) == d."""
+        assert asdict(_from_dict(LLMConfig, d)) == d
+
+    @given(d=_whatsapp_dicts)
+    @settings(max_examples=200)
+    def test_whatsapp_config_roundtrip(self, d: dict) -> None:
+        """WhatsAppConfig (with nested NeonizeConfig) roundtrips correctly."""
+        assert asdict(_from_dict(WhatsAppConfig, d)) == d
+
+    @given(d=_shell_dicts)
+    @settings(max_examples=100)
+    def test_shell_config_roundtrip(self, d: dict) -> None:
+        """ShellConfig roundtrips: asdict(_from_dict(d)) == d."""
+        assert asdict(_from_dict(ShellConfig, d)) == d
+
+    @given(d=_middleware_dicts)
+    @settings(max_examples=100)
+    def test_middleware_config_roundtrip(self, d: dict) -> None:
+        """MiddlewareConfig roundtrips: asdict(_from_dict(d)) == d."""
+        assert asdict(_from_dict(MiddlewareConfig, d)) == d
