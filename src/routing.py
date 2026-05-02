@@ -309,6 +309,7 @@ class RoutingEngine:
         # rule sets.
         self._rules_by_channel: dict[str, list[RoutingRule]] = {}
         self._wildcard_rules: list[RoutingRule] = []
+        self._regex_channel_rules: list[RoutingRule] = []
         # TTL-bounded LRU cache for match results (delegated to BoundedOrderedDict).
         # Key: (fromMe, toMe, sender_id, chat_id, channel_type, text[:100])
         # Value: (rule | None, instruction | None)
@@ -397,23 +398,31 @@ class RoutingEngine:
     def _rebuild_channel_index(self, rules: list[RoutingRule]) -> None:
         """Pre-group rules by channel pattern for faster matching.
 
-        Builds two structures:
+        Builds three structures:
         - ``_rules_by_channel``: maps specific channel strings to their
           matching rules (e.g., ``{"whatsapp": [rule1, rule3]}``).
         - ``_wildcard_rules``: rules with ``channel="*"`` that match all
           channels — always evaluated.
+        - ``_regex_channel_rules``: rules whose channel is a non-wildcard
+          regex pattern (e.g., ``"te.*"``) — always evaluated alongside
+          wildcard rules since they can match any channel string.
 
         Rules remain sorted by priority within each group.
         """
         by_channel: dict[str, list[RoutingRule]] = {}
         wildcard: list[RoutingRule] = []
+        regex_channel: list[RoutingRule] = []
         for rule in rules:
             if rule.channel == "*":
                 wildcard.append(rule)
+            elif _compile_pattern(rule.channel) is not None:
+                # Regex channel pattern — must be evaluated for every message
+                regex_channel.append(rule)
             else:
                 by_channel.setdefault(rule.channel, []).append(rule)
         self._rules_by_channel = by_channel
         self._wildcard_rules = wildcard
+        self._regex_channel_rules = regex_channel
 
     def _scan_file_mtimes(self) -> dict[str, float]:
         """Collect current mtimes for all .md files in the instructions directory.
@@ -584,9 +593,13 @@ class RoutingEngine:
 
         # Evaluate rules using channel-grouped index
         channel_str = str(ctx.channel_type)
-        # Merge channel-specific rules + wildcard rules, preserving priority order
+        # Merge channel-specific rules + wildcard rules + regex-channel
+        # rules, preserving priority order
         channel_rules = self._rules_by_channel.get(channel_str, [])
-        candidate_rules = _merge_priority_sorted(channel_rules, self._wildcard_rules)
+        candidate_rules = _merge_priority_sorted(
+            _merge_priority_sorted(channel_rules, self._wildcard_rules),
+            self._regex_channel_rules,
+        )
 
         for rule in candidate_rules:
             if not rule.enabled:
