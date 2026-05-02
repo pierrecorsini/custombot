@@ -116,11 +116,34 @@ class DeduplicationService:
 
     # ── Outbound dedup (content-hash based, TTL LRU cache) ──────────────────
 
+    def check_outbound_duplicate(self, chat_id: str, text: str) -> bool:
+        """Return ``True`` if *text* was recently sent to *chat_id*.
+
+        Read-only check — does NOT record the timestamp.  Use
+        :meth:`record_outbound` after the send succeeds to populate
+        the cache.  This two-phase API prevents false positives when
+        the send fails after the check passes.
+        """
+        key = outbound_key(chat_id, text)
+        now = time.monotonic()
+        sent_at = self._outbound_cache.get(key)
+        if sent_at is not None and (now - sent_at) < self._outbound_ttl:
+            self._stats.outbound_hits += 1
+            return True
+        self._stats.outbound_misses += 1
+        return False
+
     def is_outbound_duplicate(self, chat_id: str, text: str) -> bool:
         """Return ``True`` if *text* was recently sent to *chat_id*.
 
         Records the current timestamp on miss so subsequent calls detect it
         within the TTL window.
+
+        .. deprecated::
+            Prefer :meth:`check_outbound_duplicate` + :meth:`record_outbound`
+            for correct two-phase usage (check before send, record after
+            successful send).  This method records on miss, which causes
+            false positives if the send subsequently fails.
         """
         key = outbound_key(chat_id, text)
         now = time.monotonic()
@@ -133,7 +156,11 @@ class DeduplicationService:
         return False
 
     def record_outbound(self, chat_id: str, text: str) -> None:
-        """Explicitly record that *text* was sent to *chat_id*."""
+        """Explicitly record that *text* was sent to *chat_id*.
+
+        Call this **after** the send succeeds to populate the dedup cache.
+        Safe to call multiple times — overwrites the previous timestamp.
+        """
         key = outbound_key(chat_id, text)
         self._outbound_cache[key] = time.monotonic()
 
