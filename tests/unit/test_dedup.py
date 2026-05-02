@@ -313,8 +313,8 @@ class TestOutboundKeyPropertyBased:
         text=st.text(min_size=0, max_size=500),
     )
     @settings(max_examples=200)
-    def test_always_returns_64_char_hex(self, chat_id: str, text: str) -> None:
-        """outbound_key always returns a valid 64-character hex string."""
+    def test_always_returns_valid_hex(self, chat_id: str, text: str) -> None:
+        """outbound_key always returns a valid 16-character hex string (xxh64)."""
         key = outbound_key(chat_id, text)
-        assert len(key) == 64
+        assert len(key) == 16
         assert all(c in "0123456789abcdef" for c in key)
