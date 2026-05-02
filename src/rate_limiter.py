@@ -139,7 +139,7 @@ class RateLimitResult:
 
     allowed: bool
     remaining: int
-    reset_at: float  # Unix timestamp when the oldest entry in window expires
+    reset_at: float  # Monotonic timestamp when the oldest entry in window expires
     retry_after: float  # Seconds to wait before retrying (0 if allowed)
     limit_type: str  # "chat" or "skill"
     limit_value: int  # The actual limit that was hit
