@@ -356,3 +356,77 @@ class TestConfigChangeApplierValidation:
         # App-level config must remain unchanged
         assert applier._config.llm.model == "gpt-4o"
         assert applier._config.llm.max_tool_iterations == 10
+
+
+class TestConfigChangeApplierDestructiveFields:
+    """Verify destructive fields are warned and NOT applied; safe fields ARE applied."""
+
+    def test_destructive_fields_warned_safe_fields_applied(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """
+        When a config change includes BOTH destructive fields (``llm.model``,
+        ``llm.api_key``) and safe fields (``llm.temperature``,
+        ``memory_max_history``), the destructive fields are logged as warnings
+        and NOT forwarded to live components, while safe fields ARE applied.
+        """
+        import logging
+
+        initial = _base_config(tmp_path, temperature=0.5, max_tool_iterations=10)
+        initial.memory_max_history = 50
+        applier = _make_applier(initial)
+
+        updated = Config(
+            llm=LLMConfig(
+                model="gpt-4o-mini",
+                base_url="https://api.openai.com/v1",
+                api_key="sk-new-dangerous-key",
+                temperature=0.9,
+                max_tool_iterations=5,
+            ),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+            ),
+            memory_max_history=100,
+            skills_auto_load=False,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="src.config.config_watcher"):
+            applier.apply(initial, updated)
+
+        # ── Destructive fields: logged as warnings ──
+        destructive_warnings = [
+            rec.message
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING and "requires restart" in rec.message
+        ]
+        assert any("llm.model" in msg for msg in destructive_warnings), (
+            f"Expected warning for 'llm.model', got: {destructive_warnings}"
+        )
+        assert any("llm.api_key" in msg for msg in destructive_warnings), (
+            f"Expected warning for 'llm.api_key', got: {destructive_warnings}"
+        )
+
+        # ── LLM provider: keeps OLD destructive fields, receives NEW safe fields ──
+        mock_llm = applier._llm
+        mock_llm.update_config.assert_called_once()
+        llm_cfg_arg = mock_llm.update_config.call_args[0][0]
+        assert llm_cfg_arg.model == "gpt-4o", (
+            "LLM provider should keep OLD model — destructive field not applied"
+        )
+        assert llm_cfg_arg.api_key == "sk-test-watcher", (
+            "LLM provider should keep OLD api_key — destructive field not applied"
+        )
+        assert llm_cfg_arg.temperature == 0.9, (
+            "LLM provider should receive NEW temperature — safe field applied"
+        )
+
+        # ── Bot: safe fields applied ──
+        bot: MagicMock = applier._bot  # type: ignore[assignment]
+        assert bot._cfg.memory_max_history == 100, (
+            "Bot should receive NEW memory_max_history — safe field applied"
+        )
+        assert bot._cfg.max_tool_iterations == 5, (
+            "Bot should receive NEW max_tool_iterations — safe field applied"
+        )
