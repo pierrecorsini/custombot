@@ -20,6 +20,7 @@ import pytest
 from src.bot import BotConfig
 from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig, save_config
 from src.config.config_watcher import ConfigChangeApplier, ConfigWatcher
+from src.exceptions import ConfigurationError
 from src.shutdown import GracefulShutdown
 
 
@@ -272,3 +273,86 @@ class TestConfigWatcherMalformedJSON:
             )
         finally:
             await watcher.stop()
+
+
+class TestConfigChangeApplierValidation:
+    """Verify that _update_app_config() validates before mutation."""
+
+    def test_valid_config_passes_validation(self, tmp_path: Path) -> None:
+        """
+        A valid Config passes the ``is_valid_config`` guard in
+        ``_update_app_config`` and fields are applied successfully.
+        """
+        initial = _base_config(tmp_path)
+        applier = _make_applier(initial)
+
+        updated = _base_config(tmp_path, temperature=0.9)
+
+        # apply() will call _update_app_config internally for safe field changes
+        applier.apply(initial, updated)
+
+        assert applier._config.llm.temperature == 0.9
+
+    def test_invalid_config_rejected_before_mutation(self, tmp_path: Path) -> None:
+        """
+        An invalid Config (e.g. LLMConfig.model set to empty string) is
+        rejected by ``_update_app_config`` — ``ConfigurationError`` is raised
+        and the live config is NOT mutated.
+        """
+        initial = _base_config(tmp_path)
+        applier = _make_applier(initial)
+
+        # Build a config that passes _load_and_validate_file / _from_dict
+        # but fails is_valid_config() (e.g. empty model string)
+        bad_config = Config(
+            llm=LLMConfig(
+                model="",  # empty model → is_llm_config returns False
+                base_url="https://api.openai.com/v1",
+                api_key="sk-test",
+            ),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+            ),
+            skills_auto_load=False,
+        )
+
+        # _update_app_config should raise ConfigurationError
+        with pytest.raises(ConfigurationError, match="Config validation failed"):
+            applier._update_app_config(bad_config)
+
+        # Live config must remain unchanged
+        assert applier._config.llm.model == "gpt-4o"
+
+    def test_invalid_config_via_apply_does_not_mutate(self, tmp_path: Path) -> None:
+        """
+        When ``apply()`` is called with a config that has safe-field changes
+        but fails validation in ``_update_app_config``, the per-component
+        updates that ran before the guard are applied but the app-level config
+        is NOT mutated.  This is acceptable because component-level updates
+        (Bot, LLM) have their own validation.
+        """
+        initial = _base_config(tmp_path, max_tool_iterations=10)
+        applier = _make_applier(initial)
+
+        bad_config = Config(
+            llm=LLMConfig(
+                model="",  # empty → invalid
+                base_url="https://api.openai.com/v1",
+                api_key="sk-test",
+                max_tool_iterations=5,  # safe field change
+            ),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+            ),
+            skills_auto_load=False,
+        )
+
+        # apply() should raise ConfigurationError from _update_app_config
+        with pytest.raises(ConfigurationError, match="Config validation failed"):
+            applier.apply(initial, bad_config)
+
+        # App-level config must remain unchanged
+        assert applier._config.llm.model == "gpt-4o"
+        assert applier._config.llm.max_tool_iterations == 10

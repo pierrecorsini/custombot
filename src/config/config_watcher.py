@@ -38,7 +38,9 @@ from src.config.config import (
     _log_effective_config,
 )
 from src.constants import CONFIG_WATCH_DEBOUNCE_SECONDS, CONFIG_WATCH_INTERVAL_SECONDS
+from src.exceptions import ConfigurationError
 from src.utils.background_service import BaseBackgroundService
+from src.utils.type_guards import is_valid_config
 
 if TYPE_CHECKING:
     from src.bot import Bot, BotConfig
@@ -296,7 +298,24 @@ class ConfigChangeApplier:
         )
 
     def _update_app_config(self, new_config: Config) -> None:
-        """Replace the application-level config reference."""
+        """Replace the application-level config reference.
+
+        Validates *new_config* via :func:`is_valid_config` before mutation as
+        a defense-in-depth check.  Even though ``ConfigWatcher._load_new_config``
+        validates at load time, this guard ensures that any future code path
+        that bypasses the loader cannot apply an invalid config to live
+        components.
+        """
+        if not is_valid_config(new_config):
+            log.error(
+                "Refusing to apply invalid config — one or more required "
+                "fields are missing or have wrong types. Keeping current config."
+            )
+            raise ConfigurationError(
+                "Config validation failed before live update",
+                config_key="config_watcher",
+            )
+
         # Update the Config dataclass fields in-place
         self._config.llm = new_config.llm
         self._config.whatsapp = new_config.whatsapp

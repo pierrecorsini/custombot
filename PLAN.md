@@ -70,7 +70,7 @@ _Round 5 — Senior technical review (2026-05-02). 22 items across 6 categories.
 ## Error Handling & Resilience
 
 - [x] Log `best_effort_flush()` errors in `LLMClient.chat_stream()` instead of silently swallowing — the `finally` block has `except Exception: pass` which masks real errors during stream teardown. At minimum log at WARNING level so that partial-stream failures are observable in production logs.
-- [ ] Add validation to `ConfigChangeApplier._update_app_config()` before mutating — the method assigns `self._config.llm = new_config.llm` etc. directly without checking that the new config passed validation. If `_from_dict` validation is bypassed (e.g. by a future code path), invalid config could be applied to live components. Validate before mutation.
+- [x] Add validation to `ConfigChangeApplier._update_app_config()` before mutating — the method assigns `self._config.llm = new_config.llm` etc. directly without checking that the new config passed validation. If `_from_dict` validation is bypassed (e.g. by a future code path), invalid config could be applied to live components. Validate before mutation.
 - [ ] Add retry to `RoutingEngine.load_rules()` on transient parse failures — if an `.md` file is being written while `load_rules()` reads it (e.g. user editing over SMB/NFS), the YAML parse may fail and the rule is silently skipped. Retry once after a short delay to handle the concurrent-write window.
 
 ## Testing & Quality
