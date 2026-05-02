@@ -14,7 +14,7 @@ import ipaddress
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path as _Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -26,8 +26,6 @@ from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionToolParam,
 )
-from typing import Callable, Awaitable
-
 from src.config import LLMConfig
 from src.constants import (
     CIRCUIT_BREAKER_COOLDOWN_SECONDS,
