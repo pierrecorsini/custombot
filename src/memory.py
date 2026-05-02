@@ -576,7 +576,7 @@ class Memory:
         """Total number of cache misses across memory and agents caches."""
         return self._memory_cache.misses + self._agents_cache.misses
 
-    def log_recovery_event(
+    async def log_recovery_event(
         self,
         chat_id: str,
         preserved_count: int,
@@ -588,6 +588,7 @@ class Memory:
         Log a recovery event to the chat's workspace for user notification.
 
         Creates or appends to RECOVERY.md with details about the index recovery.
+        File I/O is offloaded to a thread to avoid blocking the event loop.
 
         Args:
             chat_id: The chat ID where recovery occurred
@@ -617,19 +618,25 @@ class Memory:
         entry_lines.append("")
         entry = "\n".join(entry_lines)
 
-        # Append to existing file or create new
-        if recovery_path.exists():
-            existing = recovery_path.read_text(encoding="utf-8")
-            recovery_path.write_text(existing + "\n" + entry, encoding="utf-8")
-        else:
-            header = "# Message Index Recovery Log\n\n"
-            recovery_path.write_text(header + entry, encoding="utf-8")
+        await asyncio.to_thread(
+            self._write_recovery_log_sync, recovery_path, entry
+        )
 
         log.info(
             "Logged recovery event for chat %s: %d total entries recovered",
             chat_id,
             total_count,
         )
+
+    @staticmethod
+    def _write_recovery_log_sync(recovery_path: Path, entry: str) -> None:
+        """Synchronous file I/O for recovery log — run via asyncio.to_thread()."""
+        if recovery_path.exists():
+            existing = recovery_path.read_text(encoding="utf-8")
+            recovery_path.write_text(existing + "\n" + entry, encoding="utf-8")
+        else:
+            header = "# Message Index Recovery Log\n\n"
+            recovery_path.write_text(header + entry, encoding="utf-8")
 
     def has_recovery_events(self, chat_id: str) -> bool:
         """

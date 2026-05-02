@@ -91,3 +91,48 @@ _Round 5 — Senior technical review (2026-05-02). 22 items across 6 categories.
 
 - [x] Add `.env.example` with all recognized environment variables — the codebase reads several env vars (`SCHEDULER_HMAC_SECRET`, `RATE_LIMIT_CHAT_PER_MINUTES`, `RATE_LIMIT_EXPENSIVE_PER_MINUTES`) but these are only documented in code comments. An `.env.example` file would serve as a single reference for all configurable env vars.
 - [x] Add CI step to verify `requirements.txt` is generated from `pyproject.toml` — run `pip-compile pyproject.toml --dry-run` and diff against committed `requirements.txt`. This prevents hand-edits that cause the two files to drift apart.
+
+---
+
+_Round 6 — Senior technical review (2026-05-02). 25 items across 6 categories._
+
+## Architecture & Refactoring
+
+- [x] Reduce `Bot.__init__` parameter count from 15 positional args to a `BotDeps` dataclass — the constructor signature is unwieldy and every new component (e.g. a future cache service) requires updating all callers in `builder.py` and `conftest.py`. A single `BotDeps` parameter carrying all optional dependencies mirrors the `ShutdownContext` pattern established in Round 1 and keeps the surface area narrow.
+- [x] Offload `Memory.log_recovery_event` synchronous file I/O to a thread — the method reads and writes `RECOVERY.md` with synchronous `path.read_text()` + `path.write_text()` calls directly on the event loop. Under concurrent recovery scenarios this blocks message processing. Wrap in `asyncio.to_thread()` consistent with the async patterns used elsewhere in `Memory`.
+- [ ] Eliminate cross-module private attribute access in `Bot.update_config` — the method sets `self._context_assembler._config = new_cfg` (line 997 of `_bot.py`) reaching into `ContextAssembler`'s private `_config`. Add a public `ContextAssembler.update_config(new_cfg: BotConfig)` method to encapsulate the update, matching the pattern used for `LLMProvider` and `Bot` themselves.
+- [ ] Split `message_queue.py` (1014 lines) into persistence and logic modules — the file mixes `QueuedMessage` dataclass definitions, JSONL file I/O, crash-recovery logic, and async queue operations. Extract persistence into `message_queue_persistence.py` and keep queue logic + recovery in the main module, mirroring the `db.py` → `message_store.py` split from Round 3.
+
+## Performance & Scalability
+
+- [ ] Add per-chat timeout to `Bot._handle_message_inner` — the chat lock prevents concurrent processing per chat, but a stuck LLM call or tool execution holds the lock indefinitely, blocking all future messages for that chat. Wrap the `_process` call in `asyncio.wait_for()` with a configurable timeout (default 300s) that cancels the stuck turn and releases the lock, allowing subsequent messages to be processed.
+- [ ] Use `BoundedOrderedDict` with TTL for `DeduplicationService` outbound cache instead of manual timestamp eviction — the current implementation iterates the full outbound dict on every `record_outbound` call to prune expired entries (O(n) per write). `BoundedOrderedDict` already supports TTL-bounded eviction with lazy purge, eliminating the per-write scan overhead.
+- [ ] Cache the `_time_to_next_due` computation in `TaskScheduler` — `_compute_adaptive_sleep()` rebuilds the time-to-next-due heap from scratch on every loop iteration even when no tasks have changed. Cache the result and invalidate only when tasks are added, removed, or executed (via a `_tasks_dirty` flag), reducing CPU overhead from ~2880 heap rebuilds/day to a handful.
+- [ ] Batch `Database.connect()` JSONL schema migrations — `ensure_jsonl_schema` runs per-file with individual `asyncio.to_thread` calls. For workspaces with hundreds of chat files this creates hundreds of thread hops at startup. Collect all migration candidates synchronously, then batch them in a single `asyncio.to_thread` call to reduce startup latency.
+
+## Error Handling & Resilience
+
+- [ ] Handle `finish_reason="length"` explicitly in `_react_iteration` — when the LLM hits the token limit, it returns `finish_reason="length"` but the current code falls through to the empty-response fallback, producing the confusing message "The assistant generated an empty response." Detect `"length"` and return a specific message like "⚠️ Response truncated due to length limit. Try asking a more specific question."
+- [ ] Add structured error categorization to `Application.run()` main loop — the catch-all `except Exception` in `run()` only increments an error counter. Classify the error (transient LLM failure, channel disconnect, filesystem error) and emit an `error_occurred` event with the category so that monitoring subscribers can trigger alerts or auto-recovery for specific failure modes.
+- [ ] Close the dedicated embedding `httpx.AsyncClient` when `_step_vector_memory` degrades — the builder step creates a separate `embed_http` client for dedicated embedding URLs, but on probe failure the client is never closed. Add explicit `await embed_http.aclose()` in the degradation path to prevent connection leaks.
+- [ ] Add graceful degradation when `RoutingEngine.load_rules()` produces zero rules after a reload — currently if all instruction files are temporarily empty during a hot-reload (e.g. user editing in an editor that saves empty first), all messages are silently ignored. Log a WARNING and retain the previous rule set instead of replacing with an empty list, similar to the ConfigWatcher pattern of keeping old config on failure.
+
+## Testing & Quality
+
+- [ ] Add end-to-end test for `Bot.process_scheduled` with HMAC signing — verify that a signed scheduled prompt passes HMAC verification in `Bot.process_scheduled`, that an unsigned prompt is rejected when `SCHEDULER_HMAC_SECRET` is set, and that a tampered prompt is rejected. Currently no test covers this critical security path.
+- [ ] Add test for `Memory.log_recovery_event` file I/O — verify the method creates `RECOVERY.md` on first call, appends on subsequent calls, handles missing directories, and limits error entries to 5. The method has complex string formatting and file I/O with no test coverage.
+- [ ] Add test for `TokenUsage` leaderboard correctness after LRU eviction — `_make_per_chat_map` creates a `BoundedOrderedDict(max_size=1000, eviction="half")`. When the per-chat map evicts entries, stale leaderboard entries must be purged by `_purge_chat_from_leaderboard`. Add a test that inserts >1000 chats, triggers eviction, and verifies `get_top_chats()` returns only live entries.
+- [ ] Add test for concurrent `Memory.ensure_workspace` with the same chat_id — the `_atomic_seed` method uses `os.O_EXCL` for file creation safety, but `ensure_workspace` itself calls `_ensure_chat_dir` + `_atomic_seed` twice (for `AGENTS.md` and `.chat_id`). Two concurrent calls for the same chat_id could race. Verify only one writer wins and the other completes without error.
+- [ ] Add test for `finish_reason="length"` handling in `react_loop` — mock an LLM response with `finish_reason="length"` and non-empty content, verify the loop returns the actual response text rather than the empty-response fallback message.
+- [ ] Add integration test for `Database.validate_connection` corruption detection — create a workspace with a corrupted `chats.json` (invalid JSON), a truncated JSONL file, and a checksum-mismatch message entry. Verify `validate_connection` reports errors and warnings for each case with correct field paths.
+
+## Security
+
+- [ ] Validate instruction file paths in `InstructionLoader.load()` — the method receives a filename and joins it with the instructions directory, but doesn't validate against path traversal (e.g. `../../etc/passwd`). Add a check that the resolved path stays within the instructions directory, matching the path validation pattern used in `Memory._validate_path` and `TaskScheduler._resolve_tasks_path`.
+- [ ] Reset `_routing_show_errors_var` context variable in all error paths — if an exception occurs in `_process` after `_routing_show_errors_var.set(True)` but before the `finally` block clears the correlation ID, the context var leaks to the next message processed on the same coroutine. Explicitly reset it to its default in the `finally` block of `_handle_message_inner`.
+- [ ] Add request path validation to `HealthServer` — the HTTP handler doesn't validate the request path, meaning `GET /any-path` returns a 200 health response. Restrict valid paths to a known set (`/health`, `/metrics`, `/`) and return 404 for anything else, preventing cache-poisoning and log-noise from arbitrary URL probes.
+
+## DevOps & CI
+
+- [ ] Add weekly scheduled CI run — the pipeline only triggers on push/PR. Add a `schedule: cron` trigger (e.g. weekly on Monday) to catch dependency rot, base image CVEs, and flaky test regressions that accumulate silently when no PRs are open.
+- [ ] Add CI job to validate `.env.example` matches actual env var usage — grep the source tree for `os.environ.get` and `os.getenv` calls and verify each variable is documented in `.env.example`. Prevents new env vars from being silently introduced without documentation, matching the `requirements.txt` sync check pattern.

@@ -979,8 +979,8 @@ class TestWriteMemoryWithChecksum:
 class TestLogRecoveryEvent:
     """Tests for log_recovery_event."""
 
-    def test_creates_recovery_log(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event("chat1", preserved_count=5, rebuilt_count=3, total_count=8)
+    async def test_creates_recovery_log(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("chat1", preserved_count=5, rebuilt_count=3, total_count=8)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         assert recovery.exists()
         content = recovery.read_text(encoding="utf-8")
@@ -989,23 +989,23 @@ class TestLogRecoveryEvent:
         assert "3" in content
         assert "8" in content
 
-    def test_log_has_header(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event("chat1", preserved_count=0, rebuilt_count=0, total_count=0)
+    async def test_log_has_header(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("chat1", preserved_count=0, rebuilt_count=0, total_count=0)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         content = recovery.read_text(encoding="utf-8")
         assert content.startswith("# Message Index Recovery Log")
 
-    def test_appends_to_existing_log(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event("chat1", preserved_count=1, rebuilt_count=2, total_count=3)
-        mem.log_recovery_event("chat1", preserved_count=4, rebuilt_count=5, total_count=9)
+    async def test_appends_to_existing_log(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("chat1", preserved_count=1, rebuilt_count=2, total_count=3)
+        await mem.log_recovery_event("chat1", preserved_count=4, rebuilt_count=5, total_count=9)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         content = recovery.read_text(encoding="utf-8")
         # Should have two recovery events
         assert content.count("Recovery Event") == 2
 
-    def test_includes_errors(self, mem: Memory, workspace: Path):
+    async def test_includes_errors(self, mem: Memory, workspace: Path):
         errors = ["file missing", "read error"]
-        mem.log_recovery_event(
+        await mem.log_recovery_event(
             "chat1",
             preserved_count=0,
             rebuilt_count=0,
@@ -1017,9 +1017,9 @@ class TestLogRecoveryEvent:
         assert "file missing" in content
         assert "read error" in content
 
-    def test_limits_errors_to_five(self, mem: Memory, workspace: Path):
+    async def test_limits_errors_to_five(self, mem: Memory, workspace: Path):
         errors = [f"error {i}" for i in range(10)]
-        mem.log_recovery_event(
+        await mem.log_recovery_event(
             "chat1", preserved_count=0, rebuilt_count=0, total_count=0, errors=errors
         )
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
@@ -1028,14 +1028,14 @@ class TestLogRecoveryEvent:
         assert "error 4" in content
         assert "error 5" not in content
 
-    def test_no_errors_section_when_none(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event("chat1", preserved_count=0, rebuilt_count=0, total_count=0)
+    async def test_no_errors_section_when_none(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("chat1", preserved_count=0, rebuilt_count=0, total_count=0)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         content = recovery.read_text(encoding="utf-8")
         assert "Errors" not in content
 
-    def test_creates_chat_directory(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event("brand-new-chat", 1, 1, 2)
+    async def test_creates_chat_directory(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("brand-new-chat", 1, 1, 2)
         assert _chat_dir(workspace, "brand-new-chat").is_dir()
 
 
@@ -1045,16 +1045,16 @@ class TestHasRecoveryEvents:
     def test_returns_false_when_no_log(self, mem: Memory):
         assert mem.has_recovery_events("chat1") is False
 
-    def test_returns_true_after_logging(self, mem: Memory):
-        mem.log_recovery_event("chat1", 0, 0, 0)
+    async def test_returns_true_after_logging(self, mem: Memory):
+        await mem.log_recovery_event("chat1", 0, 0, 0)
         assert mem.has_recovery_events("chat1") is True
 
 
 class TestClearRecoveryLog:
     """Tests for clear_recovery_log."""
 
-    def test_removes_recovery_log(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event("chat1", 0, 0, 0)
+    async def test_removes_recovery_log(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("chat1", 0, 0, 0)
         assert mem.has_recovery_events("chat1") is True
 
         mem.clear_recovery_log("chat1")
