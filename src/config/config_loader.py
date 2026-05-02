@@ -34,6 +34,7 @@ from src.config.config_validation import (
     _log_validation_errors,
 )
 from src.core.errors import NonCriticalCategory, log_noncritical
+from src.exceptions import ConfigurationError
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +49,16 @@ T = TypeVar("T")
 def _from_dict(cls: Type[T], data: dict) -> T:
     """Recursively instantiate a dataclass from a plain dict."""
     if not isinstance(data, dict):
-        return cls()
+        cls_name = getattr(cls, "__name__", cls)
+        log.warning(
+            "Expected dict for %s but got %s — malformed config section",
+            cls_name,
+            type(data).__name__,
+        )
+        raise ConfigurationError(
+            f"Expected dict for {cls_name} but got {type(data).__name__}",
+            config_key=cls_name,
+        )
     # Resolve string annotations caused by `from __future__ import annotations`
     try:
         hints = get_type_hints(cls)
