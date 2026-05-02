@@ -201,8 +201,8 @@ class Config:
     max_concurrent_messages: int = DEFAULT_MAX_CONCURRENT_MESSAGES
 
     def __repr__(self) -> str:
-        return (
-            f"Config(llm={self.llm!r}, whatsapp={self.whatsapp!r}, "
-            f"shell={self.shell!r}, middleware={self.middleware!r}, "
-            f"memory_max_history={self.memory_max_history})"
-        )
+        from dataclasses import asdict
+
+        from src.config.config_validation import _redact_secrets
+
+        return f"Config({_redact_secrets(asdict(self))})"
