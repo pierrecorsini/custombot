@@ -16,6 +16,7 @@ from src.health.models import ComponentHealth, HealthStatus
 if TYPE_CHECKING:
     from src.channels.neonize_backend import NeonizeBackend
     from src.db import Database
+    from src.db.sqlite_pool import SqliteConnectionPool
     from src.scheduler import TaskScheduler
 
 log = logging.getLogger(__name__)
@@ -439,4 +440,45 @@ def check_scheduler(scheduler: Optional["TaskScheduler"]) -> ComponentHealth:
         status=HealthStatus.HEALTHY,
         message=f"Scheduler running ({', '.join(parts)})",
         details=details or None,
+    )
+
+
+def check_sqlite_pool(pool: Optional["SqliteConnectionPool"]) -> ComponentHealth:
+    """Check the shared SQLite connection pool: active connections and their databases.
+
+    Reports ``UNHEALTHY`` when the pool is not configured (shouldn't happen
+    after startup).  Reports ``DEGRADED`` when pool utilization exceeds 80%.
+    Otherwise reports ``HEALTHY`` with connection count, per-database stats,
+    and pool utilization.
+    """
+    if pool is None:
+        return ComponentHealth(
+            name="sqlite_pool",
+            status=HealthStatus.UNHEALTHY,
+            message="SQLite connection pool not initialized",
+        )
+
+    count = pool.connection_count
+    cap = pool.max_connections
+    util = pool.utilization
+    parts = [f"{count}/{cap} connections ({util:.0%})"]
+
+    details: dict[str, Any] = {
+        "utilization": round(util, 2),
+        "per_database": pool.db_stats,
+    }
+    active = pool.active_connections
+    if active:
+        details["connections"] = active
+
+    status = HealthStatus.HEALTHY
+    if util >= 0.8:
+        status = HealthStatus.DEGRADED
+        parts.append("near capacity")
+
+    return ComponentHealth(
+        name="sqlite_pool",
+        status=status,
+        message=f"Pool active ({', '.join(parts)})",
+        details=details,
     )

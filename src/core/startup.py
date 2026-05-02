@@ -246,6 +246,11 @@ async def _step_health_server(ctx: StartupContext) -> str | None:
         startup_durations.update(ctx.components.component_durations)
 
     try:
+        # Retrieve the shared SQLite pool set during builder init
+        from src.db.sqlite_utils import SqliteHelper
+
+        sqlite_pool = SqliteHelper._pool
+
         health_server = HealthServer(
             db=ctx.components.db,
             token_usage=ctx.components.token_usage,
@@ -258,6 +263,7 @@ async def _step_health_server(ctx: StartupContext) -> str | None:
             shutdown_mgr=ctx.shutdown_mgr,
             startup_durations=startup_durations,
             vector_memory=ctx.components.vector_memory,
+            sqlite_pool=sqlite_pool,
         )
         await health_server.start(port=health_port)
         ctx.health_server = health_server

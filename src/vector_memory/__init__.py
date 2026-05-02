@@ -275,6 +275,10 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         calls, eliminating the sqlite-vec extension loading overhead (~5ms)
         on every read.  Uses URI mode with ``?mode=ro`` so the connection
         cannot write.  WAL mode allows concurrent reads with writes.
+
+        Read connections are registered in the shared ``SqliteConnectionPool``
+        (when configured) so that ``close_all()`` during shutdown can clean
+        them up alongside write connections.
         """
         conn: sqlite3.Connection | None = getattr(self._thread_local, "read_conn", None)
         if conn is not None:
@@ -292,10 +296,17 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         self._thread_local.read_conn = conn
         with self._read_pool_lock:
             self._read_connections.append(conn)
+
+        # Register in the shared pool so shutdown can close all connections.
+        pool = SqliteHelper._pool
+        if pool is not None:
+            tid = threading.get_ident()
+            pool.register(f"VectorMemory.read.{tid}", conn, self._db_path)
         return conn
 
     def _close_read_connections(self) -> None:
         """Close all pooled read connections across every thread."""
+        pool = SqliteHelper._pool
         with self._read_pool_lock:
             for conn in self._read_connections:
                 try:
@@ -307,6 +318,11 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
                         logger=log,
                     )
             self._read_connections.clear()
+        # Unregister all read connections from the shared pool.
+        if pool is not None:
+            for name in list(pool.active_connections):
+                if name.startswith("VectorMemory.read."):
+                    pool.unregister(name)
         # Reset thread-local so next access on any thread creates a fresh conn
         self._thread_local = threading.local()
 

@@ -92,3 +92,14 @@ COMPRESSION_KEEP_RECENT: int = 500
 # Prevents unbounded memory growth for long-running bots with thousands of chats.
 # Uses FIFO eviction (oldest entries removed first) when the cap is exceeded.
 MAX_CHAT_GENERATIONS: int = 10_000
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SQLite Connection Pool
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of concurrent SQLite connections tracked by the shared pool.
+# Caps file handle usage across all databases (vector_memory, projects, etc.).
+# Each component typically holds 1 write connection; VectorMemory adds per-thread
+# read connections.  20 accommodates the main writer threads plus several read
+# threads without exhausting file descriptors.
+SQLITE_POOL_MAX_CONNECTIONS: int = 20

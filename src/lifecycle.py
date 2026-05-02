@@ -392,5 +392,15 @@ async def perform_shutdown(ctx: ShutdownContext) -> None:
     except Exception as exc:
         ctx.log.warning("Error closing database: %s", exc)
 
+    # Safety net: close any leaked SQLite connections via the shared pool.
+    # Individual components (VectorMemory, ProjectStore) should have already
+    # closed their own connections, but this catches anything that slipped
+    # through (e.g. read connections from background threads).
+    from src.db.sqlite_utils import SqliteHelper
+
+    leaked = SqliteHelper.close_all_connections()
+    if leaked:
+        ctx.log.info("SQLite pool safety net closed %d leaked connection(s): %s", len(leaked), ", ".join(leaked))
+
     _log_shutdown_complete(shutdown_begin_time)
     cli_output.success("Shutdown complete.")

@@ -27,6 +27,7 @@ from src.health.checks import (
     check_llm_logs,
     check_neonize,
     check_scheduler,
+    check_sqlite_pool,
     check_vector_memory,
     check_wiring,
     get_token_usage_stats,
@@ -87,6 +88,7 @@ class HealthServer:
         shutdown_mgr: Optional["GracefulShutdown"] = None,
         startup_durations: Optional[dict[str, float]] = None,
         vector_memory: Any = None,
+        sqlite_pool: Any = None,
     ) -> None:
         self._db = db
         self._neonize_backend = neonize_backend
@@ -105,6 +107,7 @@ class HealthServer:
         self._shutdown_mgr = shutdown_mgr
         self._startup_durations = startup_durations
         self._vector_memory = vector_memory
+        self._sqlite_pool = sqlite_pool
         self._startup_total_seconds: Optional[float] = None
         self._runner: Optional[Any] = None
         self._site: Optional[Any] = None
@@ -229,6 +232,19 @@ class HealthServer:
                     name="vector_memory",
                     status=HealthStatus.DEGRADED,
                     message=f"VectorMemory check failed: {type(exc).__name__}",
+                )
+            )
+
+        # SQLite connection pool status
+        try:
+            components.append(check_sqlite_pool(self._sqlite_pool))
+        except Exception as exc:
+            log.debug("SQLite pool health check error: %s", exc)
+            components.append(
+                ComponentHealth(
+                    name="sqlite_pool",
+                    status=HealthStatus.DEGRADED,
+                    message=f"SQLite pool check failed: {type(exc).__name__}",
                 )
             )
 

@@ -194,6 +194,22 @@ async def _step_workspace_integrity(ctx: BuilderContext) -> str | None:
     return "checked"
 
 
+async def _step_sqlite_pool(ctx: BuilderContext) -> str | None:
+    """Initialize the shared SQLite connection pool.
+
+    Must run before any component that uses SqliteHelper (VectorMemory,
+    ProjectStore) so those components delegate connection creation to the
+    pool factory for consistent WAL-mode configuration and centralized
+    lifecycle management.
+    """
+    from src.db.sqlite_pool import SqliteConnectionPool
+    from src.db.sqlite_utils import SqliteHelper
+
+    pool = SqliteConnectionPool()
+    SqliteHelper.set_pool(pool)
+    return "initialized"
+
+
 async def _step_database(ctx: BuilderContext) -> str | None:
     """Create and connect the Database; wire DeduplicationService."""
     from src.core.dedup import DeduplicationService
@@ -427,6 +443,7 @@ async def _step_bot(ctx: BuilderContext) -> str | None:
 
 DEFAULT_BUILDER_STEPS: list[BuilderComponentSpec] = [
     BuilderComponentSpec(name="Workspace Integrity", factory=_step_workspace_integrity),
+    BuilderComponentSpec(name="SQLite Pool", factory=_step_sqlite_pool),
     BuilderComponentSpec(name="Database", factory=_step_database),
     BuilderComponentSpec(
         name="LLM Client",
@@ -436,11 +453,12 @@ DEFAULT_BUILDER_STEPS: list[BuilderComponentSpec] = [
     BuilderComponentSpec(
         name="Vector Memory",
         factory=_step_vector_memory,
-        depends_on=("Database", "LLM Client"),
+        depends_on=("SQLite Pool", "Database", "LLM Client"),
     ),
     BuilderComponentSpec(
         name="Project Store",
         factory=_step_project_store,
+        depends_on=("SQLite Pool",),
     ),
     BuilderComponentSpec(
         name="Message Queue",

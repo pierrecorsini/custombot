@@ -23,7 +23,7 @@ import random
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Optional, TYPE_CHECKING
 
 from src.constants import (
     SQLITE_WRITE_CIRCUIT_COOLDOWN_SECONDS,
@@ -31,15 +31,13 @@ from src.constants import (
     SQLITE_WRITE_MAX_RETRIES,
     SQLITE_WRITE_RETRY_INITIAL_DELAY,
 )
+from src.db.sqlite_pool import DEFAULT_PRAGMAS as _DEFAULT_PRAGMAS
 from src.utils.locking import ThreadLock
 
-log = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from src.db.sqlite_pool import SqliteConnectionPool
 
-# Standard PRAGMAs applied to all connections
-_DEFAULT_PRAGMAS = [
-    "PRAGMA journal_mode=WAL;",
-    "PRAGMA foreign_keys=ON;",
-]
+log = logging.getLogger(__name__)
 
 
 def get_sqlite_connection(
@@ -228,9 +226,24 @@ class SqliteHelper:
     _lock: ThreadLock
     _sqlite_breaker: _SyncCircuitBreaker
 
+    # Class-level pool shared by all SqliteHelper instances.
+    _pool: ClassVar["SqliteConnectionPool | None"] = None
+
     def __init__(self, *args: object, **kwargs: object) -> None:
         self._sqlite_breaker = _SyncCircuitBreaker()
         super().__init__(*args, **kwargs)
+
+    @classmethod
+    def set_pool(cls, pool: "SqliteConnectionPool") -> None:
+        """Set the shared connection pool for all SqliteHelper instances."""
+        cls._pool = pool
+
+    @classmethod
+    def close_all_connections(cls) -> list[str]:
+        """Close all tracked connections via the pool (safety net for shutdown)."""
+        if cls._pool is not None:
+            return cls._pool.close_all()
+        return []
 
     def _open_connection(
         self,
@@ -241,6 +254,11 @@ class SqliteHelper:
         """
         Open a SQLite connection with standard configuration.
 
+        When a pool is set (via :meth:`set_pool`), delegates connection
+        creation to the pool factory for consistent WAL-mode configuration
+        and centralized lifecycle management.  Otherwise falls back to
+        creating the connection directly.
+
         Args:
             pragmas: Custom PRAGMAs (replaces defaults).
             load_extension: If True, enable extension loading before PRAGMAs.
@@ -248,6 +266,18 @@ class SqliteHelper:
         Returns:
             The opened connection (also stored as self._db).
         """
+        name = f"{type(self).__qualname__}"
+
+        if SqliteHelper._pool is not None:
+            self._db = SqliteHelper._pool.get_connection(
+                name=name,
+                db_path=self._db_path,
+                pragmas=pragmas,
+                load_extension=load_extension,
+            )
+            return self._db
+
+        # Fallback: create connection directly (no pool configured).
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(str(self._db_path), check_same_thread=False)
 
@@ -266,6 +296,9 @@ class SqliteHelper:
     def close(self) -> None:
         """Close the database connection."""
         if self._db:
+            # Unregister from pool before closing
+            if SqliteHelper._pool is not None:
+                SqliteHelper._pool.unregister(f"{type(self).__qualname__}")
             self._db.close()
             self._db = None
 
