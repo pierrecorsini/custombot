@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/completed-sessions | Priority: medium | Version: 3.0 | Updated: 2026-04-06 -->
+<!-- Context: project-intelligence/lookup/completed-sessions | Priority: medium | Version: 4.0 | Updated: 2026-05-02 -->
 
 # Completed Sessions
 
@@ -54,22 +54,35 @@
 
 **Files affected**: `channels/base.py`, `channels/whatsapp.py`, `src/core/tool_executor.py`, `src/bot.py`, `skills/builtin/` (new media skills)
 
+## 2026-05-01: Code Optimization Session 1
+
+**Status**: In Progress (11 tasks defined)
+
+**Deliverables**:
+- 11 targeted optimizations: 3 P1-critical, 5 P2-important, 3 P3 code-quality
+- P1: Cache invalidation bug fix, event-loop blocking fix, DedupStats allocation
+- P2: Double flush elimination, datetime pre-compute, HMAC caching, narrow except, no-rules short-circuit
+- P3: Vector memory configurable cache, audit chain integrity, sync method naming
+
+**Files affected**: `src/memory.py`, `src/core/dedup.py`, `src/message_queue.py`, `src/scheduler.py`, `src/security/signing.py`, `src/security/audit.py`, `src/routing.py`, `src/vector_memory/__init__.py`
+
+**Key patterns**: See `concepts/optimization-patterns.md` for all 9 documented patterns.
+
+## 2026-05-02: Code Optimization Session 2
+
+**Status**: In Progress (8 tasks defined)
+
+**Deliverables**:
+- 8 optimizations: 3 P1, 2 P2, 3 P3
+- P1: xxHash for dedup keys, RateLimitResult docstring fix, pre-compute routing candidate lists
+- P2: Scheduler epoch caching, env var for api_key, HMAC for audit chains
+- P3: Single-pass response filter, RFC 1918 private IP detection
+
+**Files affected**: `src/core/dedup.py`, `src/rate_limiter.py`, `src/routing.py`, `src/scheduler.py`, `src/llm.py`, `src/security/audit.py`
+
+**Key patterns**: Fast non-crypto hashing, epoch memoization, network-aware validation, one-pass iteration.
+
 ---
-
-## Pending Work
-
-### code-optimization (0/8 tasks)
-- Message deduplication O(1) with Set-based index
-- Lock dictionaries with LRU cache bounds
-- Shell skill dangerous command blocking
-- Bridge API key authentication
-- HTTP client pooling
-- LLM timeout configuration
-- Remove duplicate code from main.py
-- Async file I/O utility
-
-### fifty-improvements (0/50 tasks)
-Task files exist but work appears already done based on module presence. Needs audit to verify completion.
 
 ## Related Files
 

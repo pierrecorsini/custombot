@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/tech-stack | Priority: high | Version: 3.0 | Updated: 2026-04-06 -->
+<!-- Context: project-intelligence/lookup/tech-stack | Priority: high | Version: 3.1 | Updated: 2026-05-02 -->
 
 # Tech Stack
 
@@ -8,33 +8,42 @@
 
 | Layer | Technology | Version | Rationale |
 |-------|-----------|---------|-----------|
-| Language | Python | 3.13+ | Modern async support, type hints, rich ecosystem |
-| Framework | asyncio + Click | N/A | Async-first architecture with CLI interface |
-| Database | SQLite (aiosqlite) | 3.x | Lightweight, embedded, perfect for single-instance bot |
-| LLM | OpenAI-compatible API | N/A | Flexible model support via configurable endpoints |
-| WhatsApp | neonize (whatsmeow/Go via ctypes) | Latest | WhatsApp Web API via native Python bindings |
-| Key Libraries | httpx, rich, textual | Latest | HTTP client, terminal UI, TUI framework |
+| Language | Python | 3.11+ | Async/await, performance, type hints |
+| Framework | asyncio + Click | stdlib/8.3+ | Async-first architecture with CLI interface |
+| Database | SQLite + sqlite-vec | stdlib/0.1 | Embedded DB with vector search |
+| LLM | OpenAI SDK | 2.29+ | Chat completions with tool calling + streaming |
+| WhatsApp | neonize (whatsmeow/Go) | 0.3+ | WhatsApp Web API via native Python bindings |
+| Serialization | orjson + msgpack | 3.10+/1.1+ | Fast JSON + binary serialization |
+| Terminal UI | Rich + questionary | 14.3+/2.1+ | Formatted output, interactive menus |
+| Search | duckduckgo-search | 8.1+ | Web search skill |
+| Tracing | OpenTelemetry | 1.30+ | Distributed tracing (optional) |
+| File Watching | watchdog | 4.0+ | OS-native file change detection |
+| Hashing | xxhash | 3.5+ | Fast non-cryptographic hashing |
+| Testing | pytest + pytest-asyncio | 8.0+/0.23+ | Async test support, coverage |
+| Linting | ruff + mypy | 0.8+/1.13+ | Fast linting, type checking |
 
 ## Supporting Modules
 
 | Module | Purpose | File |
 |--------|---------|------|
-| Circuit Breaker | Fault tolerance pattern | `src/circuit_breaker.py` |
+| Circuit Breaker | Fault tolerance | `src/utils/circuit_breaker.py` |
 | Rate Limiter | Request throttling | `src/rate_limiter.py` |
-| Retry | Exponential backoff | `src/retry.py` |
-| Message Queue | Persistence | `src/message_queue.py` |
-| Exceptions | Custom error types | `src/exceptions.py` |
-| Protocols | Type interfaces | `src/protocols.py` |
-| Type Guards | Runtime type checking | `src/type_guards.py` |
-| Constants | Named constants | `src/constants.py` |
-| CLI Output | Colorful terminal output | `src/cli_output.py` |
-| Progress | Progress indicators | `src/progress.py` |
+| Retry | Exponential backoff | `src/utils/retry.py` |
+| Message Queue | Crash recovery persistence | `src/message_queue.py` |
+| Exceptions | Domain error hierarchy | `src/exceptions.py` |
+| Protocols | Type interfaces | `src/utils/protocols.py`, `src/llm_provider.py` |
+| Type Guards | Runtime type checking | `src/utils/type_guards.py` |
+| Constants | Named constants (14 domains) | `src/constants/` |
+| CLI Output | Terminal output | `src/ui/cli_output.py` |
+| Progress | Spinner + progress bar | `src/progress.py` |
+| Diagnostics | Self-service checks | `src/diagnose.py` |
+| Workspace Integrity | Startup verification | `src/workspace_integrity.py` |
 
 ## Codebase References
 
-- `requirements.txt` — All Python dependencies
+- `pyproject.toml` — All Python dependencies and project config
+- `requirements-lock.txt` — Hash-locked dependencies
 - `src/` — Core application modules
-- `channels/` — Communication channel implementations
 
 ## Related Files
 
