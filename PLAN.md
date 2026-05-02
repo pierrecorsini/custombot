@@ -76,7 +76,7 @@ _Round 5 — Senior technical review (2026-05-02). 22 items across 6 categories.
 ## Testing & Quality
 
 - [x] Add integration test for `RoutingEngine` watchdog auto-reload — when a `.md` instruction file is modified on disk, `match_with_rule()` should detect the change via `_is_stale()` and reload rules automatically. No test currently covers this critical hot-reload path.
-- [ ] Add test for `EventBus` concurrent emit with a failing handler — verify that when one handler raises, other handlers in the same `emit()` call still execute and the error is logged rather than propagated. This is a core safety invariant of the event bus.
+- [x] Add test for `EventBus` concurrent emit with a failing handler — verify that when one handler raises, other handlers in the same `emit()` call still execute and the error is logged rather than propagated. This is a core safety invariant of the event bus.
 - [ ] Add test for `VectorMemory` startup degradation path — `_step_vector_memory()` in `builder.py` has complex error handling (probe failure → close → set None → return degraded status). This path is currently untested but is critical for production resilience.
 - [ ] Add integration test for `MessageQueue` crash recovery with a partially-written JSONL file — create a queue, append entries, simulate a crash by writing a truncated last line, then verify `_load_pending()` recovers all valid entries and logs the corruption.
 - [ ] Add test for `ConfigChangeApplier` with destructive field changes — verify that destructive fields (e.g. `llm.model`, `llm.api_key`) are logged as warnings but NOT applied to live components, and that safe fields in the same change ARE applied.

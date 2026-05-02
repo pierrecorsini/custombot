@@ -97,6 +97,52 @@ async def test_no_handlers_is_noop(bus: EventBus) -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_emit_failing_handler_isolated(
+    bus: EventBus, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Concurrent handlers: one failure must not prevent others from completing.
+
+    Uses asyncio.Event to prove handlers actually run in parallel via
+    asyncio.gather.  The failing handler waits until a sibling has started
+    before raising — if handlers were sequential this would deadlock.
+    """
+    started = asyncio.Event()
+    results: list[str] = []
+
+    async def _handler_a_failing(event: Event) -> None:
+        """Fails after waiting for handler B to start (proves concurrency)."""
+        await started.wait()
+        raise RuntimeError("handler_a failed")
+
+    async def _handler_b_ok(event: Event) -> None:
+        """Signals start, then completes successfully."""
+        started.set()
+        await asyncio.sleep(0.01)
+        results.append("b")
+
+    async def _handler_c_ok(event: Event) -> None:
+        """Records that it ran."""
+        results.append("c")
+
+    bus.on("test_event", _handler_a_failing)
+    bus.on("test_event", _handler_b_ok)
+    bus.on("test_event", _handler_c_ok)
+
+    with caplog.at_level(logging.DEBUG, logger="src.core.event_bus"):
+        # emit() must return normally — no exception propagated
+        await bus.emit(Event(name="test_event", data={}, source="concurrent_test"))
+
+    # Both ok handlers must have completed despite handler A failing
+    assert "b" in results, "handler_b should have completed"
+    assert "c" in results, "handler_c should have completed"
+
+    # The failure must have been logged with event metadata
+    assert any(
+        "test_event" in record.message for record in caplog.records
+    ), "error should be logged with event name"
+
+
+@pytest.mark.asyncio
 async def test_closed_bus_ignores_emission(bus: EventBus) -> None:
     """A closed bus silently ignores emit() calls."""
     bus.on("test_event", _ok_handler)
