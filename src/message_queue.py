@@ -647,16 +647,20 @@ class MessageQueue(AsyncLockMixin):
         """
         Load pending messages from queue file.
 
-        Reads the JSONL queue file and loads all pending messages
-        into the in-memory index. Corrupted or malformed lines are
-        skipped without failing the entire load, enabling recovery
-        of valid entries from partially-written files (e.g. crash
-        mid-write).
+        Streams the JSONL queue file line-by-line and loads only pending
+        messages into the in-memory index.  Completed entries are counted
+        but **not** materialised into ``QueuedMessage`` objects, reducing
+        per-startup CPU and memory cost for high-throughput deployments
+        where the file can grow large.
+
+        Corrupted or malformed lines are skipped without failing the
+        entire load, enabling recovery of valid entries from
+        partially-written files (e.g. crash mid-write).
 
         Recovery steps on startup:
         1. Promote orphaned .tmp file if main file is missing
            (crash during atomic write's rename step).
-        2. Load valid entries, skipping corrupted lines.
+        2. Stream valid entries, skipping corrupted lines.
         3. Backup corrupted file before eviction overwrites it.
         4. Rewrite file with only pending entries (eager eviction).
 
@@ -681,37 +685,44 @@ class MessageQueue(AsyncLockMixin):
         error_details: List[str] = []
 
         try:
-            # errors='replace' handles non-UTF-8 bytes from crash-induced
-            # partial writes by substituting U+FFFD instead of raising
-            # UnicodeDecodeError, which would lose all queued messages.
-            content = self._queue_file.read_text(encoding="utf-8", errors="replace")
+            # Stream line-by-line instead of read_text()+splitlines() so
+            # that only one line is in memory at a time.  errors='replace'
+            # handles non-UTF-8 bytes from crash-induced partial writes.
+            with self._queue_file.open("r", encoding="utf-8", errors="replace") as fh:
+                for line_idx, line in enumerate(fh, start=1):
+                    line = line.rstrip("\n\r")
+                    total_lines += 1
+
+                    data = safe_json_parse(
+                        line, default=None, log_errors=True, mode=JsonParseMode.LINE
+                    )
+                    if data is None:
+                        corrupted_count += 1
+                        corrupted_line_numbers.append(line_idx)
+                        error_details.append(f"Line {line_idx}: JSON parse failed")
+                        continue
+
+                    # Completed entries (including short completion markers)
+                    # are counted but not deserialised — avoids allocating
+                    # QueuedMessage objects for entries that will be evicted.
+                    if data.get("status") == "completed":
+                        completed_count += 1
+                        loaded_count += 1
+                        continue
+
+                    try:
+                        msg = QueuedMessage.from_dict(data)
+                        loaded_count += 1
+                        self._pending[msg.message_id] = msg
+                        pending_count += 1
+                    except (KeyError, ValueError) as exc:
+                        corrupted_count += 1
+                        corrupted_line_numbers.append(line_idx)
+                        error_details.append(f"Line {line_idx}: {str(exc)[:80]}")
+                        continue
         except Exception as exc:
             log.error("Failed to read queue file: %s", exc)
             return
-
-        for line_idx, line in enumerate(content.splitlines(), start=1):
-            total_lines += 1
-            data = safe_json_parse(line, default=None, log_errors=True, mode=JsonParseMode.LINE)
-            if data is None:
-                corrupted_count += 1
-                corrupted_line_numbers.append(line_idx)
-                error_details.append(f"Line {line_idx}: JSON parse failed")
-                continue
-
-            try:
-                msg = QueuedMessage.from_dict(data)
-                loaded_count += 1
-
-                if msg.status == MessageStatus.PENDING:
-                    self._pending[msg.message_id] = msg
-                    pending_count += 1
-                else:
-                    completed_count += 1
-            except (KeyError, ValueError) as exc:
-                corrupted_count += 1
-                corrupted_line_numbers.append(line_idx)
-                error_details.append(f"Line {line_idx}: {str(exc)[:80]}")
-                continue
 
         is_corrupted = corrupted_count > 0
 
