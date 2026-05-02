@@ -504,8 +504,15 @@ class RoutingEngine:
                 parsed = parse_file(md_file)
                 rule_dicts = extract_routing_rules(parsed.metadata)
             except Exception as exc:
-                log.warning("Failed to parse %s: %s", md_file.name, exc)
-                continue
+                # Retry once for transient parse failures (e.g. concurrent writes)
+                log.debug("Transient parse failure for %s, retrying: %s", md_file.name, exc)
+                time.sleep(0.1)
+                try:
+                    parsed = parse_file(md_file)
+                    rule_dicts = extract_routing_rules(parsed.metadata)
+                except Exception as retry_exc:
+                    log.warning("Failed to parse %s after retry: %s", md_file.name, retry_exc)
+                    continue
 
             for rule_dict in rule_dicts:
                 try:

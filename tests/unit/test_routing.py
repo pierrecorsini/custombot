@@ -33,6 +33,7 @@ from src.routing import (
     _match_compiled,
     _rule_from_dict,
 )
+from src.utils.frontmatter import parse_file
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers — lightweight factory functions
@@ -746,6 +747,69 @@ class TestRoutingEngineLoadRules:
         engine = RoutingEngine(tmp_path)
         engine.load_rules()
         # Only the good file should be loaded
+        assert len(engine.rules) == 1
+        assert engine.rules[0].id == "good-rule"
+
+    def test_transient_parse_failure_retried(self, tmp_path: Path):
+        """A transient parse_file failure is retried once before skipping."""
+        md = tmp_path / "flaky.md"
+        md.write_text(
+            textwrap.dedent("""\
+                ---
+                routing:
+                  id: retry-rule
+                  priority: 1
+                ---
+                # Retry
+            """)
+        )
+        engine = RoutingEngine(tmp_path)
+
+        call_count = 0
+        original_parse = parse_file
+
+        def _flaky_parse(path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ValueError("simulated transient failure")
+            return original_parse(path)
+
+        with patch("src.routing.parse_file", side_effect=_flaky_parse):
+            with patch("src.routing.time.sleep") as mock_sleep:
+                engine.load_rules()
+
+        # parse_file called twice (initial + retry)
+        assert call_count == 2
+        # sleep was called with 0.1s delay
+        mock_sleep.assert_called_once_with(0.1)
+        # Rule loaded successfully after retry
+        assert len(engine.rules) == 1
+        assert engine.rules[0].id == "retry-rule"
+
+    def test_persistent_parse_failure_skipped_after_retry(self, tmp_path: Path):
+        """If parse_file fails on both attempts, the file is skipped."""
+        md = tmp_path / "persistently_bad.md"
+        md.write_text("---\n[[invalid yaml\n---\n# Broken\n")
+
+        # Also create a good file to verify it still loads
+        good = tmp_path / "good.md"
+        good.write_text(
+            textwrap.dedent("""\
+                ---
+                routing:
+                  id: good-rule
+                  priority: 1
+                ---
+                # Good
+            """)
+        )
+        engine = RoutingEngine(tmp_path)
+
+        with patch("src.routing.time.sleep"):
+            engine.load_rules()
+
+        # Only the good file loaded; the bad file was retried then skipped
         assert len(engine.rules) == 1
         assert engine.rules[0].id == "good-rule"
 
