@@ -1,41 +1,22 @@
+<!-- Context: project-intelligence/navigation | Priority: critical | Version: 1.0 | Updated: 2026-05-02 -->
+
 # Project Intelligence
 
-> Function-based context for the CustomBot project.
-
-## Root
-
 | File | Description | Priority |
 |------|-------------|----------|
-| `technical-domain.md` | Tech stack, architecture, code patterns, naming, security | critical |
+| technical-domain.md | Tech stack, code patterns, naming, standards, security | critical |
 
-## concepts/
+---
 
-| File | Description | Priority |
-|------|-------------|----------|
-| `architecture.md` | System architecture, integration points, constraints | high |
-| `business-domain.md` | Business context, users, value propositions (template) | high |
-| `business-tech-bridge.md` | Business-to-technical mapping (template) | high |
+## Relationship to Other Context
 
-## guides/
+| Category | Covers |
+|----------|--------|
+| **project-intelligence/** (here) | Domain-level: why tech choices, business context, patterns |
+| **project/** | Feature-level: how each component works, APIs, schemas |
+| **core/** | Universal standards: MVI, structure, templates |
 
-| File | Description | Priority |
-|------|-------------|----------|
-| `dev-environment.md` | Development setup instructions | medium |
-| `log-diagnostics.md` | Finding bugs via structured logs | medium |
-| `optimization-patterns.md` | 9 reusable optimization patterns from code analysis | high |
+## Related Files
 
-## errors/
-
-| File | Description | Priority |
-|------|-------------|----------|
-| `bug-fixes.md` | Bugs fixed — patterns to watch for | high |
-| `known-issues.md` | Active technical debt and open items | high |
-
-## lookup/
-
-| File | Description | Priority |
-|------|-------------|----------|
-| `project-structure.md` | Directory layout and key locations | high |
-| `tech-stack.md` | Technologies, versions, and roles | high |
-| `decisions-log.md` | Architectural decision records | medium |
-| `completed-sessions.md` | Completed development session index | low |
+- **Project Context**: `.opencode/context/project/navigation.md`
+- **Standards**: `.opencode/context/core/standards/project-intelligence.md`
