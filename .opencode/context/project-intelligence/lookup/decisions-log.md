@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/decisions-log | Priority: high | Version: 3.0 | Updated: 2026-04-06 -->
+<!-- Context: project-intelligence/lookup/decisions-log | Priority: high | Version: 4.0 | Updated: 2026-05-02 -->
 
 # Decisions Log
 
@@ -80,6 +80,28 @@ Related: [Links to PRs, issues, docs]
 - **Positive**: No breaking changes, clean layering, extensible to more media types
 - **Negative**: Callback threading adds indirection through 3 layers
 - **Libraries**: edge-tts (free TTS), xhtml2pdf (pure Python PDF), markdown (HTML conversion)
+
+---
+
+## Decision: Config Module Split
+
+**Date**: 2026-05-02 | **Status**: Decided
+
+**Context**: `src/config/config.py` grew to 785 lines, mixing data model, I/O, logging, and validation concerns.
+**Decision**: Split into 3 modules: `config_schema_defs.py` (pure data), `config_loader.py` (I/O + env overrides), `config_validation.py` (validation helpers). Original `config.py` becomes a re-export facade.
+**Rationale**: Each module has a single responsibility. Data model changes don't touch I/O code and vice versa.
+**Alternatives**: Keep monolithic file (rejected: hard to navigate), Further split into per-section files (rejected: over-engineering for current scale).
+
+---
+
+## Decision: ShutdownContext Dataclass
+
+**Date**: 2026-05-02 | **Status**: Decided
+
+**Context**: `perform_shutdown()` had 12 positional parameters, a maintenance burden when adding new components.
+**Decision**: Replace with a `ShutdownContext` frozen dataclass containing all parameters.
+**Rationale**: Named parameters prevent ordering bugs, adding new components only requires updating the dataclass.
+**Alternatives**: Builder pattern (rejected: over-engineering), dict parameter (rejected: no type safety).
 
 ---
 

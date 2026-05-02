@@ -8,7 +8,7 @@ Provides:
   - CONFIG_PATH: Default configuration file path
 """
 
-from src.config.config import (
+from src.config.config_schema_defs import (
     CONFIG_PATH,
     DEPRECATED_OPTIONS,
     RENAMED_OPTIONS,
@@ -16,9 +16,8 @@ from src.config.config import (
     LLMConfig,
     NeonizeConfig,
     WhatsAppConfig,
-    load_config,
-    save_config,
 )
+from src.config.config_loader import load_config, save_config
 from src.config.config_schema import (
     ConfigValidationError,
     add_schema_version,

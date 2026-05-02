@@ -1,47 +1,45 @@
-<!-- Context: project-intelligence/errors/known-issues | Priority: high | Version: 3.0 | Updated: 2026-04-06 -->
+<!-- Context: project-intelligence/errors/known-issues | Priority: high | Version: 4.0 | Updated: 2026-05-02 -->
 
 # Known Issues
 
 > Active technical debt, open questions, and current issues. Review weekly.
 
-## Technical Debt
+## Technical Debt (from PLAN.md Round 3 — 15 items remaining)
+
+### Performance (4 items)
 
 | Item | Impact | Priority | Mitigation |
 |------|--------|----------|------------|
-| [Debt item] | [What risk it creates] | [High/Med/Low] | [How to manage] |
+| No concurrency semaphore on `_on_message()` | OOM under load, LLM rate limit exhaustion | High | Add `max_concurrent_messages` semaphore (default 10) |
+| `executor.shutdown(wait=False)` orphans work | Data loss on crash (pending DB writes, vector batches) | High | Use `wait=True` with timeout |
+| No embedding model change detection | Vectors silently incompatible after model swap | Medium | Store model name in metadata table |
+| No SQLite connection pooling | 3 independent DB connections, no shared WAL mode | Medium | Create shared `ConnectionPool` abstraction |
 
-### Template for Debt Details
+### Error Handling (4 items)
 
-```
-Priority: [High/Med/Low]
-Impact: [What happens if not addressed]
-Root Cause: [Why this debt exists]
-Proposed Solution: [How to fix it]
-Effort: [Small/Medium/Large]
-Status: [Acknowledged | Scheduled | In Progress | Deferred]
-```
+| Item | Impact | Priority | Mitigation |
+|------|--------|----------|------------|
+| Silent error swallowing in `_from_dict()` | Malformed config returns defaults with no warning | Medium | Raise `ConfigurationError` with log |
+| Inconsistent `_load_pending()` logging | Corruption equally invisible in repair path | Medium | Unify logging level for both paths |
+| TOCTOU race in `Memory.ensure_workspace()` | Concurrent coroutine file creation race | Medium | Atomic `os.O_EXCL` open or lock |
+| Shared task dict mutation in scheduler | Iterator invalidation during `_execute_task()` | Medium | Snapshot or copy-on-write pattern |
 
-## Open Questions
+### Testing (5 items)
 
-| Question | Stakeholders | Status | Next Action |
-|----------|--------------|--------|-------------|
+| Item | Impact | Priority | Mitigation |
+|------|--------|----------|------------|
+| Missing `__all__` exports in most modules | Accidental internal imports | Medium | Add to all public modules |
+| Duplicate `test_routing.py` | Double-discovery, conflicting results | Medium | Remove root-level, keep `tests/unit/` |
+| No config hot-reload integration test | Watcher bugs undetected | High | Test ConfigWatcher with mtime changes |
+| No property-based `_from_dict()` roundtrip test | Missing field mappings undetected | High | Add hypothesis roundtrip test |
+| No shared `Bot` test fixture | Test duplication, inconsistent isolation | Medium | Add `conftest.py` fixture |
 
-## Known Issues
+### Security (2 items from PLAN.md Round 4)
 
-| Issue | Severity | Workaround | Status |
-|-------|----------|------------|--------|
-
-### Template for Issue Details
-
-```
-Severity: [Critical/High/Med/Low]
-Impact: [Who/what is affected]
-Reproduction: [Steps to reproduce]
-Workaround: [Temporary solution]
-Root Cause: [If known]
-Fix Plan: [How to properly fix]
-Status: [Known/In Progress/Fixed in vX.X]
-```
+| Item | Impact | Priority | Mitigation |
+|------|--------|----------|------------|
+| `Config.__repr__()` leaks API key | Secret exposure in traces/debugger | High | Override `__repr__` with redaction |
+| No `IncomingMessage` field validation | Injection via crafted IDs | Medium | Add format checks for message_id, chat_id, sender_id |
 
 ## Insights & Lessons Learned
 

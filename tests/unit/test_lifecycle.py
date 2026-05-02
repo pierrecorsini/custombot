@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.lifecycle import (
+    ShutdownContext,
     _log_cleanup_step,
     _log_component_init,
     _log_component_ready,
@@ -246,7 +247,7 @@ class TestPerformShutdown:
         session_metrics = {"start_time": time.time() - 10}
         m = shutdown_mocks
 
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=m["shutdown"],
             channel=m["channel"],
             scheduler=m["scheduler"],
@@ -258,7 +259,7 @@ class TestPerformShutdown:
             llm=m["llm"],
             session_metrics=session_metrics,
             log=logging.getLogger("test"),
-        )
+        ))
 
         # Verify all components were shut down
         m["shutdown"].request_shutdown.assert_called_once()
@@ -274,7 +275,7 @@ class TestPerformShutdown:
         session_metrics = {"start_time": time.time() - 30}
         m = shutdown_mocks
 
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=m["shutdown"],
             channel=m["channel"],
             scheduler=m["scheduler"],
@@ -286,7 +287,7 @@ class TestPerformShutdown:
             llm=m["llm"],
             session_metrics=session_metrics,
             log=logging.getLogger("test"),
-        )
+        ))
 
         assert "uptime" in session_metrics
         assert session_metrics["uptime"] > 0
@@ -300,7 +301,7 @@ class TestPerformShutdown:
         m["db"].close = AsyncMock(side_effect=RuntimeError("boom"))
 
         # Should not raise
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=m["shutdown"],
             channel=m["channel"],
             scheduler=m["scheduler"],
@@ -312,13 +313,13 @@ class TestPerformShutdown:
             llm=m["llm"],
             session_metrics={"uptime": 5},
             log=logging.getLogger("test"),
-        )
+        ))
 
     @pytest.mark.asyncio()
     async def test_shutdown_without_health_server(self, shutdown_mocks):
         m = shutdown_mocks
         # health_server=None should be handled
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=m["shutdown"],
             channel=m["channel"],
             scheduler=m["scheduler"],
@@ -330,7 +331,7 @@ class TestPerformShutdown:
             llm=m["llm"],
             session_metrics={"uptime": 5},
             log=logging.getLogger("test"),
-        )
+        ))
         # Should complete without error
         m["db"].close.assert_awaited_once()
 
@@ -344,7 +345,7 @@ class TestPerformShutdown:
         m["scheduler"].stop = AsyncMock(side_effect=lambda: call_order.append("scheduler"))
         m["db"].close = AsyncMock(side_effect=lambda: call_order.append("db"))
 
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=m["shutdown"],
             channel=m["channel"],
             scheduler=m["scheduler"],
@@ -356,7 +357,7 @@ class TestPerformShutdown:
             llm=m["llm"],
             session_metrics={"uptime": 5},
             log=logging.getLogger("test"),
-        )
+        ))
 
         # DB should be the last call
         assert call_order[-1] == "db"

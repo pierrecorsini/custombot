@@ -11,9 +11,11 @@ import asyncio
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 from src.config import Config
+from src.constants import CLEANUP_STEP_TIMEOUT
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.security.url_sanitizer import sanitize_url_for_logging
 
@@ -28,7 +30,7 @@ if TYPE_CHECKING:
     from src.scheduler import TaskScheduler
     from src.shutdown import GracefulShutdown
     from src.vector_memory import VectorMemory
-from src.constants import DEFAULT_SHUTDOWN_TIMEOUT, WORKSPACE_DIR
+    from src.constants import DEFAULT_SHUTDOWN_TIMEOUT, WORKSPACE_DIR
 
 log = logging.getLogger("lifecycle")
 
@@ -225,45 +227,61 @@ def _log_shutdown_complete(start_time: float) -> None:
         log.info("Shutdown complete (%.2fs)", duration)
 
 
-async def perform_shutdown(
-    shutdown: "GracefulShutdown",
-    channel: "BaseChannel",
-    scheduler: "TaskScheduler",
-    health_server: "HealthServer | None",
-    db: "Database",
-    vector_memory: Optional["VectorMemory"],
-    project_store: "ProjectStore",
-    message_queue: "MessageQueue",
-    llm: "LLMProvider",
-    session_metrics: dict,
-    log: logging.Logger,
-    verbose: bool = False,
-    bot: Optional["Bot"] = None,
-    executor: Optional[ThreadPoolExecutor] = None,
-) -> None:
+@dataclass(slots=True)
+class ShutdownContext:
+    """Structured parameter bag for ``perform_shutdown()``.
+
+    Replaces the former 14-parameter signature with a single dataclass,
+    mirroring ``StartupContext`` from ``src/core/startup.py``.
+
+    Required fields correspond to components that are always available
+    at shutdown time.  Optional fields (``health_server``, ``bot``,
+    ``executor``) may be ``None`` depending on configuration and startup
+    success.
+    """
+
+    shutdown: GracefulShutdown
+    channel: BaseChannel
+    scheduler: TaskScheduler
+    db: Database
+    project_store: ProjectStore
+    message_queue: MessageQueue
+    llm: LLMProvider
+    session_metrics: dict
+    log: logging.Logger
+
+    # Optional components
+    health_server: HealthServer | None = None
+    vector_memory: VectorMemory | None = None
+    bot: Bot | None = None
+    executor: ThreadPoolExecutor | None = None
+    verbose: bool = False
+
+
+async def perform_shutdown(ctx: ShutdownContext) -> None:
     """Execute the 7-step graceful shutdown sequence."""
     from src.ui.cli_output import cli as cli_output
 
     shutdown_begin_time = time.time()
-    if "uptime" not in session_metrics:
-        session_metrics["uptime"] = time.time() - session_metrics.get("start_time", time.time())
+    if "uptime" not in ctx.session_metrics:
+        ctx.session_metrics["uptime"] = time.time() - ctx.session_metrics.get("start_time", time.time())
 
-    _log_shutdown_begin(session_metrics)
+    _log_shutdown_begin(ctx.session_metrics)
     cli_output.warning("Initiating graceful shutdown...")
 
     total_cleanup_steps = 7
 
     # 1. Stop accepting new messages
     _log_cleanup_step(1, total_cleanup_steps, "Stopping message acceptance and polling")
-    shutdown.request_shutdown()
-    channel.request_shutdown()
+    ctx.shutdown.request_shutdown()
+    ctx.channel.request_shutdown()
 
     # 2. Wait for in-flight operations
     _log_cleanup_step(2, total_cleanup_steps, "Waiting for in-flight operations")
     cli_output.dim("  Waiting for in-flight operations to complete...")
-    completed = await shutdown.wait_for_in_flight()
+    completed = await ctx.shutdown.wait_for_in_flight()
     if not completed:
-        log.warning("Force proceeding after timeout")
+        ctx.log.warning("Force proceeding after timeout")
         cli_output.warning("Timed out waiting for operations, forcing shutdown")
 
     # 3. Stop scheduler and health server in parallel
@@ -272,16 +290,16 @@ async def perform_shutdown(
 
     async def _stop_scheduler():
         try:
-            await scheduler.stop()
+            await ctx.scheduler.stop()
         except Exception as exc:
-            log.warning("Error stopping scheduler: %s", exc)
+            ctx.log.warning("Error stopping scheduler: %s", exc)
 
     async def _stop_health():
-        if health_server:
+        if ctx.health_server:
             try:
-                await health_server.stop()
+                await ctx.health_server.stop()
             except Exception as exc:
-                log.warning("Error stopping health server: %s", exc)
+                ctx.log.warning("Error stopping health server: %s", exc)
 
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_stop_scheduler())
@@ -291,9 +309,9 @@ async def perform_shutdown(
     _log_cleanup_step(4, total_cleanup_steps, "Closing channel connections")
     cli_output.dim("  Closing channel connections...")
     try:
-        await channel.close()
+        await ctx.channel.close()
     except Exception as exc:
-        log.warning("Error closing channel: %s", exc)
+        ctx.log.warning("Error closing channel: %s", exc)
 
     # 5. Close project store, vector memory, message queue, and LLM client in parallel
     _log_cleanup_step(5, total_cleanup_steps, "Closing project store, vector memory, message queue, and LLM")
@@ -301,45 +319,45 @@ async def perform_shutdown(
 
     def _close_project_store():
         try:
-            project_store.close()
+            ctx.project_store.close()
         except Exception as exc:
-            log.warning("Error closing project store: %s", exc)
+            ctx.log.warning("Error closing project store: %s", exc)
 
     def _close_vector_memory():
-        if vector_memory is None:
+        if ctx.vector_memory is None:
             return
         try:
-            vector_memory.close()
+            ctx.vector_memory.close()
         except Exception as exc:
-            log.warning("Error closing vector memory: %s", exc)
+            ctx.log.warning("Error closing vector memory: %s", exc)
 
     async def _close_message_queue():
         try:
-            await message_queue.close()
+            await ctx.message_queue.close()
         except Exception as exc:
-            log.warning("Error closing message queue: %s", exc)
+            ctx.log.warning("Error closing message queue: %s", exc)
 
     async def _close_llm():
         try:
-            await llm.close()
+            await ctx.llm.close()
         except Exception as exc:
-            log.warning("Error closing LLM client: %s", exc)
+            ctx.log.warning("Error closing LLM client: %s", exc)
 
     async def _stop_memory_monitoring():
-        if bot is None:
+        if ctx.bot is None:
             return
         try:
-            await bot.stop_memory_monitoring()
+            await ctx.bot.stop_memory_monitoring()
         except Exception as exc:
-            log.warning("Error stopping memory monitoring: %s", exc)
+            ctx.log.warning("Error stopping memory monitoring: %s", exc)
 
     def _close_executor():
-        if bot is None:
+        if ctx.bot is None:
             return
         try:
-            bot.close_executor()
+            ctx.bot.close_executor()
         except Exception as exc:
-            log.warning("Error closing tool executor: %s", exc)
+            ctx.log.warning("Error closing tool executor: %s", exc)
 
     await asyncio.gather(
         asyncio.to_thread(_close_project_store),
@@ -352,19 +370,27 @@ async def perform_shutdown(
 
     # 6. Shut down the thread pool executor (after all to_thread calls are done)
     _log_cleanup_step(6, total_cleanup_steps, "Shutting down thread pool executor")
-    if executor is not None:
+    if ctx.executor is not None:
         try:
-            executor.shutdown(wait=False)
+            await asyncio.wait_for(
+                asyncio.to_thread(ctx.executor.shutdown, wait=True),
+                timeout=CLEANUP_STEP_TIMEOUT,
+            )
+        except TimeoutError:
+            ctx.log.warning(
+                "Thread pool executor shutdown timed out after %.1fs, proceeding",
+                CLEANUP_STEP_TIMEOUT,
+            )
         except Exception as exc:
-            log.warning("Error shutting down thread pool executor: %s", exc)
+            ctx.log.warning("Error shutting down thread pool executor: %s", exc)
 
     # 7. Close database (must be last — other closers may still write)
     _log_cleanup_step(7, total_cleanup_steps, "Closing database connections")
     cli_output.dim("  Closing database connections...")
     try:
-        await db.close()
+        await ctx.db.close()
     except Exception as exc:
-        log.warning("Error closing database: %s", exc)
+        ctx.log.warning("Error closing database: %s", exc)
 
     _log_shutdown_complete(shutdown_begin_time)
     cli_output.success("Shutdown complete.")

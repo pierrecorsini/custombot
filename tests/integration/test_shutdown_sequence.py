@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.db import Database
-from src.lifecycle import perform_shutdown
+from src.lifecycle import ShutdownContext, perform_shutdown
 from src.message_queue import MessageQueue
 from src.project.store import ProjectStore
 from src.shutdown import GracefulShutdown
@@ -154,7 +154,7 @@ class TestShutdownOrdering:
             await original_db_close()
         db.close = _tracked_db_close
 
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=shutdown,
             channel=channel,
             scheduler=scheduler,
@@ -166,7 +166,7 @@ class TestShutdownOrdering:
             llm=llm,
             session_metrics={"uptime": 5.0},
             log=logging.getLogger("test"),
-        )
+        ))
 
         # All steps fired
         assert "1a:shutdown.request_shutdown" in call_order
@@ -235,7 +235,7 @@ class TestShutdownFailureTolerance:
         db.close = _tracked_db_close
 
         # Should NOT raise despite failures
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=shutdown,
             channel=channel,
             scheduler=scheduler,
@@ -247,7 +247,7 @@ class TestShutdownFailureTolerance:
             llm=llm,
             session_metrics={"uptime": 5.0},
             log=logging.getLogger("test"),
-        )
+        ))
 
         # All post-failure steps still executed
         assert "channel" in closed
@@ -283,7 +283,7 @@ class TestShutdownFailureTolerance:
             await original_db_close()
         db.close = _tracked_db_close
 
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=shutdown,
             channel=channel,
             scheduler=scheduler,
@@ -295,7 +295,7 @@ class TestShutdownFailureTolerance:
             llm=llm,
             session_metrics={"uptime": 5.0},
             log=logging.getLogger("test"),
-        )
+        ))
 
         assert "llm" in closed
         assert "message_queue" in closed
@@ -313,7 +313,7 @@ class TestShutdownFailureTolerance:
         db.close = AsyncMock(side_effect=RuntimeError("db boom"))
 
         # Should NOT raise
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=shutdown,
             channel=channel,
             scheduler=scheduler,
@@ -325,7 +325,7 @@ class TestShutdownFailureTolerance:
             llm=llm,
             session_metrics={"uptime": 5.0},
             log=logging.getLogger("test"),
-        )
+        ))
 
         db.close.assert_awaited_once()
 
@@ -349,7 +349,7 @@ class TestShutdownFailureTolerance:
             await original_db_close()
         db.close = _tracked_db_close
 
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=shutdown,
             channel=channel,
             scheduler=scheduler,
@@ -361,7 +361,7 @@ class TestShutdownFailureTolerance:
             llm=llm,
             session_metrics={"uptime": 5.0},
             log=logging.getLogger("test"),
-        )
+        ))
 
         assert db_closed, "db.close() should run even if llm.close() fails"
 
@@ -393,7 +393,7 @@ class TestShutdownTimeout:
 
         start = asyncio.get_event_loop().time()
 
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=shutdown,
             channel=channel,
             scheduler=scheduler,
@@ -405,7 +405,7 @@ class TestShutdownTimeout:
             llm=llm,
             session_metrics={"uptime": 5.0},
             log=logging.getLogger("test"),
-        )
+        ))
 
         elapsed = asyncio.get_event_loop().time() - start
 
@@ -433,7 +433,7 @@ class TestLLMClientClose:
         scheduler = _make_mock_scheduler()
         llm = _make_mock_llm()
 
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=shutdown,
             channel=channel,
             scheduler=scheduler,
@@ -445,7 +445,7 @@ class TestLLMClientClose:
             llm=llm,
             session_metrics={"uptime": 5.0},
             log=logging.getLogger("test"),
-        )
+        ))
 
         llm.close.assert_awaited_once()
 
@@ -467,7 +467,7 @@ class TestLLMClientClose:
             await original_db_close()
         db.close = _tracked_db_close
 
-        await perform_shutdown(
+        await perform_shutdown(ShutdownContext(
             shutdown=shutdown,
             channel=channel,
             scheduler=scheduler,
@@ -479,7 +479,7 @@ class TestLLMClientClose:
             llm=llm,
             session_metrics={"uptime": 5.0},
             log=logging.getLogger("test"),
-        )
+        ))
 
         assert "llm.close" in call_order
         assert "db.close" in call_order

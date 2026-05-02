@@ -208,7 +208,7 @@ class TestEnvOverrideLogging:
     ) -> None:
         """(c) Using OPENAI_API_KEY from env triggers a debug log message."""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-logged-key")
-        with caplog.at_level(logging.DEBUG, logger="src.config.config"):
+        with caplog.at_level(logging.DEBUG, logger="src.config.config_loader"):
             load_config(config_file)
         assert any(
             "Using OPENAI_API_KEY from environment variable" in record.message
@@ -223,7 +223,7 @@ class TestEnvOverrideLogging:
     ) -> None:
         """(c) Using OPENAI_BASE_URL from env triggers a debug log message."""
         monkeypatch.setenv("OPENAI_BASE_URL", "https://logged.api.local/v1")
-        with caplog.at_level(logging.DEBUG, logger="src.config.config"):
+        with caplog.at_level(logging.DEBUG, logger="src.config.config_loader"):
             load_config(config_file)
         assert any(
             "Using OPENAI_BASE_URL from environment variable" in record.message
@@ -239,7 +239,7 @@ class TestEnvOverrideLogging:
         """(c) The effective config log redacts api_key — the raw key never appears."""
         secret_key = "sk-super-secret-key-do-not-leak"
         monkeypatch.setenv("OPENAI_API_KEY", secret_key)
-        with caplog.at_level(logging.DEBUG, logger="src.config.config"):
+        with caplog.at_level(logging.DEBUG, logger="src.config.config_validation"):
             load_config(config_file)
 
         # The full redacted config JSON should contain REDACTED, not the raw key
