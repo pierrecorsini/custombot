@@ -29,6 +29,7 @@ from src.routing import (
     MatchingContext,
     RoutingEngine,
     RoutingRule,
+    _HAS_WATCHDOG,
     _compile_pattern,
     _match_compiled,
     _rule_from_dict,
@@ -812,6 +813,96 @@ class TestRoutingEngineLoadRules:
         # Only the good file loaded; the bad file was retried then skipped
         assert len(engine.rules) == 1
         assert engine.rules[0].id == "good-rule"
+
+    def test_reload_empty_files_retains_previous_rules(self, tmp_path: Path):
+        """Graceful degradation: reload that yields zero rules retains previous set.
+
+        Simulates an editor that truncates files before writing (e.g. atomic save).
+        The engine should log a warning, keep the old rule set, and leave mtimes
+        stale so the next stale-check retries the reload.
+        """
+        md = tmp_path / "chat.agent.md"
+        md.write_text(
+            textwrap.dedent("""\
+                ---
+                routing:
+                  id: chat-rule
+                  priority: 10
+                  sender: "*"
+                ---
+                # Chat instruction
+            """)
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+        assert len(engine.rules) == 1
+        assert engine.rules[0].id == "chat-rule"
+        captured_mtimes = dict(engine._file_mtimes)
+
+        # Simulate editor truncating the file to empty
+        md.write_text("")
+        with patch("src.routing.log") as mock_log:
+            engine.load_rules()
+
+        # Old rules retained — not replaced with empty list
+        assert len(engine.rules) == 1
+        assert engine.rules[0].id == "chat-rule"
+
+        # Warning was logged about zero-rule reload
+        warning_calls = [
+            c for c in mock_log.warning.call_args_list
+            if "zero routing rules" in str(c).lower() or "retaining" in str(c).lower()
+        ]
+        assert len(warning_calls) >= 1
+
+        # File mtimes NOT updated → next stale-check will detect the change and retry
+        assert engine._file_mtimes == captured_mtimes
+
+    def test_reload_empty_files_then_restore_reloads_fresh(self, tmp_path: Path):
+        """After graceful degradation, restoring file content triggers a fresh reload."""
+        md = tmp_path / "chat.agent.md"
+        md.write_text(
+            textwrap.dedent("""\
+                ---
+                routing:
+                  id: chat-rule
+                  priority: 10
+                  sender: "*"
+                ---
+                # Chat instruction
+            """)
+        )
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+        assert len(engine.rules) == 1
+
+        # Truncate → graceful degradation
+        md.write_text("")
+        engine.load_rules()
+        assert len(engine.rules) == 1  # old rules retained
+
+        # Restore with updated content
+        md.write_text(
+            textwrap.dedent("""\
+                ---
+                routing:
+                  id: new-rule
+                  priority: 5
+                  sender: "*"
+                ---
+                # Updated instruction
+            """)
+        )
+        engine.load_rules()
+        assert len(engine.rules) == 1
+        assert engine.rules[0].id == "new-rule"
+        assert engine.rules[0].priority == 5
+
+    def test_initial_empty_load_does_not_retain(self, tmp_path: Path):
+        """First load with no rules should NOT retain (no previous rules exist)."""
+        engine = RoutingEngine(tmp_path)
+        engine.load_rules()
+        assert engine.rules == []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -4469,6 +4560,447 @@ class TestScanFileMtimesOSError:
             mtimes = engine._scan_file_mtimes()
 
         assert mtimes == {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Watchdog auto-reload integration tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestWatchdogAutoReload:
+    """Integration tests for watchdog-based auto-reload of routing rules.
+
+    When ``use_watchdog=True``, the routing engine starts an OS-native file
+    watcher.  File-change events set the ``_dirty`` flag; the next call to
+    ``match_with_rule()`` detects this via ``_is_stale()`` and reloads rules.
+
+    These tests exercise the full watchdog hot-reload pipeline:
+        _mark_dirty() → _is_stale() → load_rules() → fresh rules available
+
+    Most tests suppress the real OS-native observer to avoid non-deterministic
+    interaction between real file events and explicit ``_mark_dirty()`` calls.
+    Two tests at the end exercise the real observer (guarded by ``_HAS_WATCHDOG``
+    and skipped on Windows).
+    """
+
+    @staticmethod
+    def _make_engine(path: Path) -> RoutingEngine:
+        """Create a watchdog-flagged engine with the observer suppressed.
+
+        This allows testing the _dirty flag mechanism in isolation without
+        interference from real OS file-change events.
+        """
+        engine = RoutingEngine(path, use_watchdog=True)
+        with patch.object(engine, "_start_watcher"):
+            engine.load_rules()
+        engine._use_watchdog = True
+        return engine
+
+    # ── (a) _mark_dirty() → _is_stale() returns True ────────────────────
+
+    def test_mark_dirty_makes_is_stale_return_true(self, tmp_path: Path):
+        """After _mark_dirty() is called, _is_stale() returns True on a
+        watchdog-enabled engine."""
+        md = tmp_path / "route.md"
+        md.write_text(
+            "---\nrouting:\n  id: original\n  priority: 1\n---\n\n# Original\n"
+        )
+
+        engine = self._make_engine(tmp_path)
+
+        # _dirty should be False after initial load
+        assert engine._dirty is False
+
+        # Simulate watchdog observer calling _mark_dirty()
+        engine._mark_dirty()
+        assert engine._dirty is True
+        assert engine._is_stale() is True
+
+    # ── (b) _is_stale() resets _dirty flag after returning True ──────────
+
+    def test_is_stale_resets_dirty_flag(self, tmp_path: Path):
+        """_is_stale() consumes the _dirty flag — a second call returns False."""
+        md = tmp_path / "route.md"
+        md.write_text(
+            "---\nrouting:\n  id: r1\n  priority: 1\n---\n\n# R1\n"
+        )
+
+        engine = self._make_engine(tmp_path)
+
+        engine._mark_dirty()
+        assert engine._is_stale() is True
+        # Flag has been consumed
+        assert engine._is_stale() is False
+
+    # ── (c) match_with_rule() auto-reloads after _mark_dirty() ───────────
+
+    def test_match_with_rule_reloads_after_mark_dirty(self, tmp_path: Path):
+        """match_with_rule() picks up new rules after _mark_dirty() is called."""
+        md = tmp_path / "route.md"
+        md.write_text(
+            "---\nrouting:\n  id: v1\n  priority: 1\n---\n\n# V1\n"
+        )
+
+        engine = self._make_engine(tmp_path)
+
+        msg = make_msg(text="hello")
+        rule1, inst1 = engine.match_with_rule(msg)
+        assert inst1 == "route.md"
+        assert rule1 is not None
+        assert rule1.id == "v1"
+
+        # Modify the file (simulating what watchdog would observe)
+        md.write_text(
+            "---\nrouting:\n  id: v2\n  priority: 1\n---\n\n# V2\n"
+        )
+
+        # Simulate watchdog observer detecting the change
+        engine._mark_dirty()
+
+        # match_with_rule() should auto-reload and return the updated rule
+        rule2, inst2 = engine.match_with_rule(msg)
+        assert inst2 == "route.md"
+        assert rule2 is not None
+        assert rule2.id == "v2"
+
+    # ── (d) New file detected via watchdog auto-reload ──────────────────
+
+    def test_new_rule_appears_after_watchdog_event(self, tmp_path: Path):
+        """Creating a new .md file and marking dirty makes new rules available."""
+        engine = self._make_engine(tmp_path)
+
+        msg = make_msg(text="hello")
+        assert engine.match(msg) is None
+
+        # Create a new instruction file
+        (tmp_path / "new_rule.md").write_text(
+            "---\nrouting:\n  id: new-rule\n  priority: 1\n---\n\n# New\n"
+        )
+
+        engine._mark_dirty()
+
+        rule, inst = engine.match_with_rule(msg)
+        assert inst == "new_rule.md"
+        assert rule is not None
+        assert rule.id == "new-rule"
+
+    # ── (e) Deleted file detected via watchdog auto-reload ──────────────
+
+    def test_rule_disappears_after_file_deleted_and_mark_dirty(self, tmp_path: Path):
+        """Deleting an .md file and marking dirty removes its rules."""
+        md = tmp_path / "gone.md"
+        md.write_text(
+            "---\nrouting:\n  id: temporary\n  priority: 1\n---\n\n# Temp\n"
+        )
+
+        engine = self._make_engine(tmp_path)
+
+        msg = make_msg(text="hello")
+        assert engine.match(msg) == "gone.md"
+
+        # Delete the file
+        md.unlink()
+        engine._mark_dirty()
+
+        rule, inst = engine.match_with_rule(msg)
+        assert rule is None
+        assert inst is None
+
+    # ── (f) Cache is invalidated after watchdog-triggered reload ─────────
+
+    def test_cache_cleared_after_watchdog_reload(self, tmp_path: Path):
+        """Watchdog-triggered auto-reload clears the match cache."""
+        md = tmp_path / "route.md"
+        md.write_text(
+            "---\nrouting:\n  id: cached\n  priority: 1\n---\n\n# Cached\n"
+        )
+
+        engine = self._make_engine(tmp_path)
+
+        msg = make_msg(text="hello")
+
+        # Populate cache
+        engine.match_with_rule(msg)
+        assert len(engine._match_cache) == 1
+
+        # Modify file and trigger watchdog reload
+        md.write_text(
+            "---\nrouting:\n  id: updated\n  priority: 1\n---\n\n# Updated\n"
+        )
+        engine._mark_dirty()
+
+        # Cache is cleared during load_rules, then repopulated
+        rule, inst = engine.match_with_rule(msg)
+        assert len(engine._match_cache) == 1
+        assert rule.id == "updated"
+
+        # Verify the cached result is the new rule
+        cached_result = list(engine._match_cache._cache.values())[0][0]
+        assert cached_result[0].id == "updated"
+
+    # ── (g) Multiple mark_dirty calls — idempotent ──────────────────────
+
+    def test_multiple_mark_dirty_calls_idempotent(self, tmp_path: Path):
+        """Multiple _mark_dirty() calls before _is_stale() are idempotent."""
+        md = tmp_path / "route.md"
+        md.write_text(
+            "---\nrouting:\n  id: r1\n  priority: 1\n---\n\n# R1\n"
+        )
+
+        engine = self._make_engine(tmp_path)
+
+        # Multiple dirty marks before consuming
+        engine._mark_dirty()
+        engine._mark_dirty()
+        engine._mark_dirty()
+
+        # Still only one reload happens
+        assert engine._is_stale() is True
+        assert engine._is_stale() is False
+
+    # ── (h) Full lifecycle: create → modify → delete with watchdog ──────
+
+    def test_full_watchdog_lifecycle(self, tmp_path: Path):
+        """Full lifecycle via watchdog: create → match → modify → re-match → delete."""
+        engine = self._make_engine(tmp_path)
+
+        msg = make_msg(text="hello")
+
+        # Phase 1: No rules
+        assert engine.match(msg) is None
+
+        # Phase 2: Create file
+        md = tmp_path / "lifecycle.md"
+        md.write_text(
+            "---\nrouting:\n  id: step1\n  priority: 1\n---\n\n# Step1\n"
+        )
+        engine._mark_dirty()
+
+        rule, inst = engine.match_with_rule(msg)
+        assert rule is not None
+        assert rule.id == "step1"
+        assert inst == "lifecycle.md"
+
+        # Phase 3: Modify file
+        md.write_text(
+            "---\nrouting:\n  id: step2\n  priority: 1\n---\n\n# Step2\n"
+        )
+        engine._mark_dirty()
+
+        rule, inst = engine.match_with_rule(msg)
+        assert rule is not None
+        assert rule.id == "step2"
+        assert inst == "lifecycle.md"
+
+        # Phase 4: Delete file
+        md.unlink()
+        engine._mark_dirty()
+
+        rule, inst = engine.match_with_rule(msg)
+        assert rule is None
+        assert inst is None
+
+        # Phase 5: Recreate file
+        md.write_text(
+            "---\nrouting:\n  id: step5\n  priority: 1\n---\n\n# Step5\n"
+        )
+        engine._mark_dirty()
+
+        rule, inst = engine.match_with_rule(msg)
+        assert rule is not None
+        assert rule.id == "step5"
+        assert inst == "lifecycle.md"
+
+    # ── (i) Watchdog engine does NOT use mtime polling ──────────────────
+
+    def test_watchdog_engine_skips_mtime_check(self, tmp_path: Path):
+        """With use_watchdog=True, _is_stale() checks _dirty flag only,
+        not file mtimes — even after debounce interval."""
+        md = tmp_path / "route.md"
+        md.write_text(
+            "---\nrouting:\n  id: r1\n  priority: 1\n---\n\n# R1\n"
+        )
+
+        engine = self._make_engine(tmp_path)
+
+        # Modify the file WITHOUT calling _mark_dirty()
+        md.write_text(
+            "---\nrouting:\n  id: r2\n  priority: 1\n---\n\n# R2\n"
+        )
+
+        # Even after the debounce interval, _is_stale() should return False
+        # because the watchdog engine only checks the _dirty flag
+        engine._last_stale_check = 0.0  # force past debounce
+        with patch.object(engine, "_scan_file_mtimes", wraps=engine._scan_file_mtimes) as mock_scan:
+            assert engine._is_stale() is False
+            mock_scan.assert_not_called()
+
+    # ── (j) close() stops the observer ───────────────────────────────────
+
+    def test_close_stops_watcher(self, tmp_path: Path):
+        """close() stops the watchdog observer and releases resources."""
+        md = tmp_path / "route.md"
+        md.write_text(
+            "---\nrouting:\n  id: r1\n  priority: 1\n---\n\n# R1\n"
+        )
+
+        engine = RoutingEngine(tmp_path, use_watchdog=True)
+        engine.load_rules()
+
+        if engine._observer is not None:
+            assert engine._observer.is_alive()
+            engine.close()
+            assert engine._observer is None
+
+    # ── (k) Real watchdog observer detects file changes ──────────────────
+
+    @pytest.mark.skipif(
+        not _HAS_WATCHDOG,
+        reason="watchdog package not installed",
+    )
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows ReadDirectoryChangesW has high latency; test flakes",
+    )
+    def test_real_watchdog_detects_file_modification(self, tmp_path: Path):
+        """Real watchdog observer detects .md file modification and triggers reload.
+
+        This is a true integration test: the OS-native file watcher must
+        observe the change and set the _dirty flag within a reasonable time.
+        """
+        md = tmp_path / "route.md"
+        md.write_text(
+            "---\nrouting:\n  id: v1\n  priority: 1\n---\n\n# V1\n"
+        )
+
+        engine = RoutingEngine(tmp_path, use_watchdog=True)
+        engine.load_rules()
+        assert engine._observer is not None, "Watchdog observer should be running"
+
+        msg = make_msg(text="hello")
+
+        # Initial match
+        rule1, _ = engine.match_with_rule(msg)
+        assert rule1 is not None
+        assert rule1.id == "v1"
+
+        # Modify the file on disk — watchdog should detect this
+        md.write_text(
+            "---\nrouting:\n  id: v2\n  priority: 1\n---\n\n# V2\n"
+        )
+
+        # Wait for watchdog to detect the change (with timeout)
+        import threading
+
+        dirty_event = threading.Event()
+
+        original_mark_dirty = engine._mark_dirty
+
+        def _mark_dirty_and_signal():
+            original_mark_dirty()
+            dirty_event.set()
+
+        engine._mark_dirty = _mark_dirty_and_signal  # type: ignore[assignment]
+
+        assert dirty_event.wait(timeout=10.0), (
+            "Watchdog observer did not detect file modification within 10s"
+        )
+
+        # match_with_rule() should now auto-reload
+        rule2, _ = engine.match_with_rule(msg)
+        assert rule2 is not None
+        assert rule2.id == "v2"
+
+        engine.close()
+
+    @pytest.mark.skipif(
+        not _HAS_WATCHDOG,
+        reason="watchdog package not installed",
+    )
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows ReadDirectoryChangesW has high latency; test flakes",
+    )
+    def test_real_watchdog_detects_new_file(self, tmp_path: Path):
+        """Real watchdog observer detects a new .md file and triggers reload."""
+        engine = RoutingEngine(tmp_path, use_watchdog=True)
+        engine.load_rules()
+        assert engine._observer is not None, "Watchdog observer should be running"
+
+        msg = make_msg(text="hello")
+        assert engine.match(msg) is None
+
+        # Create a new instruction file
+        (tmp_path / "new.md").write_text(
+            "---\nrouting:\n  id: new-rule\n  priority: 1\n---\n\n# New\n"
+        )
+
+        # Wait for watchdog to detect the new file
+        import threading
+
+        dirty_event = threading.Event()
+        original_mark_dirty = engine._mark_dirty
+
+        def _mark_dirty_and_signal():
+            original_mark_dirty()
+            dirty_event.set()
+
+        engine._mark_dirty = _mark_dirty_and_signal  # type: ignore[assignment]
+
+        assert dirty_event.wait(timeout=10.0), (
+            "Watchdog observer did not detect new file within 10s"
+        )
+
+        rule, inst = engine.match_with_rule(msg)
+        assert rule is not None
+        assert rule.id == "new-rule"
+        assert inst == "new.md"
+
+        engine.close()
+
+    # ── (l) Watchdog fallback when observer fails to start ───────────────
+
+    def test_watchdog_fallback_on_observer_failure(self, tmp_path: Path):
+        """If observer fails to start, engine falls back to polling mode."""
+        md = tmp_path / "route.md"
+        md.write_text(
+            "---\nrouting:\n  id: r1\n  priority: 1\n---\n\n# R1\n"
+        )
+
+        engine = RoutingEngine(tmp_path, use_watchdog=True)
+
+        # Patch Observer to raise during start
+        if _HAS_WATCHDOG:
+            with patch("src.routing.Observer", side_effect=OSError("no inotify")):
+                engine.load_rules()
+
+            # Should have fallen back to polling
+            assert engine._observer is None
+            assert engine._use_watchdog is False
+
+            # File modification should still be detected via mtime polling
+            md.write_text(
+                "---\nrouting:\n  id: r2\n  priority: 1\n---\n\n# R2\n"
+            )
+            engine._last_stale_check = 0.0
+            assert engine._is_stale() is True
+
+    # ── (m) load_rules resets _dirty flag ────────────────────────────────
+
+    def test_load_rules_resets_dirty_flag(self, tmp_path: Path):
+        """load_rules() resets _dirty to False after loading fresh state."""
+        md = tmp_path / "route.md"
+        md.write_text(
+            "---\nrouting:\n  id: r1\n  priority: 1\n---\n\n# R1\n"
+        )
+
+        engine = self._make_engine(tmp_path)
+
+        engine._mark_dirty()
+        assert engine._dirty is True
+
+        engine.load_rules()
+        assert engine._dirty is False
 
 
 class TestLoadRulesInvalidRuleConstruction:

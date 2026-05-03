@@ -491,7 +491,14 @@ class RoutingEngine:
         Rules are sorted by priority (ascending) after loading.
 
         Call this at startup and whenever instruction files are updated.
+
+        Graceful degradation: if a reload produces zero rules but rules
+        previously existed, the old rule set is retained and a warning is
+        logged.  This handles transient empty-file states (e.g. an editor
+        that truncates before writing).  File mtimes are intentionally left
+        stale so that the next debounced stale-check will retry the reload.
         """
+        previous_rules = list(self._rules_list)
         rules: List[RoutingRule] = []
 
         if not self._instructions_dir.is_dir():
@@ -529,6 +536,20 @@ class RoutingEngine:
 
         # Sort by priority ascending
         rules.sort(key=lambda r: r.priority)
+
+        # Graceful degradation: keep previous rules when reload yields nothing.
+        # Do NOT update _file_mtimes so the next stale-check retries the load.
+        if len(rules) == 0 and len(previous_rules) > 0:
+            log.warning(
+                "Reload produced zero routing rules from %s — retaining "
+                "previous rule set (%d rules). Instruction files may be "
+                "temporarily empty during editing.",
+                self._instructions_dir,
+                len(previous_rules),
+            )
+            self._dirty = False
+            return
+
         self._rules = rules
         self._file_mtimes = self._scan_file_mtimes()
 
