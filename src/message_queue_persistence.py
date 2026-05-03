@@ -125,6 +125,9 @@ class QueuePersistence:
         Swaps the buffer atomically so that concurrent buffer_line() calls
         (if any slip through before the lock is acquired) write to a fresh
         list rather than corrupting the in-flight batch.
+
+        On I/O failure, the detached lines are re-inserted at the front of
+        the write buffer so they survive for retry on the next flush cycle.
         """
         if not self._write_buffer:
             return
@@ -138,11 +141,22 @@ class QueuePersistence:
             self._last_flush_time = time.monotonic()
         except Exception as exc:
             log.error("Failed to flush write buffer: %s", exc)
+            # Re-buffer failed lines for retry on next flush cycle
+            self._write_buffer[:0] = lines
             raise
 
     def clear_buffer(self) -> None:
         """Clear the write buffer without flushing to disk."""
         self._write_buffer.clear()
+
+    def rebuffer_lines(self, lines: List[str]) -> None:
+        """Prepend lines to the write buffer for retry on next flush.
+
+        Used when a detached flush fails — the lines are re-inserted at
+        the front of the buffer so they are written before any newer lines.
+        """
+        if lines:
+            self._write_buffer[:0] = lines
 
     # ── full-file persistence ─────────────────────────────────────────────
 

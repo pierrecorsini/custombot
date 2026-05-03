@@ -531,14 +531,23 @@ class MessageQueue(AsyncLockMixin):
             await self._flush_write_buffer()
 
     async def _flush_write_buffer(self) -> None:
-        """Flush all buffered lines to disk via persistence layer."""
+        """Flush all buffered lines to disk via persistence layer.
+
+        On I/O failure (e.g. disk full), the persistence layer re-buffers
+        the failed lines.  We log a warning and suppress the error so that
+        ``enqueue`` / ``complete`` callers don't lose messages — the lines
+        will be retried on the next flush cycle.
+        """
         if not self._persistence.write_buffer:
             return
         try:
             await asyncio.to_thread(self._persistence.flush_buffer)
         except Exception as exc:
-            log.error("Failed to flush write buffer: %s", exc)
-            raise
+            log.warning(
+                "Flush failed, %d lines re-buffered for retry: %s",
+                len(self._persistence.write_buffer),
+                exc,
+            )
 
     async def _flush_loop(self) -> None:
         """Background coroutine that drains the write buffer on a timer.
@@ -566,7 +575,13 @@ class MessageQueue(AsyncLockMixin):
                                 self._persistence.flush_lines, lines
                             )
                         except Exception as exc:
-                            log.error("Background flush failed: %s", exc)
+                            log.warning(
+                                "Background flush failed, re-buffering %d lines: %s",
+                                len(lines),
+                                exc,
+                            )
+                            async with self._lock:
+                                self._persistence.rebuffer_lines(lines)
         except asyncio.CancelledError:
             # Expected during close() — suppress gracefully.
             return
