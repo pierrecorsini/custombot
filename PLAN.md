@@ -124,7 +124,7 @@ _Round 6 — Senior technical review (2026-05-02). 25 items across 6 categories.
 - [x] Add test for `TokenUsage` leaderboard correctness after LRU eviction — `_make_per_chat_map` creates a `BoundedOrderedDict(max_size=1000, eviction="half")`. When the per-chat map evicts entries, stale leaderboard entries must be purged by `_purge_chat_from_leaderboard`. Add a test that inserts >1000 chats, triggers eviction, and verifies `get_top_chats()` returns only live entries.
 - [x] Add test for concurrent `Memory.ensure_workspace` with the same chat_id — the `_atomic_seed` method uses `os.O_EXCL` for file creation safety, but `ensure_workspace` itself calls `_ensure_chat_dir` + `_atomic_seed` twice (for `AGENTS.md` and `.chat_id`). Two concurrent calls for the same chat_id could race. Verify only one writer wins and the other completes without error.
 - [x] Add test for `finish_reason="length"` handling in `react_loop` — mock an LLM response with `finish_reason="length"` and non-empty content, verify the loop returns the actual response text rather than the empty-response fallback message.
-- [ ] Add integration test for `Database.validate_connection` corruption detection — create a workspace with a corrupted `chats.json` (invalid JSON), a truncated JSONL file, and a checksum-mismatch message entry. Verify `validate_connection` reports errors and warnings for each case with correct field paths.
+- [x] Add integration test for `Database.validate_connection` corruption detection — create a workspace with a corrupted `chats.json` (invalid JSON), a truncated JSONL file, and a checksum-mismatch message entry. Verify `validate_connection` reports errors and warnings for each case with correct field paths.
 
 ## Security
 
