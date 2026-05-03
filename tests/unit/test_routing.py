@@ -4837,8 +4837,17 @@ class TestWatchdogAutoReload:
 
     # ── (j) close() stops the observer ───────────────────────────────────
 
+    @pytest.mark.skipif(
+        not _HAS_WATCHDOG,
+        reason="watchdog package not installed",
+    )
     def test_close_stops_watcher(self, tmp_path: Path):
-        """close() stops the watchdog observer and releases resources."""
+        """close() stops the watchdog observer and releases resources.
+
+        Verifies that after close():
+        1. The observer thread has stopped (is_alive() == False).
+        2. The engine's _observer reference is set to None.
+        """
         md = tmp_path / "route.md"
         md.write_text(
             "---\nrouting:\n  id: r1\n  priority: 1\n---\n\n# R1\n"
@@ -4847,10 +4856,14 @@ class TestWatchdogAutoReload:
         engine = RoutingEngine(tmp_path, use_watchdog=True)
         engine.load_rules()
 
-        if engine._observer is not None:
-            assert engine._observer.is_alive()
-            engine.close()
-            assert engine._observer is None
+        observer = engine._observer
+        assert observer is not None, "Observer should be created with use_watchdog=True"
+        assert observer.is_alive(), "Observer thread should be running after load_rules()"
+
+        engine.close()
+
+        assert engine._observer is None, "close() should set _observer to None"
+        assert not observer.is_alive(), "Observer thread should have stopped after close()"
 
     # ── (k) Real watchdog observer detects file changes ──────────────────
 
