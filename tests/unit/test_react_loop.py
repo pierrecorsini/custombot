@@ -181,6 +181,55 @@ class TestReactLoopEdgeCases:
         )
         assert "empty response" in text.lower()
 
+    async def test_length_finish_reason_with_content_returns_actual_text(self):
+        """LLM returns finish_reason='length' with non-empty content → actual text + truncation warning, not empty fallback."""
+        original_text = "Quantum entanglement is a phenomenon where particles become interconnected."
+        llm = _make_llm()
+        llm.chat = AsyncMock(
+            return_value=make_chat_response(content=original_text, finish_reason="length")
+        )
+        metrics = _make_metrics()
+        executor = _make_tool_executor()
+
+        text, tool_log, buffered = await react_loop(
+            llm, metrics, executor, "chat_1", [], None,
+            Path("/tmp/ws"), max_tool_iterations=5,
+            stream_response=False, max_retries=1, initial_delay=0.01,
+            retryable_codes=RETRYABLE_CODES,
+        )
+        # Must contain the actual LLM response text
+        assert original_text in text
+        # Must contain the truncation warning
+        assert "truncated" in text.lower()
+        assert "length limit" in text.lower()
+        # Must NOT contain the empty-response fallback
+        assert "empty response" not in text.lower()
+        assert tool_log == []
+        assert buffered == []
+
+    async def test_length_finish_reason_without_content_returns_warning(self):
+        """LLM returns finish_reason='length' with empty content → truncation warning, not empty fallback."""
+        llm = _make_llm()
+        llm.chat = AsyncMock(
+            return_value=make_chat_response(content="", finish_reason="length")
+        )
+        metrics = _make_metrics()
+        executor = _make_tool_executor()
+
+        text, tool_log, buffered = await react_loop(
+            llm, metrics, executor, "chat_1", [], None,
+            Path("/tmp/ws"), max_tool_iterations=5,
+            stream_response=False, max_retries=1, initial_delay=0.01,
+            retryable_codes=RETRYABLE_CODES,
+        )
+        # Must contain the truncation warning
+        assert "truncated" in text.lower()
+        assert "length limit" in text.lower()
+        # Must NOT contain the empty-response fallback
+        assert "empty response" not in text.lower()
+        assert tool_log == []
+        assert buffered == []
+
     async def test_max_iterations_returns_summary_with_tools(self):
         """Max iterations reached → message includes tool summary."""
         tool_call = make_tool_call(name="search", arguments='{"q":"test"}')
