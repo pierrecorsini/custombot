@@ -5,6 +5,10 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  schedule:
+    # Weekly Monday 06:00 UTC — catches dependency rot, base image CVEs,
+    # and flaky test regressions that accumulate when no PRs are open.
+    - cron: "0 6 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
