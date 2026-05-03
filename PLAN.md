@@ -130,7 +130,7 @@ _Round 7 — Senior technical review (2026-05-03). 20 items across 6 categories.
 
 ## DevOps & CI
 
-- [ ] Add `.gitattributes` with `* text=auto eol=lf` for cross-platform line ending normalization — the project is developed on Windows but deployed to Linux (Dockerfile). Without `.gitattributes`, line endings drift between CRLF (Windows editors) and LF (Docker/CI), causing spurious diffs and potential script failures (e.g. `h24loop.sh` with Windows line endings).
+- [x] Add `.gitattributes` with `* text=auto eol=lf` for cross-platform line ending normalization — the project is developed on Windows but deployed to Linux (Dockerfile). Without `.gitattributes`, line endings drift between CRLF (Windows editors) and LF (Docker/CI), causing spurious diffs and potential script failures (e.g. `h24loop.sh` with Windows line endings).
 - [ ] Add `ruff` `PL` (pylint) ruleset to lint config — currently `E, W, F, I, UP, B, SIM, TCH` are selected. Adding `PL` catches additional patterns: `PLR0913` (too many arguments — useful for future constructors), `PLR2004` (magic value comparison), and `PLW2901` (redefined loop variable). Run as non-blocking initially to avoid disrupting existing code.
 - [ ] Add `pytest-xdist -n auto` to CI for parallel test execution — `pytest-xdist` is in dev dependencies but may not be used with `-n auto` in CI. The test suite has 55+ test files; parallel execution can reduce CI feedback time by 2-4× on multi-core runners without any test changes (all tests use `asyncio_mode = "auto"` and independent temp directories).
 
