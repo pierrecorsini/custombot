@@ -23,6 +23,9 @@ import bisect
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
+if TYPE_CHECKING:
+    from src.config import LLMConfig
+
 from src.utils.locking import ThreadLock
 
 if TYPE_CHECKING:
@@ -58,6 +61,9 @@ class TokenUsage:
     # Pre-sorted leaderboard: (total_tokens, chat_id) ascending.
     # Updated incrementally in add_for_chat() via bisect — O(log n) search.
     _leaderboard: list[tuple[int, str]] = field(default_factory=list, repr=False)
+    # Reverse index: chat_id -> set of totals present in _leaderboard.
+    # Enables O(k·log n) purge instead of O(n) full scan.
+    _leaderboard_idx: dict[str, set[int]] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> Dict[str, int]:
         """Convert to dictionary for serialization."""
@@ -86,7 +92,9 @@ class TokenUsage:
             if chat_id in self._per_chat:
                 # Remove stale leaderboard entry before updating total.
                 old_total = self._per_chat[chat_id]["total"]
-                _remove_leaderboard_entry(self._leaderboard, old_total, chat_id)
+                _remove_leaderboard_entry(
+                    self._leaderboard, self._leaderboard_idx, old_total, chat_id,
+                )
                 entry = self._per_chat[chat_id]
                 entry["prompt"] += prompt
                 entry["completion"] += completion
@@ -95,7 +103,9 @@ class TokenUsage:
                 self._per_chat[chat_id] = entry
             else:
                 # Evict any stale leaderboard entries left by LRU eviction.
-                _purge_chat_from_leaderboard(self._leaderboard, chat_id)
+                _purge_chat_from_leaderboard(
+                    self._leaderboard, self._leaderboard_idx, chat_id,
+                )
                 self._per_chat[chat_id] = {
                     "prompt": prompt,
                     "completion": completion,
@@ -104,6 +114,7 @@ class TokenUsage:
             # Insert updated entry — bisect maintains ascending order.
             new_total = self._per_chat[chat_id]["total"]
             bisect.insort(self._leaderboard, (new_total, chat_id))
+            self._leaderboard_idx.setdefault(chat_id, set()).add(new_total)
 
     def get_top_chats(self, n: int = 10) -> list[dict[str, Any]]:
         """Return top-N chats by total token usage, descending.
@@ -137,30 +148,38 @@ def _make_per_chat_map() -> dict[str, dict[str, int]]:
 
 
 def _remove_leaderboard_entry(
-    board: list[tuple[int, str]], total: int, chat_id: str,
+    board: list[tuple[int, str]], ridx: dict[str, set[int]],
+    total: int, chat_id: str,
 ) -> None:
-    """Remove ``(total, chat_id)`` from *board* via bisect lookup."""
+    """Remove ``(total, chat_id)`` from *board* via bisect lookup.
+
+    Also updates the reverse index *ridx* to keep it consistent.
+    """
     key = (total, chat_id)
-    idx = bisect.bisect_left(board, key)
-    if idx < len(board) and board[idx] == key:
-        board.pop(idx)
+    i = bisect.bisect_left(board, key)
+    if i < len(board) and board[i] == key:
+        board.pop(i)
+        if chat_id in ridx:
+            ridx[chat_id].discard(total)
+            if not ridx[chat_id]:
+                del ridx[chat_id]
 
 
 def _purge_chat_from_leaderboard(
-    board: list[tuple[int, str]], chat_id: str,
+    board: list[tuple[int, str]], ridx: dict[str, set[int]], chat_id: str,
 ) -> None:
     """Remove **all** entries for *chat_id* from *board*.
 
-    Used when a previously evicted chat_id is re-added — any stale
-    leaderboard entries from before eviction must be cleared to keep
-    the ranking correct.
+    Uses the reverse index for O(k·log n) lookup instead of O(n) scan.
     """
-    i = 0
-    while i < len(board):
-        if board[i][1] == chat_id:
+    totals = ridx.pop(chat_id, None)
+    if not totals:
+        return
+    for total in totals:
+        key = (total, chat_id)
+        i = bisect.bisect_left(board, key)
+        if i < len(board) and board[i] == key:
             board.pop(i)
-        else:
-            i += 1
 
 
 # ── Protocol ─────────────────────────────────────────────────────────────
@@ -194,6 +213,15 @@ class LLMProvider(Protocol):
         ``NotImplementedError``.  This accessor exists so that
         ``VectorMemory`` can obtain an embeddings client without
         coupling to ``LLMClient`` internals.
+        """
+        ...
+
+    def update_config(self, new_cfg: LLMConfig) -> None:
+        """Update the LLM config with validation.
+
+        Validates the new config (temperature bounds, non-empty model name,
+        etc.) and applies it.  Implementations may also adjust derived
+        resources (e.g. httpx timeout) to match the new configuration.
         """
         ...
 
