@@ -333,6 +333,107 @@ class TestAssembleGatherErrors:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Test assemble() — graceful degradation (one failure, others unaffected)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAssembleGracefulDegradation:
+    """Tests that a single failing read is substituted with its default
+    and the remaining reads are completely unaffected."""
+
+    async def test_memory_read_failure_others_unaffected(
+        self, tmp_path: Path,
+    ) -> None:
+        """When read_memory raises OSError, other sources still contribute."""
+        memory = _make_memory()
+        memory.read_memory = AsyncMock(side_effect=OSError("disk read failed"))
+        memory.read_agents_md = AsyncMock(return_value="# Custom Agents Guide")
+
+        project_ctx = _make_project_ctx("Project context data.")
+
+        db = _make_db(rows=[])
+        db.get_compressed_summary = AsyncMock(return_value="Archived summary.")
+
+        assembler = _make_assembler(
+            tmp_path,
+            db=db,
+            memory=memory,
+            project_ctx=project_ctx,
+        )
+
+        result = await assembler.assemble("chat_1")
+
+        # Arrange: valid ContextResult returned despite one failure
+        assert isinstance(result, ContextResult)
+        assert len(result.messages) >= 1
+        assert result.messages[0].role == "system"
+
+        system_content = result.messages[0].content
+
+        # Failed read_memory → default None substituted, so no memory content
+        # Other sources should be completely unaffected:
+        assert "# Custom Agents Guide" in system_content
+        assert "Project context data." in system_content
+        assert "Archived summary." in system_content
+
+    async def test_project_ctx_failure_others_unaffected(
+        self, tmp_path: Path,
+    ) -> None:
+        """When project_ctx.get raises OSError, memory and agents still contribute."""
+        memory = _make_memory(
+            memory_content="Important memory note.",
+            agents_content="# Agent Directives",
+        )
+
+        project_ctx = _make_project_ctx()
+        project_ctx.get = AsyncMock(side_effect=OSError("project store unavailable"))
+
+        assembler = _make_assembler(
+            tmp_path,
+            db=_make_db(rows=[]),
+            memory=memory,
+            project_ctx=project_ctx,
+        )
+
+        result = await assembler.assemble("chat_1")
+
+        assert isinstance(result, ContextResult)
+        system_content = result.messages[0].content
+
+        assert "Important memory note." in system_content
+        assert "# Agent Directives" in system_content
+
+    async def test_compressed_summary_failure_others_unaffected(
+        self, tmp_path: Path,
+    ) -> None:
+        """When compressed summary raises OSError, other sources contribute."""
+        memory = _make_memory(
+            memory_content="User prefers Python.",
+            agents_content="# Rules",
+        )
+        project_ctx = _make_project_ctx("Project metadata.")
+
+        db = _make_db(rows=[])
+        db.get_compressed_summary = AsyncMock(side_effect=OSError("db unavailable"))
+
+        assembler = _make_assembler(
+            tmp_path,
+            db=db,
+            memory=memory,
+            project_ctx=project_ctx,
+        )
+
+        result = await assembler.assemble("chat_1")
+
+        assert isinstance(result, ContextResult)
+        system_content = result.messages[0].content
+
+        assert "User prefers Python." in system_content
+        assert "# Rules" in system_content
+        assert "Project metadata." in system_content
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Test assemble() — topic cache integration
 # ─────────────────────────────────────────────────────────────────────────────
 
