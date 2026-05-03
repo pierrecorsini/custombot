@@ -300,7 +300,26 @@ async def _react_iteration(
 
     if content and content.strip():
         span.set_attribute("custombot.react.response_length", len(content))
+        if finish_reason == "length":
+            span.set_attribute("custombot.react.truncated", True)
+            return (
+                content
+                + "\n\n⚠️ Response truncated due to length limit. "
+                "Try asking a more specific question.",
+                tool_log,
+                buffered_persist,
+            )
         return (content, tool_log, buffered_persist)
+
+    # Truncated response — LLM hit token limit before generating content
+    if finish_reason == "length":
+        span.set_attribute("custombot.react.truncated", True)
+        return (
+            "⚠️ Response truncated due to length limit. "
+            "Try asking a more specific question.",
+            tool_log,
+            buffered_persist,
+        )
 
     # Empty / whitespace-only response
     span.set_attribute("custombot.react.empty_response", True)
