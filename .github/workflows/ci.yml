@@ -69,6 +69,67 @@ jobs:
             || (echo "ERROR: requirements files are out of sync with pyproject.toml. Run 'make requirements-all' to regenerate." && exit 1)
           echo "✅ requirements.txt and requirements-lock.txt match pyproject.toml"
 
+  # Verify that .env.example documents every environment variable used in the
+  # source tree.  Greps src/ for os.environ.get / os.getenv calls and compares
+  # against the keys in .env.example.  Fails if a code-referenced variable is
+  # missing from .env.example.  Warns (but does not fail) on stale entries.
+  check-env-example-sync:
+    name: Env Example Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify .env.example matches source code env var usage
+        run: |
+          set -euo pipefail
+
+          # Extract env var names from os.environ.get("VAR") / os.getenv("VAR") calls.
+          CODE_VARS=$(grep -roP '(os\.environ\.get|os\.getenv)\(\s*["'"'"']\K[A-Z_][A-Z0-9_]*' src/ | sort -u)
+
+          # Extract env var names from constant definitions (e.g. _ENV: str = "VAR").
+          CONST_VARS=$(grep -roP '_ENV\s*(?::\s*[^=]+)?=\s*["'"'"']\K[A-Z_][A-Z0-9_]*' src/ | sort -u)
+
+          # Combine and deduplicate.
+          ALL_CODE_VARS=$(printf '%s\n%s\n' "$CODE_VARS" "$CONST_VARS" | sort -u | grep -v '^$')
+
+          # Extract keys from .env.example (KEY= lines, ignoring comments).
+          EXAMPLE_VARS=$(grep -oP '^[A-Z_][A-Z0-9_]*(?==)' .env.example | sort -u)
+
+          # Compare: code vars missing from .env.example (hard error).
+          MISSING_FROM_EXAMPLE=$(comm -23 <(echo "$ALL_CODE_VARS") <(echo "$EXAMPLE_VARS"))
+
+          # Compare: .env.example vars not found in code (warning only — may be
+          # used externally or reserved for future use).
+          MISSING_FROM_CODE=$(comm -13 <(echo "$ALL_CODE_VARS") <(echo "$EXAMPLE_VARS"))
+
+          ERRORS=0
+
+          if [ -n "$MISSING_FROM_EXAMPLE" ]; then
+            echo "::error::Env vars used in source but missing from .env.example:"
+            echo "$MISSING_FROM_EXAMPLE" | while read -r var; do
+              echo "::error::  - $var"
+            done
+            ERRORS=1
+          fi
+
+          if [ -n "$MISSING_FROM_CODE" ]; then
+            echo "::warning::Env vars in .env.example but not referenced in source:"
+            echo "$MISSING_FROM_CODE" | while read -r var; do
+              echo "::warning::  - $var"
+            done
+          fi
+
+          if [ "$ERRORS" -eq 1 ]; then
+            echo ""
+            echo "ERROR: .env.example is out of sync with source code."
+            echo "Add missing variables to .env.example."
+            exit 1
+          fi
+
+          echo "✅ .env.example is in sync with source code env var usage"
+          echo "   Source vars: $(echo "$ALL_CODE_VARS" | wc -l)"
+          echo "   Example vars: $(echo "$EXAMPLE_VARS" | wc -l)"
+
   typecheck:
     name: Type Check
     runs-on: ubuntu-latest

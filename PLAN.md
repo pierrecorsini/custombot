@@ -135,4 +135,4 @@ _Round 6 — Senior technical review (2026-05-02). 25 items across 6 categories.
 ## DevOps & CI
 
 - [x] Add weekly scheduled CI run — the pipeline only triggers on push/PR. Add a `schedule: cron` trigger (e.g. weekly on Monday) to catch dependency rot, base image CVEs, and flaky test regressions that accumulate silently when no PRs are open.
-- [ ] Add CI job to validate `.env.example` matches actual env var usage — grep the source tree for `os.environ.get` and `os.getenv` calls and verify each variable is documented in `.env.example`. Prevents new env vars from being silently introduced without documentation, matching the `requirements.txt` sync check pattern.
+- [x] Add CI job to validate `.env.example` matches actual env var usage — grep the source tree for `os.environ.get` and `os.getenv` calls and verify each variable is documented in `.env.example`. Prevents new env vars from being silently introduced without documentation, matching the `requirements.txt` sync check pattern.
