@@ -253,6 +253,7 @@ async def _step_vector_memory(ctx: BuilderContext) -> str | None:
     from openai import AsyncOpenAI
     from src.vector_memory import VectorMemory
 
+    embed_http: httpx.AsyncClient | None = None
     try:
         embed_cfg = ctx.config.llm
         embed_base_url = embed_cfg.embedding_base_url or embed_cfg.base_url
@@ -304,6 +305,15 @@ async def _step_vector_memory(ctx: BuilderContext) -> str | None:
             type(exc).__name__,
             exc,
         )
+        if embed_http is not None:
+            try:
+                await embed_http.aclose()
+            except Exception:
+                log_noncritical(
+                    NonCriticalCategory.CLEANUP,
+                    "Failed to close dedicated embedding HTTP client during degradation",
+                    logger=log,
+                )
         ctx.vector_memory = None
         return "DEGRADED — unavailable (memory VSS skills disabled)"
 
@@ -402,13 +412,14 @@ async def _step_skills(ctx: BuilderContext) -> str | None:
 
 async def _step_bot(ctx: BuilderContext) -> str | None:
     """Create the Bot orchestrator."""
-    from src.bot import Bot, BotConfig
+    from src.bot import Bot, BotConfig, BotDeps
 
     bot_config = BotConfig(
         max_tool_iterations=ctx.config.llm.max_tool_iterations,
         memory_max_history=ctx.config.memory_max_history,
         system_prompt_prefix=ctx.config.llm.system_prompt_prefix,
         stream_response=ctx.config.llm.stream_response,
+        per_chat_timeout=ctx.config.per_chat_timeout,
     )
     from src.utils import LRULockCache
     from src.constants import EvictionPolicy
@@ -418,7 +429,7 @@ async def _step_bot(ctx: BuilderContext) -> str | None:
         max_size=ctx.config.max_chat_lock_cache_size,
         eviction_policy=eviction_policy,
     )
-    bot = Bot(
+    deps = BotDeps(
         config=bot_config,
         db=ctx.db,  # type: ignore[arg-type]
         llm=ctx.llm,  # type: ignore[arg-type]
@@ -434,6 +445,7 @@ async def _step_bot(ctx: BuilderContext) -> str | None:
         dedup=ctx.dedup,  # type: ignore[arg-type]
         chat_locks=chat_locks,
     )
+    bot = Bot(deps)
     ctx.bot = bot
     return "orchestrator initialized"
 
