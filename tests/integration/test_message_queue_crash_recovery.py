@@ -1,14 +1,14 @@
 """
-test_message_queue_crash_recovery.py — Integration test for crash recovery
-with a partially-written JSONL file.
+test_message_queue_crash_recovery.py — Integration tests for MessageQueue.
 
-Verifies that _load_pending() recovers all valid entries from a queue file
-whose last line was truncated (simulating a crash mid-write), and that the
-corruption is logged for observability.
+Covers:
+- Crash recovery with a partially-written JSONL file.
+- Concurrent flush and enqueue under the swap-buffers flush loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -115,3 +115,109 @@ class TestCrashRecoveryPartialWrite:
             assert "survive-2" in queue3._pending
             assert queue3._last_corruption_result is not None
             assert queue3._last_corruption_result.is_corrupted is False
+
+
+class TestConcurrentFlushAndEnqueue:
+    """Integration test for concurrent flush and enqueue.
+
+    Verifies that the swap-buffers flush loop (_flush_loop) correctly
+    persists messages to disk when enqueue calls arrive concurrently
+    from multiple coroutines. No data should be lost or corrupted.
+    """
+
+    async def test_parallel_enqueues_flushed_to_disk(self, tmp_path: Path):
+        """Messages enqueued in parallel are persisted after flush cycle completes."""
+        data_dir = tmp_path / "data"
+        msg_count = 50
+
+        async with get_message_queue(str(data_dir)) as queue:
+            # Enqueue from multiple parallel coroutines
+            tasks = [
+                queue.enqueue(
+                    FakeIncomingMessage(
+                        message_id=f"flush-{i}",
+                        chat_id=f"chat-{i % 5}",
+                        text=f"concurrent message {i}",
+                    )
+                )
+                for i in range(msg_count)
+            ]
+            await asyncio.gather(*tasks)
+
+            assert await queue.get_pending_count() == msg_count
+
+            # Wait for the flush loop to drain the buffer
+            await asyncio.sleep(0.2)
+
+        # After close, verify all messages on disk via fresh reconnect
+        async with get_message_queue(str(data_dir)) as queue2:
+            assert await queue2.get_pending_count() == msg_count
+            for i in range(msg_count):
+                msg = queue2._pending.get(f"flush-{i}")
+                assert msg is not None, f"Missing flush-{i}"
+                assert msg.text == f"concurrent message {i}"
+
+    async def test_flush_loop_drains_without_data_loss(self, tmp_path: Path):
+        """Flush loop swap-buffers pattern loses no messages under burst traffic."""
+        data_dir = tmp_path / "data"
+
+        async with get_message_queue(str(data_dir)) as queue:
+            # Burst: enqueue in waves separated by flush intervals
+            for wave in range(3):
+                tasks = [
+                    queue.enqueue(
+                        FakeIncomingMessage(
+                            message_id=f"wave{wave}-{i}",
+                            chat_id="chat-burst",
+                            text=f"wave {wave} msg {i}",
+                        )
+                    )
+                    for i in range(20)
+                ]
+                await asyncio.gather(*tasks)
+                # Give flush loop time to swap and drain between waves
+                await asyncio.sleep(0.1)
+
+            assert await queue.get_pending_count() == 60
+
+        # Verify all 60 messages survived on disk
+        async with get_message_queue(str(data_dir)) as queue2:
+            assert await queue2.get_pending_count() == 60
+            for wave in range(3):
+                for i in range(20):
+                    assert f"wave{wave}-{i}" in queue2._pending
+
+    async def test_jsonl_file_valid_after_concurrent_flush(self, tmp_path: Path):
+        """On-disk JSONL is well-formed after concurrent enqueue + flush."""
+        data_dir = tmp_path / "data"
+
+        async with get_message_queue(str(data_dir)) as queue:
+            tasks = [
+                queue.enqueue(
+                    FakeIncomingMessage(
+                        message_id=f"jsonl-{i}",
+                        chat_id="chat-jsonl",
+                        text=f"msg {i}",
+                    )
+                )
+                for i in range(30)
+            ]
+            await asyncio.gather(*tasks)
+            await asyncio.sleep(0.15)
+
+        # Parse the file manually — every line must be valid JSON
+        qfile = data_dir / "message_queue.jsonl"
+        lines = qfile.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) >= 30
+
+        parsed_ids = set()
+        for line in lines:
+            data = json.loads(line)
+            assert "message_id" in data
+            assert "status" in data
+            if data["status"] == "pending":
+                parsed_ids.add(data["message_id"])
+
+        # All 30 enqueued IDs must appear as pending in the file
+        for i in range(30):
+            assert f"jsonl-{i}" in parsed_ids
