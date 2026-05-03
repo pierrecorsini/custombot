@@ -372,16 +372,49 @@ class TestProcessToolCalls:
         })
 
         executor = _make_tool_executor()
+        messages: list = []
 
         tool_log, buffered = await process_tool_calls(
-            executor, choice, [], "chat_1", Path("/tmp/ws"),
+            executor, choice, messages, "chat_1", Path("/tmp/ws"),
         )
+
+        rejected_count = 3
+
         # Should only execute MAX_TOOL_CALLS_PER_TURN calls
         assert len(tool_log) == MAX_TOOL_CALLS_PER_TURN
-        # Rejected calls should produce tool messages in buffered
-        rejected_count = 3
+
         # buffered = 1 assistant + MAX_TOOL_CALLS_PER_TURN results + 3 rejections
         assert len(buffered) == 1 + MAX_TOOL_CALLS_PER_TURN + rejected_count
+
+        # ── Tool log contains only executed (non-rejected) call names ──
+        executed_names = {f"tool_{i}" for i in range(MAX_TOOL_CALLS_PER_TURN)}
+        assert {entry.name for entry in tool_log} == executed_names
+
+        # ── Rejection messages contain the expected text ──
+        rejection_entries = buffered[1 + MAX_TOOL_CALLS_PER_TURN:]
+        assert len(rejection_entries) == rejected_count
+        for entry in rejection_entries:
+            assert entry["role"] == "tool"
+            assert "per-turn limit" in entry["content"]
+
+        # ── Messages list is well-formed: assistant + tool responses ──
+        assert messages[0]["role"] == "assistant"
+        tool_messages = messages[1:]
+        assert len(tool_messages) == MAX_TOOL_CALLS_PER_TURN + rejected_count
+
+        # Every original call_id has a matching tool response
+        all_call_ids = {f"tc_{i}" for i in range(MAX_TOOL_CALLS_PER_TURN + 3)}
+        response_ids = {msg["tool_call_id"] for msg in tool_messages}
+        assert response_ids == all_call_ids
+
+        # Rejected calls' messages contain the rejection text
+        rejected_ids = {
+            f"tc_{i}"
+            for i in range(MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_CALLS_PER_TURN + rejected_count)
+        }
+        for msg in tool_messages:
+            if msg["tool_call_id"] in rejected_ids:
+                assert "per-turn limit" in msg["content"]
 
     async def test_stream_callback_called_for_each_tool(self):
         """stream_callback is called for each tool result."""
