@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.3 | Updated: 2026-05-03 -->
+<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.4 | Updated: 2026-05-03 -->
 
 # Technical Domain
 
@@ -63,10 +63,8 @@ context_assembler.update_config(new_cfg)    # propagates to context assembly
 
 ### SQLite Connection Pooling
 ```python
-# Reusable connection pool for SQLite databases
-# sqlite_pool.py provides connection abstraction
+# Reusable pool for SQLite; thread-safe lifecycle management
 # Used by db.py, message_store.py, vector_memory
-# Thread-safe with proper lifecycle management
 from src.db.sqlite_pool import ...
 ```
 
@@ -76,6 +74,15 @@ from src.db.sqlite_pool import ...
 # DeduplicationService uses BoundedOrderedDict(ttl=...) (replaced LRUDict)
 # TaskScheduler caches _time_to_next_due() via _tasks_dirty flag
 # Memory caches known-existing chat directories to avoid repeated os calls
+```
+
+### Resilience & Error Categorization
+```python
+# _classify_main_loop_error() → category str (LLM_TRANSIENT, CHANNEL_DISCONNECT, etc.)
+# Main loop emits structured EVENT_ERROR_OCCURRED via EventBus for monitoring
+# Routing graceful degradation: retains previous rules when reload yields zero
+# React loop handles finish_reason='length' with user-visible truncation warning
+# Builder closes embed_http client on vector memory degradation
 ```
 
 ### Structured Dependency Injection
@@ -98,10 +105,8 @@ class BotDeps:
 from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from src.config import Config  # Type-only imports
-
 log = logging.getLogger(__name__)
 # ... implementation ...
 __all__ = ["PublicClass", "public_function"]
@@ -142,7 +147,7 @@ raise LLMError("API timeout", provider="openai", model="gpt-4")
 - Structured dependency injection: `BotDeps`, `ShutdownContext`, `BuilderContext` replace multi-param constructors
 - Protocol classes for dependency injection boundaries
 - Step orchestrator pattern for multi-phase startup/build (declarative `ComponentSpec`)
-- Config hot-reload uses atomic reference swap (single assignment, not field-by-field mutation)
+- Config hot-reload uses atomic reference swap (single assignment, not field-by-field mutation; `Application._swap_config()`)
 - Connection pooling abstraction for SQLite (sqlite_pool.py, file_pool.py)
 - Offload blocking I/O to threads via `asyncio.to_thread()` (e.g., Memory log recovery)
 - Snapshot mutable state before use (scheduler snapshots task dict fields)
@@ -171,13 +176,13 @@ raise LLMError("API timeout", provider="openai", model="gpt-4")
 ## 📂 Codebase References
 
 **Entry Point**: `main.py` — Click CLI: `start`, `options`, `diagnose` (+ `--health-host`)
-**App Lifecycle**: `src/app.py` — `Application` + `AppPhase` state machine + bounded concurrency semaphore
+**App Lifecycle**: `src/app.py` — `Application` + `AppPhase` state machine + error categorization + config swap
 **Builder**: `src/builder.py` — `build_bot()` → `BotComponents` (public API)
-**Bot Core**: `src/bot/` — `_bot.py` (Bot+BotDeps, handle_message, outbound dedup), `crash_recovery.py`, `preflight.py`, `react_loop.py`
+**Bot Core**: `src/bot/` — `_bot.py` (Bot+BotDeps, handle_message, outbound dedup), `crash_recovery.py`, `preflight.py`, `react_loop.py` (truncation handling)
 **Config**: `src/config/` — Schema defs, loader, validation, `config_watcher.py` (atomic swap, 5 modules)
 **LLM**: `src/llm.py`, `src/llm_provider.py`, `src/llm_error_classifier.py` — Async client + circuit breaker + error classification
 **Memory**: `src/memory.py` — Per-chat `MEMORY.md` files + chat dir caching + async recovery via to_thread
-**Routing**: `src/routing.py` — YAML frontmatter rules + retry on transient parse failures
+**Routing**: `src/routing.py` — YAML frontmatter rules + retry on transient parse failures + zero-rule graceful degradation
 **Message Queue**: `src/message_queue.py`, `src/message_queue_persistence.py` — Streaming JSONL parsing
 **Scheduler**: `src/scheduler.py` — Cached time-to-next-due via _tasks_dirty flag; outbound dedup
 **Skills**: `src/skills/` — `BaseSkill` (Python) + prompt-based skills (Markdown)

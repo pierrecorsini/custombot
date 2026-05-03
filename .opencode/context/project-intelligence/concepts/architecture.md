@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/concepts/architecture | Priority: high | Version: 3.0 | Updated: 2026-04-06 -->
+<!-- Context: project-intelligence/concepts/architecture | Priority: high | Version: 3.1 | Updated: 2026-05-03 -->
 
 # Architecture
 
@@ -42,6 +42,15 @@ The native Python approach was chosen because:
 |------------|--------|--------|
 | WhatsApp single device | WhatsApp limitation | Only one active session per number |
 | Local files only | Architecture choice | No cloud sync, manual backup needed |
+
+## Resilience Patterns
+
+| Pattern | Module | Description |
+|---------|--------|-------------|
+| Error categorization | `src/app.py` | `_classify_main_loop_error()` maps exceptions to categories (LLM_TRANSIENT, CHANNEL_DISCONNECT, etc.) with EventBus emission |
+| Zero-rule retention | `src/routing.py` | `load_rules()` retains previous rules when reload yields zero (handles transient empty-file states) |
+| Truncation handling | `src/bot/react_loop.py` | `finish_reason='length'` returns user-visible warning |
+| Resource cleanup on degradation | `src/builder.py` | Closes dedicated embed_http client when vector memory degrades |
 
 ## Codebase References
 
