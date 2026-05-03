@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.4 | Updated: 2026-05-03 -->
+<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.5 | Updated: 2026-05-03 -->
 
 # Technical Domain
 
@@ -63,26 +63,27 @@ context_assembler.update_config(new_cfg)    # propagates to context assembly
 
 ### SQLite Connection Pooling
 ```python
-# Reusable pool for SQLite; thread-safe lifecycle management
-# Used by db.py, message_store.py, vector_memory
+# Reusable pool for SQLite; thread-safe lifecycle. Used by db.py, message_store.py, vector_memory
 from src.db.sqlite_pool import ...
 ```
 
 ### Bounded Concurrency
 ```python
-# Application._on_message() uses asyncio.Semaphore to cap concurrent message handling
-# DeduplicationService uses BoundedOrderedDict(ttl=...) (replaced LRUDict)
-# TaskScheduler caches _time_to_next_due() via _tasks_dirty flag
-# Memory caches known-existing chat directories to avoid repeated os calls
+# App._on_message() → asyncio.Semaphore | DedupService → BoundedOrderedDict(ttl=...)
+# TaskScheduler → _tasks_dirty flag | Memory → known chat dir cache to skip os calls
 ```
 
 ### Resilience & Error Categorization
 ```python
-# _classify_main_loop_error() → category str (LLM_TRANSIENT, CHANNEL_DISCONNECT, etc.)
-# Main loop emits structured EVENT_ERROR_OCCURRED via EventBus for monitoring
-# Routing graceful degradation: retains previous rules when reload yields zero
-# React loop handles finish_reason='length' with user-visible truncation warning
-# Builder closes embed_http client on vector memory degradation
+# _classify_main_loop_error() → LLM_TRANSIENT, CHANNEL_DISCONNECT, etc.
+# EventBus emits EVENT_ERROR_OCCURRED | Routing retains previous rules on zero-reload
+# React loop: finish_reason='length' → truncation warning | Context vars reset in finally
+```
+
+### Health Server Middleware Stack
+```python
+# Layered (cheapest first): method → path (HEALTH_ALLOWED_PATHS) → size → rate limit → HMAC
+# SecretRedactingFilter scrubs HMAC tokens from all log output
 ```
 
 ### Structured Dependency Injection
@@ -103,20 +104,15 @@ class BotDeps:
 ```python
 """module.py — One-line purpose."""
 from __future__ import annotations
-import logging
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from src.config import Config  # Type-only imports
+import logging; from typing import TYPE_CHECKING
+if TYPE_CHECKING: from src.config import Config
 log = logging.getLogger(__name__)
-# ... implementation ...
 __all__ = ["PublicClass", "public_function"]
 ```
 
 ### Exception Hierarchy
 ```python
 from src.exceptions import LLMError, ConfigurationError
-
-# Domain-specific with error codes, suggestions, docs links
 raise LLMError("API timeout", provider="openai", model="gpt-4")
 # .to_user_message() → formatted with emoji + ref code + docs link
 ```
@@ -149,6 +145,7 @@ raise LLMError("API timeout", provider="openai", model="gpt-4")
 - Step orchestrator pattern for multi-phase startup/build (declarative `ComponentSpec`)
 - Config hot-reload uses atomic reference swap (single assignment, not field-by-field mutation; `Application._swap_config()`)
 - Connection pooling abstraction for SQLite (sqlite_pool.py, file_pool.py)
+- Health server: layered middleware stack (path → method → size → rate limit → HMAC auth) with `HEALTH_ALLOWED_PATHS` frozenset
 - Offload blocking I/O to threads via `asyncio.to_thread()` (e.g., Memory log recovery)
 - Snapshot mutable state before use (scheduler snapshots task dict fields)
 - TOCTOU-safe file operations with `os.O_EXCL` atomic open
@@ -161,6 +158,7 @@ raise LLMError("API timeout", provider="openai", model="gpt-4")
 ## Security Requirements
 
 - Path validation: all file access sandboxed to workspace directory (`is_path_in_workspace`)
+- Instruction loader: `_validate_path()` rejects directory components and resolved-path escapes
 - URL sanitization: strip credentials from logged URLs (`sanitize_url_for_logging`)
 - Prompt injection detection: classify and reject adversarial inputs; strip inline `(?i)` flags from combined regex
 - Secret redaction: `Config.__repr__()` uses `_redact_secrets()` to mask API keys
@@ -187,7 +185,7 @@ raise LLMError("API timeout", provider="openai", model="gpt-4")
 **Scheduler**: `src/scheduler.py` — Cached time-to-next-due via _tasks_dirty flag; outbound dedup
 **Skills**: `src/skills/` — `BaseSkill` (Python) + prompt-based skills (Markdown)
 **Security**: `src/security/` — Path validator, prompt injection, URL sanitizer, audit, signing (6 modules)
-**Health**: `src/health/` — server.py, prometheus.py, checks, middleware, models (5 modules, configurable host)
+**Health**: `src/health/` — server.py, middleware.py (path/method/size validation, HMAC, rate limiting, secret redaction), prometheus.py, checks.py, models.py (6 modules, configurable host)
 **DB**: `src/db/` — sqlite_pool.py, file_pool.py, migration, message_store, generations (12 modules)
 **Monitoring**: `src/monitoring/` — Performance, memory, tracing, workspace monitor
 **Other**: `src/workspace_integrity.py`, `src/core/startup.py`, `src/rate_limiter.py`, `src/lifecycle.py`, `src/shutdown.py`

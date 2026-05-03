@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/tech-stack | Priority: high | Version: 3.1 | Updated: 2026-05-02 -->
+<!-- Context: project-intelligence/lookup/tech-stack | Priority: high | Version: 3.2 | Updated: 2026-05-03 -->
 
 # Tech Stack
 
@@ -33,7 +33,7 @@
 | Exceptions | Domain error hierarchy | `src/exceptions.py` |
 | Protocols | Type interfaces | `src/utils/protocols.py`, `src/llm_provider.py` |
 | Type Guards | Runtime type checking | `src/utils/type_guards.py` |
-| Constants | Named constants (14 domains) | `src/constants/` |
+| Constants | Named constants (15 domains) | `src/constants/` |
 | CLI Output | Terminal output | `src/ui/cli_output.py` |
 | Progress | Spinner + progress bar | `src/progress.py` |
 | Diagnostics | Self-service checks | `src/diagnose.py` |

@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/project-structure | Priority: high | Version: 4.1 | Updated: 2026-05-02 -->
+<!-- Context: project-intelligence/lookup/project-structure | Priority: high | Version: 4.2 | Updated: 2026-05-03 -->
 
 # Project Structure
 
