@@ -519,11 +519,24 @@ class HealthServer:
 
         Defense-in-depth headers prevent content-type sniffing, clickjacking,
         framing, and caching of sensitive metrics data even on internal endpoints.
+
+        ``Strict-Transport-Security`` is added only when the request arrives
+        over HTTPS (directly or via a TLS-terminating proxy that sets the
+        ``X-Forwarded-Proto: https`` header).  Per RFC 6797 the header MUST
+        NOT be sent over plain HTTP.
         """
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = "default-src 'none'"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Cache-Control"] = "no-store"
+
+        # HSTS — only when served over TLS (direct or proxy-terminated)
+        scheme = request.scheme
+        forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
+        if scheme == "https" or forwarded_proto.lower() == "https":
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=63072000; includeSubDomains; preload"
+            )
 
     async def start(self, port: int = 8080, host: str = "127.0.0.1") -> None:
         """Start the health check HTTP server.

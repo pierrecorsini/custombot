@@ -7,6 +7,8 @@ required defense-in-depth headers:
 - Content-Security-Policy: default-src 'none'
 - X-Frame-Options: DENY
 - Cache-Control: no-store
+- Strict-Transport-Security (only when request is HTTPS or behind a
+  TLS-terminating proxy with X-Forwarded-Proto: https)
 
 Also verifies ``IPLimiter`` behaviour:
 - Requests within the limit are allowed.
@@ -109,6 +111,40 @@ class TestSecurityHeaders:
                 assert actual == expected, (
                     f"{header}: expected {expected!r}, got {actual!r} on {route}"
                 )
+        finally:
+            await client.close()
+
+    async def test_hsts_header_absent_over_plain_http(self) -> None:
+        """HSTS header must NOT be present when request is plain HTTP."""
+        client = await _create_test_client(_make_server())
+        try:
+            resp = await client.get("/version")
+            assert "Strict-Transport-Security" not in resp.headers
+        finally:
+            await client.close()
+
+    async def test_hsts_header_present_with_forwarded_proto_https(self) -> None:
+        """HSTS header is added when X-Forwarded-Proto: https is set."""
+        client = await _create_test_client(_make_server())
+        try:
+            resp = await client.get(
+                "/version", headers={"X-Forwarded-Proto": "https"}
+            )
+            hsts = resp.headers.get("Strict-Transport-Security")
+            assert hsts is not None, "HSTS header should be present over HTTPS proxy"
+            assert "max-age=" in hsts
+            assert "includeSubDomains" in hsts
+        finally:
+            await client.close()
+
+    async def test_hsts_header_absent_with_forwarded_proto_http(self) -> None:
+        """HSTS header must NOT be present when X-Forwarded-Proto is http."""
+        client = await _create_test_client(_make_server())
+        try:
+            resp = await client.get(
+                "/version", headers={"X-Forwarded-Proto": "http"}
+            )
+            assert "Strict-Transport-Security" not in resp.headers
         finally:
             await client.close()
 
