@@ -126,7 +126,7 @@ _Round 7 — Senior technical review (2026-05-03). 20 items across 6 categories.
 
 - [x] Reject symlinks in `RoutingEngine` instruction file scanning — `load_rules()` and `_scan_file_mtimes()` iterate `.md` files via `glob()` and `os.scandir()` without checking for symlinks. A symlink within the instructions directory pointing outside the workspace could cause the engine to parse arbitrary files as routing rules. Add `os.path.islink()` checks when iterating instruction files.
 - [x] Validate `schedule.weekdays` range (0-6) in `TaskScheduler._validate_task()` — the cron schedule type accepts a `weekdays` list but doesn't validate that values are integers in the range 0-6. A malformed `tasks.json` with `weekdays: [7, 8]` would silently match no days, causing the task to never execute. Add range validation with a clear error message.
-- [ ] Add `Content-Security-Policy: default-src 'none'` and `X-Content-Type-Options: nosniff` headers to `HealthServer` responses — the health endpoint already has path validation and rate limiting, but adding security headers hardens it against content-type sniffing and script injection if the endpoint is inadvertently exposed to browsers (e.g. via an internal dashboard iframe).
+- [x] Add `Content-Security-Policy: default-src 'none'` and `X-Content-Type-Options: nosniff` headers to `HealthServer` responses — the health endpoint already has path validation and rate limiting, but adding security headers hardens it against content-type sniffing and script injection if the endpoint is inadvertently exposed to browsers (e.g. via an internal dashboard iframe).
 
 ## DevOps & CI
 
