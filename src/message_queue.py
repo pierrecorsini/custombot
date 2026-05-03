@@ -573,10 +573,11 @@ class MessageQueue(AsyncLockMixin):
 
     async def _persist_pending(self) -> None:
         """Atomically persist all pending messages to queue file."""
-        messages = list(self._pending.values())
         try:
-            await asyncio.to_thread(self._persistence.persist_messages, messages)
-            log.debug("Persisted %d pending messages", len(messages))
+            await asyncio.to_thread(
+                self._persistence.persist_messages, self._pending.values()
+            )
+            log.debug("Persisted %d pending messages", len(self._pending))
         except Exception as exc:
             log.error("Failed to persist queue: %s", exc)
             try:

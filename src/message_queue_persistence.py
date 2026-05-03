@@ -17,7 +17,7 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple
 
 from src.constants import QUEUE_FSYNC_BATCH_SIZE, QUEUE_FSYNC_INTERVAL_SECONDS
 from src.core.errors import NonCriticalCategory, log_noncritical
@@ -146,7 +146,7 @@ class QueuePersistence:
 
     # ── full-file persistence ─────────────────────────────────────────────
 
-    def persist_messages(self, messages: List[QueuedMessage]) -> None:
+    def persist_messages(self, messages: Iterable[QueuedMessage]) -> None:
         """Atomically persist all messages to the queue file.
 
         Drains the write buffer first (buffered lines would be overwritten
