@@ -116,7 +116,7 @@ _Round 7 — Senior technical review (2026-05-03). 20 items across 6 categories.
 
 ## Testing & Quality
 
-- [ ] Add test for `Bot._deliver_response()` with generation conflict — mock `check_generation()` to return `False`, verify that the warning is logged and `save_messages_batch()` is still called (current behavior). Documents the existing design choice that generation conflicts are logged but not retried.
+- [x] Add test for `Bot._deliver_response()` with generation conflict — mock `check_generation()` to return `False`, verify that the warning is logged and `save_messages_batch()` is still called (current behavior). Documents the existing design choice that generation conflicts are logged but not retried.
 - [ ] Add test for `RoutingEngine.close()` stopping the watchdog observer — construct a `RoutingEngine` with `use_watchdog=True`, call `load_rules()` to start the observer, then call `close()` and verify `_observer` is `None` and the observer thread has stopped (`observer.is_alive() == False`).
 - [ ] Add test for `ContextAssembler` graceful degradation when one of the four async reads fails — mock `memory.read_memory()` to raise `OSError`, verify `assemble()` returns a valid `ContextResult` with the default value (`None`) substituted for the failed read and the other three reads unaffected.
 - [ ] Add integration test for `MessageQueue` concurrent flush and enqueue — start the `_flush_loop`, enqueue messages in parallel from multiple coroutines, verify all messages are persisted to disk after the flush cycle completes and no data is lost or corrupted.

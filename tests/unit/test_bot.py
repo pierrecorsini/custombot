@@ -2505,6 +2505,49 @@ class TestDeliverResponse:
         )
         assert result == "Response"
 
+    async def test_generation_conflict_still_persists(self):
+        """When check_generation returns False, save_messages_batch is still called.
+
+        Documents the current design choice: generation conflicts are logged
+        as warnings but the write proceeds anyway.  The per-chat lock makes
+        true concurrency rare, so the trade-off favours persistence over
+        data loss.
+        """
+        bot = _make_bot()
+        bot._db.check_generation = MagicMock(return_value=False)
+        bot._db.save_messages_batch = AsyncMock(return_value=["id1", "id2"])
+
+        buffered = [{"role": "tool", "content": "result", "name": "bash"}]
+
+        with (
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Response"),
+            patch("src.bot._bot.filter_response_content", return_value=ContentFilterResult(flagged=False)),
+            patch("src.bot._bot.get_event_bus") as mock_get_bus,
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            result = await bot._deliver_response(
+                chat_id="chat_conflict",
+                raw_response="Response",
+                tool_log=[],
+                buffered_persist=buffered,
+                generation=5,
+                verbose="",
+            )
+
+        # Despite the generation conflict, the batch is still persisted
+        expected_batch = [
+            {"role": "tool", "content": "result", "name": "bash"},
+            {"role": "assistant", "content": "Response"},
+        ]
+        bot._db.save_messages_batch.assert_awaited_once_with(
+            chat_id="chat_conflict",
+            messages=expected_batch,
+        )
+        # Response is still returned (not suppressed)
+        assert result == "Response"
+
     async def test_save_messages_batch_called_with_correct_batch(self):
         """save_messages_batch receives buffered_persist + assistant message."""
         bot = _make_bot()
