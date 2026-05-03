@@ -2616,6 +2616,34 @@ class TestDeliverResponse:
         assert event.source == "Bot._send_to_chat"
         assert event.correlation_id == "corr-999"
 
+    async def test_outbound_dedup_suppresses_delivery(self):
+        """When check_outbound_duplicate returns True, delivery is suppressed.
+
+        The method returns None without calling save_messages_batch or
+        _send_to_chat (which handles record_outbound + event emission),
+        confirming that dedup-suppressed responses don't create phantom
+        DB entries or duplicate outbound records.
+        """
+        bot = _make_bot()
+        bot._dedup.check_outbound_duplicate = MagicMock(return_value=True)
+
+        with (
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Response"),
+            patch("src.bot._bot.filter_response_content", return_value=ContentFilterResult(flagged=False)),
+        ):
+            result = await bot._deliver_response(
+                chat_id="chat_dedup",
+                raw_response="Response",
+                tool_log=[],
+                buffered_persist=[],
+                generation=0,
+                verbose="",
+            )
+
+        assert result is None
+        bot._db.save_messages_batch.assert_not_awaited()
+        bot._dedup.record_outbound.assert_not_called()
+
     async def test_full_pipeline_with_all_steps(self):
         """End-to-end _deliver_response with filtering + summary + conflict + event."""
         bot = _make_bot()
