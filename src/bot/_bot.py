@@ -403,6 +403,17 @@ class Bot:
                 MAX_MESSAGE_LENGTH,
                 extra={"chat_id": msg.chat_id, "message_length": len(msg.text)},
             )
+            await get_event_bus().emit(Event(
+                name="message_dropped",
+                data={
+                    "chat_id": msg.chat_id,
+                    "sender_id": msg.sender_id,
+                    "reason": "message_too_long",
+                    "message_length": len(msg.text),
+                },
+                source="Bot.handle_message",
+                correlation_id=get_correlation_id(),
+            ))
             clear_correlation_id()
             return None
 

@@ -193,7 +193,7 @@ _Round 8 — Senior technical review (2026-05-03). 20 items across 6 categories.
 
 ## Error Handling & Resilience
 
-- [ ] Emit `message_dropped` event when `Bot.handle_message()` rejects due to `msg.text` exceeding `MAX_MESSAGE_LENGTH` — currently the length check logs a warning and returns `None` silently. For monitoring, emitting a `message_dropped` event with `reason="message_too_long"` allows subscribers to track oversized-message rejections without parsing log lines, matching the pattern used for routing-related drops in `_build_turn_context()`.
+- [x] Emit `message_dropped` event when `Bot.handle_message()` rejects due to `msg.text` exceeding `MAX_MESSAGE_LENGTH` — currently the length check logs a warning and returns `None` silently. For monitoring, emitting a `message_dropped` event with `reason="message_too_long"` allows subscribers to track oversized-message rejections without parsing log lines, matching the pattern used for routing-related drops in `_build_turn_context()`.
 - [ ] Handle `QueuePersistence.flush_buffer()` disk-full errors gracefully in `MessageQueue._flush_write_buffer()` — the flush call raises on I/O failure but the error propagates up through `_maybe_flush_buffer()` to `enqueue()`, potentially causing message loss. Catch the exception, log a warning, and buffer the line for retry on the next flush cycle instead of losing the queued message entirely.
 - [ ] Add structured logging for `Application._shutdown_cleanup()` timeout paths — when `config_watcher.stop()` or `perform_shutdown()` times out, only a generic warning is logged. Include the step name, timeout duration, and which components were affected in the log data dict so that monitoring dashboards can alert on slow shutdowns and identify the bottleneck component.
 
