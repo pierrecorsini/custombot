@@ -230,6 +230,47 @@ class TestReactLoopEdgeCases:
         assert tool_log == []
         assert buffered == []
 
+    async def test_content_filter_with_content_returns_content(self):
+        """LLM returns finish_reason='content_filter' with non-empty content → content returned unchanged, not empty fallback."""
+        llm = _make_llm()
+        llm.chat = AsyncMock(
+            return_value=make_chat_response(
+                content="I cannot assist with that request.", finish_reason="content_filter"
+            )
+        )
+        metrics = _make_metrics()
+        executor = _make_tool_executor()
+
+        text, tool_log, buffered = await react_loop(
+            llm, metrics, executor, "chat_1", [], None,
+            Path("/tmp/ws"), max_tool_iterations=5,
+            stream_response=False, max_retries=1, initial_delay=0.01,
+            retryable_codes=RETRYABLE_CODES,
+        )
+        assert text == "I cannot assist with that request."
+        assert "empty response" not in text.lower()
+        assert tool_log == []
+        assert buffered == []
+
+    async def test_content_filter_without_content_returns_fallback(self):
+        """LLM returns finish_reason='content_filter' with empty content → empty-response fallback, no crash."""
+        llm = _make_llm()
+        llm.chat = AsyncMock(
+            return_value=make_chat_response(content="", finish_reason="content_filter")
+        )
+        metrics = _make_metrics()
+        executor = _make_tool_executor()
+
+        text, tool_log, buffered = await react_loop(
+            llm, metrics, executor, "chat_1", [], None,
+            Path("/tmp/ws"), max_tool_iterations=5,
+            stream_response=False, max_retries=1, initial_delay=0.01,
+            retryable_codes=RETRYABLE_CODES,
+        )
+        assert "empty response" in text.lower()
+        assert tool_log == []
+        assert buffered == []
+
     async def test_max_iterations_returns_summary_with_tools(self):
         """Max iterations reached → message includes tool summary."""
         tool_call = make_tool_call(name="search", arguments='{"q":"test"}')
