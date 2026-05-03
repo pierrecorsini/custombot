@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from src.core.instruction_loader import InstructionLoader
+from src.security import PathSecurityError
 
 
 @pytest.fixture()
@@ -85,12 +86,15 @@ class TestLoad:
         assert result2 == "Version 2"
 
     def test_path_traversal_sanitized(self, loader: InstructionLoader, instructions_dir: Path):
-        """Ensure path traversal is prevented — only basename is used."""
+        """Path traversal attempts are explicitly rejected with PathSecurityError."""
         _write_instruction(instructions_dir / "chat.md", "Safe content")
-        # Path("../../etc/passwd").name == "passwd" → only "passwd" is looked up
-        # in instructions_dir, so traversal is prevented
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(PathSecurityError, match="Path traversal blocked"):
             loader.load("../../../etc/passwd")
+
+    def test_absolute_path_rejected(self, loader: InstructionLoader):
+        """Absolute paths are rejected with PathSecurityError."""
+        with pytest.raises(PathSecurityError, match="Path traversal blocked"):
+            loader.load("/etc/passwd")
 
 
 # ── load_raw() ───────────────────────────────────────────────────────────────
@@ -114,6 +118,11 @@ class TestLoadRaw:
         result = loader.load_raw("raw.md")
         assert result == "Modified"
 
+    def test_absolute_path_rejected(self, loader: InstructionLoader):
+        """Absolute paths are rejected with PathSecurityError."""
+        with pytest.raises(PathSecurityError, match="Path traversal blocked"):
+            loader.load_raw("/etc/passwd")
+
 
 # ── save() ───────────────────────────────────────────────────────────────────
 
@@ -136,6 +145,11 @@ class TestSave:
         loader.save("cached.md", "Version 2")
         assert "cached.md" not in loader._cache
 
+    def test_absolute_path_rejected(self, loader: InstructionLoader):
+        """Absolute paths are rejected with PathSecurityError."""
+        with pytest.raises(PathSecurityError, match="Path traversal blocked"):
+            loader.save("/tmp/evil.md", "malicious")
+
 
 # ── delete() ─────────────────────────────────────────────────────────────────
 
@@ -155,6 +169,11 @@ class TestDelete:
         assert "cached.md" in loader._cache
         loader.delete("cached.md")
         assert "cached.md" not in loader._cache
+
+    def test_absolute_path_rejected(self, loader: InstructionLoader):
+        """Absolute paths are rejected with PathSecurityError."""
+        with pytest.raises(PathSecurityError, match="Path traversal blocked"):
+            loader.delete("/etc/passwd")
 
 
 # ── list_files() ─────────────────────────────────────────────────────────────

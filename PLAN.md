@@ -128,7 +128,7 @@ _Round 6 — Senior technical review (2026-05-02). 25 items across 6 categories.
 
 ## Security
 
-- [ ] Validate instruction file paths in `InstructionLoader.load()` — the method receives a filename and joins it with the instructions directory, but doesn't validate against path traversal (e.g. `../../etc/passwd`). Add a check that the resolved path stays within the instructions directory, matching the path validation pattern used in `Memory._validate_path` and `TaskScheduler._resolve_tasks_path`.
+- [x] Validate instruction file paths in `InstructionLoader.load()` — the method receives a filename and joins it with the instructions directory, but doesn't validate against path traversal (e.g. `../../etc/passwd`). Add a check that the resolved path stays within the instructions directory, matching the path validation pattern used in `Memory._validate_path` and `TaskScheduler._resolve_tasks_path`.
 - [ ] Reset `_routing_show_errors_var` context variable in all error paths — if an exception occurs in `_process` after `_routing_show_errors_var.set(True)` but before the `finally` block clears the correlation ID, the context var leaks to the next message processed on the same coroutine. Explicitly reset it to its default in the `finally` block of `_handle_message_inner`.
 - [ ] Add request path validation to `HealthServer` — the HTTP handler doesn't validate the request path, meaning `GET /any-path` returns a 200 health response. Restrict valid paths to a known set (`/health`, `/metrics`, `/`) and return 404 for anything else, preventing cache-poisoning and log-noise from arbitrary URL probes.
 
