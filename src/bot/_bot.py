@@ -15,6 +15,7 @@ this file navigable and reduce merge conflicts.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 import time
@@ -148,6 +149,7 @@ class BotConfig:
     memory_max_history: int
     system_prompt_prefix: str
     stream_response: bool = False
+    per_chat_timeout: float = 300.0
 
 
 @dataclass(slots=True)
@@ -478,7 +480,28 @@ class Bot:
                 _routing_show_errors_var.set(True)
 
                 try:
-                    result = await self._process(msg, channel=channel, stream_callback=stream_callback, generation=generation)
+                    # Wrap the processing pipeline in a per-chat timeout.
+                    # A stuck LLM call or tool execution holds the per-chat
+                    # lock indefinitely — this cancels the turn and releases
+                    # the lock so subsequent messages can be processed.
+                    timeout = self._cfg.per_chat_timeout
+                    if timeout and timeout > 0:
+                        result = await asyncio.wait_for(
+                            self._process(
+                                msg,
+                                channel=channel,
+                                stream_callback=stream_callback,
+                                generation=generation,
+                            ),
+                            timeout=timeout,
+                        )
+                    else:
+                        result = await self._process(
+                            msg,
+                            channel=channel,
+                            stream_callback=stream_callback,
+                            generation=generation,
+                        )
 
                     if self._message_queue:
                         await self._message_queue.complete(msg.message_id)
@@ -504,6 +527,24 @@ class Bot:
                         extra={"chat_id": msg.chat_id, "message_id": msg.message_id},
                     )
                     return result
+                except asyncio.TimeoutError:
+                    processing_time = time.perf_counter() - start_time
+                    record_exception_safe(proc_span, asyncio.TimeoutError())
+                    log.error(
+                        "Message %s TIMED OUT after %.1fs (per_chat_timeout=%.1fs) "
+                        "in chat %s — stuck turn cancelled, lock released",
+                        msg.message_id,
+                        processing_time,
+                        timeout,
+                        msg.chat_id,
+                        extra={
+                            "chat_id": msg.chat_id,
+                            "message_id": msg.message_id,
+                            "correlation_id": correlation_id,
+                            "timeout_seconds": timeout,
+                        },
+                    )
+                    return None
                 except Exception as exc:
                     record_exception_safe(proc_span, exc)
                     log.error(
@@ -527,6 +568,7 @@ class Bot:
 
                     raise
                 finally:
+                    _routing_show_errors_var.set(True)  # reset to default
                     clear_correlation_id()
 
     # ── scheduled task processing ──────────────────────────────────────────
