@@ -25,6 +25,7 @@ import pytest
 
 from src.health.middleware import (
     IPLimiter,
+    create_path_validation_middleware,
     create_rate_limit_middleware,
     create_request_size_limit_middleware,
     load_rate_limit_config,
@@ -50,11 +51,14 @@ async def _create_test_client(server: HealthServer) -> Any:
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
 
+    from src.constants import HEALTH_ALLOWED_PATHS
+
     max_body, max_url = load_request_size_config()
     limit, window, max_ips = load_rate_limit_config()
     ip_limiter = IPLimiter(limit, window, max_ips)
 
     middlewares = [
+        create_path_validation_middleware(HEALTH_ALLOWED_PATHS),
         create_request_size_limit_middleware(max_body, max_url),
         create_rate_limit_middleware(ip_limiter),
     ]
@@ -264,3 +268,60 @@ class TestIPLimiter:
         # IP 1 was evicted, so a new tracker is created — fresh state
         allowed, _, _ = limiter.check("1.1.1.1")
         assert allowed, "Evicted IP should get a fresh tracker"
+
+
+class TestPathValidation:
+    """Verify that only known paths are served; everything else gets 404."""
+
+    @pytest.mark.parametrize("allowed_path", ["/", "/version", "/metrics"])
+    async def test_allowed_paths_pass_through(self, allowed_path: str) -> None:
+        """Known paths should not be rejected by the path validation middleware."""
+        client = await _create_test_client(_make_server())
+        try:
+            resp = await client.get(allowed_path)
+            assert resp.status != 404, (
+                f"Allowed path {allowed_path!r} should not be rejected as 404"
+            )
+        finally:
+            await client.close()
+
+    @pytest.mark.parametrize(
+        "unknown_path",
+        [
+            "/unknown",
+            "/admin",
+            "/health/../etc/passwd",
+            "/favicon.ico",
+            "/robots.txt",
+            "/.env",
+            "/api/v1/data",
+            "/healthcheck",
+            "/status",
+        ],
+    )
+    async def test_unknown_paths_return_404(self, unknown_path: str) -> None:
+        client = await _create_test_client(_make_server())
+        try:
+            resp = await client.get(unknown_path)
+            assert resp.status == 404, (
+                f"Unknown path {unknown_path!r} should return 404, got {resp.status}"
+            )
+            text = await resp.text()
+            assert "Not Found" in text
+        finally:
+            await client.close()
+
+    async def test_path_validation_rejects_before_rate_limit_counting(self) -> None:
+        """Repeated requests to unknown paths should not count against rate limits."""
+        client = await _create_test_client(_make_server())
+        try:
+            # Hammer an unknown path
+            for _ in range(20):
+                resp = await client.get("/definitely-not-a-route")
+                assert resp.status == 404
+
+            # A legitimate request should still be allowed (not rate-limited)
+            resp = await client.get("/version")
+            assert resp.status == 200
+        finally:
+            await client.close()

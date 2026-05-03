@@ -37,6 +37,7 @@ from src.health.middleware import (
     SecretRedactingFilter,
     create_hmac_middleware,
     create_method_validation_middleware,
+    create_path_validation_middleware,
     create_rate_limit_middleware,
     create_request_size_limit_middleware,
     load_hmac_secret,
@@ -540,6 +541,11 @@ class HealthServer:
 
         # Method validation (applied first — cheapest check)
         middlewares.append(create_method_validation_middleware())
+
+        # Path validation (reject unknown paths before rate-limit counting)
+        from src.constants import HEALTH_ALLOWED_PATHS
+
+        middlewares.append(create_path_validation_middleware(HEALTH_ALLOWED_PATHS))
 
         # Request size limits
         max_body, max_url = load_request_size_config()

@@ -5,6 +5,7 @@ Provides middleware functions for:
 - Per-IP rate limiting with sliding window tracking
 - HTTP method validation (read-only enforcement)
 - Request body and URL size limits
+- Request path whitelisting (reject unknown paths early)
 - Optional HMAC-SHA256 authentication
 
 Also includes the ``SecretRedactingFilter`` log filter that scrubs HMAC
@@ -143,6 +144,39 @@ def create_method_validation_middleware() -> Any:
         return await handler(request)
 
     return method_validation_middleware
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Request Path Validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def create_path_validation_middleware(allowed_paths: frozenset[str]) -> Any:
+    """Create an aiohttp middleware that rejects requests to unknown paths.
+
+    Health endpoints serve a fixed set of routes.  Rejecting requests to
+    arbitrary paths early — before rate-limit counting, HMAC verification, or
+    handler logic — prevents cache-poisoning, log noise, and wasted processing
+    from URL probes.
+    """
+    from aiohttp import web
+
+    @web.middleware
+    async def path_validation_middleware(
+        request: web.Request, handler: Any
+    ) -> Any:
+        if request.path not in allowed_paths:
+            log.warning(
+                "Health server rejected unknown path: %s", request.path
+            )
+            return web.Response(
+                text="Not Found",
+                status=404,
+                content_type="text/plain",
+            )
+        return await handler(request)
+
+    return path_validation_middleware
 
 
 def load_request_size_config() -> tuple[int, int]:

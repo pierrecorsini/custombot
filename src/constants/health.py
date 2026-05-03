@@ -33,3 +33,11 @@ HEALTH_MAX_REQUEST_BODY_BYTES: int = 1024  # 1 KB
 # Legitimate paths are short (/, /health, /metrics, /ready, /version).
 # Excessively long paths are rejected to prevent memory exhaustion.
 HEALTH_MAX_URL_LENGTH: int = 2048  # 2 KB
+
+# Allowed URL paths for the health server.
+# Requests to any other path are rejected immediately with 404, preventing
+# cache-poisoning, log noise, and wasted middleware processing from arbitrary
+# URL probes.  Query strings are not considered part of the path.
+HEALTH_ALLOWED_PATHS: frozenset[str] = frozenset(
+    {"/", "/health", "/ready", "/version", "/metrics"}
+)
