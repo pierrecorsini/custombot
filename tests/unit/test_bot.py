@@ -9,7 +9,7 @@ Covers:
 - Bot.recover_pending_messages (crash recovery flow)
 - Bot.process_scheduled (scheduled task processing, bypassing routing/dedup)
 - Bot._react_loop (core ReAct loop with mocked LLM)
-- Bot._finalize_response (post-ReAct finalization pipeline)
+- Bot._deliver_response (post-ReAct response delivery pipeline)
 
 Note: Tests for _process_tool_calls and _call_llm_with_retry have been moved
 to tests/unit/test_react_loop.py since those methods now live in the
@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.bot import Bot, BotConfig, PreflightResult
+from src.bot import Bot, BotConfig, BotDeps, PreflightResult
 from src.channels.base import IncomingMessage
 from src.core.event_bus import EVENT_RESPONSE_SENT
 from src.core.tool_formatter import ToolLogEntry
@@ -107,8 +107,10 @@ def _make_bot(
     dedup = AsyncMock()
     dedup.is_inbound_duplicate = AsyncMock(return_value=False)
     dedup.is_outbound_duplicate = MagicMock(return_value=False)
+    dedup.check_outbound_duplicate = MagicMock(return_value=False)
+    dedup.record_outbound = MagicMock()
 
-    return Bot(
+    return Bot(BotDeps(
         config=cfg,
         db=db,
         llm=llm,
@@ -117,7 +119,7 @@ def _make_bot(
         routing=routing,
         message_queue=message_queue,
         dedup=dedup,
-    )
+    ))
 
 
 def _make_routing_rule(
@@ -221,14 +223,14 @@ class TestBotInit:
         skills = MagicMock()
         routing = MagicMock()
 
-        bot = Bot(
+        bot = Bot(BotDeps(
             config=cfg,
             db=db,
             llm=llm,
             memory=memory,
             skills=skills,
             routing=routing,
-        )
+        ))
 
         assert bot._cfg is cfg
         assert bot._db is db
@@ -277,10 +279,10 @@ class TestBotInit:
         memory.ensure_workspace = MagicMock(return_value=Path("/tmp/workspace/chat_123"))
         skills = MagicMock()
         skills.all = MagicMock(return_value=[])
-        bot = Bot(
+        bot = Bot(BotDeps(
             config=cfg, db=db, llm=llm, memory=memory, skills=skills,
             chat_locks=custom_locks,
-        )
+        ))
         assert bot._chat_locks is custom_locks
 
     def test_rate_limiter_initialized(self):
@@ -2289,12 +2291,12 @@ class TestScheduledInjectionConfidenceThresholds:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Bot._finalize_response Tests
+# Bot._deliver_response Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestFinalizeResponse:
-    """Tests for Bot._finalize_response — post-ReAct finalization pipeline.
+class TestDeliverResponse:
+    """Tests for Bot._deliver_response — post-ReAct response delivery pipeline.
 
     Covers:
     (a) META block parsing and topic cache update via finalize_turn
@@ -2303,6 +2305,8 @@ class TestFinalizeResponse:
     (d) generation check logs warning on conflict
     (e) save_messages_batch called with correct buffered_persist + assistant message
     (f) response_sent event emitted with correct metadata
+    (g) outbound dedup suppresses duplicate responses
+    (h) outbound dedup recording after successful delivery
     """
 
     async def test_topic_meta_parsed_and_cache_updated(self):
@@ -2321,7 +2325,7 @@ class TestFinalizeResponse:
             mock_bus = AsyncMock()
             mock_get_bus.return_value = mock_bus
 
-            result = await bot._finalize_response(
+            result = await bot._deliver_response(
                 chat_id="chat_123",
                 raw_response='Response\n---META---\n{"topic_changed": true}',
                 tool_log=[],
@@ -2354,7 +2358,7 @@ class TestFinalizeResponse:
             mock_bus = AsyncMock()
             mock_get_bus.return_value = mock_bus
 
-            result = await bot._finalize_response(
+            result = await bot._deliver_response(
                 chat_id="chat_456",
                 raw_response="Response with sk-abc123",
                 tool_log=[],
@@ -2380,7 +2384,7 @@ class TestFinalizeResponse:
             mock_bus = AsyncMock()
             mock_get_bus.return_value = mock_bus
 
-            result = await bot._finalize_response(
+            result = await bot._deliver_response(
                 chat_id="chat_789",
                 raw_response="All good",
                 tool_log=[],
@@ -2405,7 +2409,7 @@ class TestFinalizeResponse:
             mock_bus = AsyncMock()
             mock_get_bus.return_value = mock_bus
 
-            result = await bot._finalize_response(
+            result = await bot._deliver_response(
                 chat_id="chat_abc",
                 raw_response="Here are results",
                 tool_log=tool_log,
@@ -2431,7 +2435,7 @@ class TestFinalizeResponse:
             mock_bus = AsyncMock()
             mock_get_bus.return_value = mock_bus
 
-            result = await bot._finalize_response(
+            result = await bot._deliver_response(
                 chat_id="chat_def",
                 raw_response="Done",
                 tool_log=tool_log,
@@ -2456,7 +2460,7 @@ class TestFinalizeResponse:
             mock_bus = AsyncMock()
             mock_get_bus.return_value = mock_bus
 
-            result = await bot._finalize_response(
+            result = await bot._deliver_response(
                 chat_id="chat_ghi",
                 raw_response="No tools used",
                 tool_log=[],
@@ -2482,7 +2486,7 @@ class TestFinalizeResponse:
             mock_get_bus.return_value = mock_bus
 
             with patch("src.bot._bot.log") as mock_log:
-                result = await bot._finalize_response(
+                result = await bot._deliver_response(
                     chat_id="chat_conflict",
                     raw_response="Response",
                     tool_log=[],
@@ -2519,7 +2523,7 @@ class TestFinalizeResponse:
             mock_bus = AsyncMock()
             mock_get_bus.return_value = mock_bus
 
-            result = await bot._finalize_response(
+            result = await bot._deliver_response(
                 chat_id="chat_batch",
                 raw_response="Final answer",
                 tool_log=[],
@@ -2552,7 +2556,7 @@ class TestFinalizeResponse:
             mock_bus = AsyncMock()
             mock_get_bus.return_value = mock_bus
 
-            result = await bot._finalize_response(
+            result = await bot._deliver_response(
                 chat_id="chat_event",
                 raw_response="Hello!",
                 tool_log=[],
@@ -2565,11 +2569,11 @@ class TestFinalizeResponse:
         event = mock_bus.emit.call_args[0][0]
         assert event.name == EVENT_RESPONSE_SENT
         assert event.data == {"chat_id": "chat_event", "response_length": 6}
-        assert event.source == "Bot._finalize_response"
+        assert event.source == "Bot._deliver_response"
         assert event.correlation_id == "corr-999"
 
     async def test_full_pipeline_with_all_steps(self):
-        """End-to-end _finalize_response with filtering + summary + conflict + event."""
+        """End-to-end _deliver_response with filtering + summary + conflict + event."""
         bot = _make_bot()
         bot._db.check_generation = MagicMock(return_value=False)
         bot._db.save_messages_batch = AsyncMock(return_value=["id1", "id2"])
@@ -2592,7 +2596,7 @@ class TestFinalizeResponse:
             mock_bus = AsyncMock()
             mock_get_bus.return_value = mock_bus
 
-            result = await bot._finalize_response(
+            result = await bot._deliver_response(
                 chat_id="chat_full",
                 raw_response="Response with secret",
                 tool_log=tool_log,
@@ -2622,3 +2626,75 @@ class TestFinalizeResponse:
             event = mock_bus.emit.call_args[0][0]
             assert event.name == EVENT_RESPONSE_SENT
             assert event.data["chat_id"] == "chat_full"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bot.process_scheduled HMAC Signing Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestProcessScheduledHMAC:
+    """Tests for HMAC verification in Bot.process_scheduled."""
+
+    SECRET = "test-hmac-secret-for-scheduled-tasks"
+
+    async def test_signed_prompt_passes_verification(self):
+        """A properly signed prompt passes HMAC verification and processes normally."""
+        import src.security.signing as signing_mod
+        from src.security.signing import sign_payload
+
+        bot = _make_bot()
+        bot._llm.chat = AsyncMock(return_value=make_chat_response(content="Report done"))
+
+        prompt = "Run daily report"
+        valid_hmac = sign_payload(self.SECRET, prompt.encode("utf-8"))
+
+        with (
+            patch("src.bot._bot.get_scheduler_secret", return_value=self.SECRET),
+            patch("src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]),
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Report done"),
+        ):
+            result = await bot.process_scheduled(
+                chat_id="chat_001",
+                prompt=prompt,
+                prompt_hmac=valid_hmac,
+            )
+
+        assert result == "Report done"
+
+    async def test_unsigned_prompt_warns_when_secret_set(self):
+        """An unsigned prompt logs a warning but still processes."""
+        bot = _make_bot()
+        bot._llm.chat = AsyncMock(return_value=make_chat_response(content="Ok"))
+
+        with (
+            patch("src.bot._bot.get_scheduler_secret", return_value=self.SECRET),
+            patch("src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]),
+            patch.object(bot._context_assembler, "finalize_turn", return_value="Ok"),
+            patch("src.bot._bot.audit_log"),
+        ):
+            result = await bot.process_scheduled(
+                chat_id="chat_002",
+                prompt="Run report",
+            )
+
+        # Unsigned prompts are not rejected — only warned
+        assert result == "Ok"
+
+    async def test_tampered_prompt_rejected(self):
+        """A prompt with an invalid HMAC is rejected and returns None."""
+        bot = _make_bot()
+
+        with (
+            patch("src.bot._bot.get_scheduler_secret", return_value=self.SECRET),
+            patch("src.bot._bot.audit_log"),
+        ):
+            result = await bot.process_scheduled(
+                chat_id="chat_003",
+                prompt="Tampered prompt",
+                prompt_hmac="deadbeef" * 8,
+            )
+
+        assert result is None
+        bot._db.upsert_chat.assert_not_awaited()
+        bot._db.save_messages_batch.assert_not_awaited()
