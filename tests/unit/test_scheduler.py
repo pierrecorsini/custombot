@@ -2200,6 +2200,54 @@ class TestValidateTask:
         with pytest.raises(ValueError, match="hour.*minute"):
             scheduler._validate_task({"prompt": "test", "schedule": {"type": "cron", "hour": 12}})
 
+    def test_cron_weekdays_valid_range(self, scheduler: TaskScheduler):
+        """Weekdays 0-6 should be accepted."""
+        task = _make_task(schedule_type="cron", hour=9, minute=0, weekdays=[0, 1, 2, 3, 4, 5, 6])
+        scheduler._validate_task(task)  # should not raise
+
+    def test_cron_weekdays_boundary_values(self, scheduler: TaskScheduler):
+        """Boundary values 0 and 6 should be accepted."""
+        scheduler._validate_task(
+            {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [0]}}
+        )
+        scheduler._validate_task(
+            {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [6]}}
+        )
+
+    def test_cron_weekdays_out_of_range_raises(self, scheduler: TaskScheduler):
+        """Weekdays outside 0-6 should be rejected."""
+        with pytest.raises(ValueError, match="weekdays.*0-6"):
+            scheduler._validate_task(
+                {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [7, 8]}}
+            )
+
+    def test_cron_weekdays_negative_raises(self, scheduler: TaskScheduler):
+        """Negative weekday values should be rejected."""
+        with pytest.raises(ValueError, match="weekdays.*0-6"):
+            scheduler._validate_task(
+                {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [-1]}}
+            )
+
+    def test_cron_weekdays_non_int_raises(self, scheduler: TaskScheduler):
+        """Non-integer weekday values should be rejected."""
+        with pytest.raises(ValueError, match="weekdays.*integers"):
+            scheduler._validate_task(
+                {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [1.5]}}
+            )
+
+    def test_cron_weekdays_not_list_raises(self, scheduler: TaskScheduler):
+        """Weekdays as a non-list type should be rejected."""
+        with pytest.raises(ValueError, match="weekdays.*list"):
+            scheduler._validate_task(
+                {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": "1,2,3"}}
+            )
+
+    def test_cron_no_weekdays_passes(self, scheduler: TaskScheduler):
+        """Omitting weekdays should be accepted (defaults to all days)."""
+        task = _make_task(schedule_type="cron", hour=9, minute=0)
+        assert "weekdays" not in task["schedule"]
+        scheduler._validate_task(task)  # should not raise
+
     # ── integration: add_task rejects invalid tasks ──
 
     @pytest.mark.asyncio

@@ -196,6 +196,16 @@ class TaskScheduler(BaseBackgroundService):
         elif stype == "cron":
             if "hour" not in schedule or "minute" not in schedule:
                 raise ValueError("Cron schedule requires 'hour' and 'minute' fields")
+            weekdays = schedule.get("weekdays")
+            if weekdays is not None:
+                if not isinstance(weekdays, list):
+                    raise ValueError("Cron schedule 'weekdays' must be a list")
+                if not all(isinstance(d, int) for d in weekdays):
+                    raise ValueError("Cron schedule 'weekdays' must contain only integers")
+                if not all(0 <= d <= 6 for d in weekdays):
+                    raise ValueError(
+                        "Cron schedule 'weekdays' values must be in range 0-6 (Mon=0 to Sun=6)"
+                    )
 
     # ── task CRUD ──────────────────────────────────────────────────────────
 
