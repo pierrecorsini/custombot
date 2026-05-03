@@ -57,15 +57,18 @@ class ToolExecutor:
         self._rate_limiter = rate_limiter
         self._metrics = metrics
         self._on_skill_executed = on_skill_executed
-        self._audit_log_dir = Path(audit_log_dir) if audit_log_dir else None
-        self._audit_logger: SkillAuditLogger | None = None
+        # Audit state: None = disabled; Path = pending lazy-init on first
+        # _audit() call; SkillAuditLogger = initialized and ready.
+        self._audit_logger: SkillAuditLogger | Path | None = (
+            Path(audit_log_dir) if audit_log_dir else None
+        )
 
     def close(self) -> None:
         """Flush and close the audit logger. Safe to call multiple times."""
-        if self._audit_logger is not None:
+        if isinstance(self._audit_logger, SkillAuditLogger):
             self._audit_logger.close()
-            self._audit_logger = None
             log.debug("ToolExecutor audit logger closed")
+        self._audit_logger = None
 
     def _audit(
         self,
@@ -76,12 +79,14 @@ class ToolExecutor:
         result_summary: str,
     ) -> None:
         """Record a skill-execution audit entry if the logger is configured."""
-        if self._audit_logger is None:
-            if self._audit_log_dir is None:
-                return
-            self._audit_logger = SkillAuditLogger(self._audit_log_dir)
-            self._audit_log_dir = None  # release the path reference
-        self._audit_logger.log(
+        logger = self._audit_logger
+        if logger is None:
+            return
+        # First call — lazily create the logger from the stored path
+        if isinstance(logger, Path):
+            logger = SkillAuditLogger(logger)
+            self._audit_logger = logger
+        logger.log(
             chat_id=chat_id,
             skill_name=skill_name,
             args_hash=SkillAuditLogger.hash_args(raw_args),
