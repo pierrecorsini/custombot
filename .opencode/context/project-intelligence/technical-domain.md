@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.5 | Updated: 2026-05-03 -->
+<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.6 | Updated: 2026-05-03 -->
 
 # Technical Domain
 
@@ -8,8 +8,6 @@
 ## Quick Reference
 **Update Triggers**: Tech stack changes | New patterns | Architecture decisions
 **Audience**: Developers, AI agents
-
----
 
 ## Primary Stack
 
@@ -27,13 +25,13 @@
 | Vector Search | sqlite-vec | 0.1.9 | Semantic memory with cosine similarity; detects embedding model changes across restarts |
 | Serialization | orjson + msgpack | latest | Fast JSON + binary encoding |
 | Hashing | xxhash | ~=3.5 | Deduplication hash computation; outbound dedup in scheduler |
-| Logging | stdlib + Rich + OTel | 1.30 | Structured logs, correlation IDs, OpenTelemetry spans |
+| Logging | stdlib + Rich + OTel | 1.30 | Structured logs, correlation IDs, OpenTelemetry spans; http_logging, llm_logging, logging_config |
 | Config | JSON + dataclasses + watchdog | >=4.0 | Hot-reload via atomic config swap pattern |
 | Health | HTTP (stdlib) | — | Prometheus + JSON endpoints, configurable host (default localhost), rate-limited |
 | Process | psutil | ~=6.0 | System resource monitoring |
-| Linting | Ruff | >=0.15 | Combined linter + formatter (replaces flake8, black, isort) |
+| Linting | Ruff | >=0.15 | Combined linter + formatter (replaces flake8, black, isort) + PL ruleset non-blocking |
 | Typing | mypy | >=1.20 | Gradual strict mode (`disallow_untyped_defs = false`) |
-| Testing | pytest + hypothesis | >=9.0 | Unit + property-based + benchmarks (72 test files); dev extras in pyproject.toml |
+| Testing | pytest + hypothesis | >=9.0 | Unit + property-based + benchmarks (73 test files); dev extras in pyproject.toml |
 
 ---
 
@@ -76,7 +74,8 @@ from src.db.sqlite_pool import ...
 ### Resilience & Error Categorization
 ```python
 # _classify_main_loop_error() → LLM_TRANSIENT, CHANNEL_DISCONNECT, etc.
-# EventBus emits EVENT_ERROR_OCCURRED | Routing retains previous rules on zero-reload
+# EventBus emits EVENT_ERROR_OCCURRED | EVENT_MESSAGE_DROPPED (no routing match)
+# Routing retains previous rules on zero-reload
 # React loop: finish_reason='length' → truncation warning | Context vars reset in finally
 ```
 
@@ -181,15 +180,16 @@ raise LLMError("API timeout", provider="openai", model="gpt-4")
 **LLM**: `src/llm.py`, `src/llm_provider.py`, `src/llm_error_classifier.py` — Async client + circuit breaker + error classification
 **Memory**: `src/memory.py` — Per-chat `MEMORY.md` files + chat dir caching + async recovery via to_thread
 **Routing**: `src/routing.py` — YAML frontmatter rules + retry on transient parse failures + zero-rule graceful degradation
-**Message Queue**: `src/message_queue.py`, `src/message_queue_persistence.py` — Streaming JSONL parsing
+**Message Queue**: `src/message_queue.py`, `src/message_queue_persistence.py` — Swap-buffers flush pattern, streaming JSONL persistence
 **Scheduler**: `src/scheduler.py` — Cached time-to-next-due via _tasks_dirty flag; outbound dedup
 **Skills**: `src/skills/` — `BaseSkill` (Python) + prompt-based skills (Markdown)
 **Security**: `src/security/` — Path validator, prompt injection, URL sanitizer, audit, signing (6 modules)
 **Health**: `src/health/` — server.py, middleware.py (path/method/size validation, HMAC, rate limiting, secret redaction), prometheus.py, checks.py, models.py (6 modules, configurable host)
 **DB**: `src/db/` — sqlite_pool.py, file_pool.py, migration, message_store, generations (12 modules)
 **Monitoring**: `src/monitoring/` — Performance, memory, tracing, workspace monitor
+**Logging**: `src/logging/` — http_logging, llm_logging (redaction), logging_config (3 modules)
 **Other**: `src/workspace_integrity.py`, `src/core/startup.py`, `src/rate_limiter.py`, `src/lifecycle.py`, `src/shutdown.py`
-**Tests**: `tests/` — 72 test files; dev extras in pyproject.toml
+**Tests**: `tests/` — 73 test files; dev extras in pyproject.toml
 **Build**: `pyproject.toml`, `Makefile` (pip-compile), `requirements.txt`, `.pre-commit-config.yaml` (ruff), Dockerfile
 
 ## Related Files
