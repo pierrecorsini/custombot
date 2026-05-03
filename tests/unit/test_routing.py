@@ -904,6 +904,77 @@ class TestRoutingEngineLoadRules:
         engine.load_rules()
         assert engine.rules == []
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Symlinks require elevated privileges on Windows",
+    )
+    def test_symlink_md_files_skipped_by_load_rules(self, tmp_path: Path):
+        """Symlinks in the instructions directory are rejected during load_rules()."""
+        # Create a real .md file outside the instructions dir
+        outside = tmp_path / "outside.md"
+        outside.write_text(
+            textwrap.dedent("""\
+                ---
+                routing:
+                  id: outside-rule
+                  priority: 1
+                ---
+                # Outside
+            """)
+        )
+        # Create a real .md file inside the instructions dir
+        instructions = tmp_path / "instructions"
+        instructions.mkdir()
+        real_md = instructions / "real.md"
+        real_md.write_text(
+            textwrap.dedent("""\
+                ---
+                routing:
+                  id: real-rule
+                  priority: 1
+                ---
+                # Real
+            """)
+        )
+        # Create a symlink pointing outside the instructions dir
+        link = instructions / "symlink.md"
+        link.symlink_to(outside)
+
+        engine = RoutingEngine(instructions)
+        with patch("src.routing.log") as mock_log:
+            engine.load_rules()
+
+        # Only the real file's rule loaded; symlink skipped
+        assert len(engine.rules) == 1
+        assert engine.rules[0].id == "real-rule"
+
+        # Warning logged for symlink
+        warn_calls = [
+            c for c in mock_log.warning.call_args_list
+            if "symlink" in str(c).lower()
+        ]
+        assert len(warn_calls) >= 1
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Symlinks require elevated privileges on Windows",
+    )
+    def test_symlink_md_files_skipped_by_scan_file_mtimes(self, tmp_path: Path):
+        """Symlinks are excluded from _scan_file_mtimes results."""
+        instructions = tmp_path / "instructions"
+        instructions.mkdir()
+        outside = tmp_path / "outside.md"
+        outside.write_text("# Outside")
+        link = instructions / "symlink.md"
+        link.symlink_to(outside)
+        (instructions / "real.md").write_text("# Real")
+
+        engine = RoutingEngine(instructions)
+        mtimes = engine._scan_file_mtimes()
+
+        assert "real.md" in mtimes
+        assert "symlink.md" not in mtimes
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RoutingEngine — match() and match_with_rule() tests

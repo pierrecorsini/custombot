@@ -452,6 +452,12 @@ class RoutingEngine:
             try:
                 with os.scandir(self._instructions_dir) as entries:
                     for entry in entries:
+                        if entry.is_symlink():
+                            log.warning(
+                                "Skipping symlink in instructions directory: %s",
+                                entry.name,
+                            )
+                            continue
                         if entry.is_file() and entry.name.endswith(".md"):
                             try:
                                 mtimes[entry.name] = entry.stat().st_mtime
@@ -507,6 +513,12 @@ class RoutingEngine:
             return
 
         for md_file in sorted(self._instructions_dir.glob("*.md"), key=lambda p: p.name):
+            if os.path.islink(md_file):
+                log.warning(
+                    "Skipping symlink in instructions directory: %s",
+                    md_file.name,
+                )
+                continue
             try:
                 parsed = parse_file(md_file)
                 rule_dicts = extract_routing_rules(parsed.metadata)
