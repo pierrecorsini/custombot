@@ -60,10 +60,25 @@ select = [
     "B",    # flake8-bugbear
     "SIM",  # flake8-simplify
     "TCH",  # flake8-type-checking
+    "PL",   # pylint (non-blocking — ignored rules to be removed incrementally)
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
     "B008",  # function call in default argument (dataclasses need this)
+    # PL rules with existing violations — remove ignores incrementally as violations are fixed.
+    "PLC0415",  # import-outside-top-level (618 violations)
+    "PLR2004",  # magic-value-comparison (549 violations)
+    "PLR0913",  # too-many-arguments (63 violations)
+    "PLR0912",  # too-many-branches (19 violations)
+    "PLR0915",  # too-many-statements (16 violations)
+    "PLR0911",  # too-many-return-statements (11 violations)
+    "PLW2901",  # redefined-loop-name (10 violations)
+    "PLW0603",  # global-statement (7 violations)
+    "PLW0108",  # unnecessary-lambda (6 violations)
+    "PLR1730",  # if-stmt-min-max (5 violations)
+    "PLW1510",  # subprocess-run-without-check (3 violations)
+    "PLR0124",  # comparison-with-itself (1 violation)
+    "PLR5501",  # collapsible-else-if (1 violation)
 ]
 
 [tool.ruff.lint.isort]
