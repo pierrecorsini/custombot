@@ -19,8 +19,8 @@
 | Tracing | OpenTelemetry | 1.30+ | Distributed tracing (optional) |
 | File Watching | watchdog | 4.0+ | OS-native file change detection |
 | Hashing | xxhash | 3.5+ | Fast non-cryptographic hashing |
-| Testing | pytest + pytest-asyncio | 8.0+/0.23+ | Async test support, coverage |
-| Linting | ruff + mypy | 0.8+/1.13+ | Fast linting, type checking |
+| Testing | pytest + pytest-asyncio | 9.0+/1.3+ | Async test support, coverage, hypothesis |
+| Linting | ruff + mypy | 0.15+/1.20+ | Fast linting, type checking |
 
 ## Supporting Modules
 

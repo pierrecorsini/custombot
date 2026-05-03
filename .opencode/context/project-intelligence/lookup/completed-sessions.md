@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/completed-sessions | Priority: medium | Version: 4.0 | Updated: 2026-05-02 -->
+<!-- Context: project-intelligence/lookup/completed-sessions | Priority: medium | Version: 5.0 | Updated: 2026-05-02 -->
 
 # Completed Sessions
 

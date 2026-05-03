@@ -1,4 +1,4 @@
-<!-- Context: project/navigation | Priority: high | Version: 1.5 | Updated: 2026-05-02 -->
+<!-- Context: project/navigation | Priority: high | Version: 1.7 | Updated: 2026-05-02 -->
 
 # Project Context — custombot
 
@@ -164,6 +164,7 @@
 | 2026-05-02 | Context harvest: Round 4 remaining items sync | 1 updated lookup (plan-progress: +18 remaining items, totals 50/83) | — |
 | 2026-05-02 | Context harvest: deep codebase scan | 5 new concepts (event-bus, dedup, security, noncritical-errors, step-orchestrator), 2 updated concepts (middleware-pipeline v2, architecture-overview), 2 updated lookup (implemented-modules, plan-progress v4), 1 updated (nav) | — |
 | 2026-05-02 | add-context --update: created project-intelligence/ | 1 new (technical-domain.md v1.0), 1 new (navigation.md v1.0), 1 updated (project/nav v1.5) | — |
+| 2026-05-02 | Harvest: PLAN.md Round 5 + add-context update | 2 updated (plan-progress v5.0, tech-domain v1.1), 2 updated (nav v1.1, project nav v1.6) | — |
 
 ## Related
 
