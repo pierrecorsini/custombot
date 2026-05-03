@@ -95,6 +95,67 @@ _VALID_TRANSITIONS: dict[AppPhase, set[AppPhase]] = {
 }
 
 
+# ── Main-loop error categorization ──────────────────────────────────────
+
+
+class _MainLoopErrorCategory:
+    """Category strings for structured main-loop error classification.
+
+    Monitoring subscribers check ``event.data["category"]`` to trigger
+    alerts or auto-recovery for specific failure modes.
+    """
+
+    LLM_TRANSIENT = "llm_transient"
+    LLM_PERMANENT = "llm_permanent"
+    CHANNEL_DISCONNECT = "channel_disconnect"
+    FILESYSTEM = "filesystem"
+    CONFIGURATION = "configuration"
+    UNKNOWN = "unknown"
+
+
+def _classify_main_loop_error(exc: Exception) -> str:
+    """Classify a main-loop exception into a monitoring category.
+
+    Uses the existing ``CustomBotException`` hierarchy and ``ErrorCode``
+    enum to determine whether the error is transient (retryable),
+    permanent, channel-related, filesystem-related, or configuration-related.
+    """
+    from src.exceptions import (
+        BridgeError,
+        ConfigurationError,
+        DatabaseError,
+        DiskSpaceError,
+        ErrorCode,
+        LLMError,
+    )
+
+    # LLM errors — distinguish transient from permanent via error code
+    if isinstance(exc, LLMError):
+        transient_codes = {
+            ErrorCode.LLM_TIMEOUT,
+            ErrorCode.LLM_CONNECTION_FAILED,
+            ErrorCode.LLM_RATE_LIMITED,
+            ErrorCode.LLM_CIRCUIT_BREAKER_OPEN,
+        }
+        if exc.error_code in transient_codes:
+            return _MainLoopErrorCategory.LLM_TRANSIENT
+        return _MainLoopErrorCategory.LLM_PERMANENT
+
+    # Channel / bridge disconnection
+    if isinstance(exc, (BridgeError, ConnectionError)):
+        return _MainLoopErrorCategory.CHANNEL_DISCONNECT
+
+    # Filesystem / database / disk
+    if isinstance(exc, (DatabaseError, DiskSpaceError, OSError)):
+        return _MainLoopErrorCategory.FILESYSTEM
+
+    # Configuration issues
+    if isinstance(exc, ConfigurationError):
+        return _MainLoopErrorCategory.CONFIGURATION
+
+    return _MainLoopErrorCategory.UNKNOWN
+
+
 class Application:
     """Encapsulates the full bot application lifecycle.
 
@@ -239,10 +300,34 @@ class Application:
             cli_output.info("Listening...  (Ctrl+C to stop)")
             await self.shutdown_mgr.wait_for_shutdown()
         except Exception as exc:
-            log.error("Unexpected error in main loop: %s", exc, exc_info=self._verbose)
+            category = _classify_main_loop_error(exc)
+            log.error(
+                "Unexpected error in main loop [%s]: %s",
+                category, exc, exc_info=self._verbose,
+            )
             self._session_metrics.increment_errors()
             from src.monitoring.performance import get_metrics_collector
             get_metrics_collector().track_error()
+
+            # Emit structured error event for monitoring subscribers.
+            try:
+                await get_event_bus().emit(Event(
+                    name=EVENT_ERROR_OCCURRED,
+                    data={
+                        "category": category,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                        "source": "main_loop",
+                    },
+                    source="Application.run",
+                    correlation_id=get_correlation_id(),
+                ))
+            except Exception:
+                log_noncritical(
+                    NonCriticalCategory.EVENT_EMISSION,
+                    "Failed to emit error_occurred event from main loop",
+                    logger=log,
+                )
         finally:
             await self._shutdown_cleanup()
 
@@ -327,6 +412,16 @@ class Application:
             log_backup_count=config.log_backup_count,
             verbosity=verbosity,
         )
+
+    def _swap_config(self, new_config: Config) -> None:
+        """Atomically replace the application-level config reference.
+
+        Called by :class:`ConfigChangeApplier` during hot-reload to ensure
+        ``Application._config`` is updated in sync with the applier's internal
+        reference.  A single attribute assignment guarantees no coroutine
+        observes a partially-updated config.
+        """
+        self._config = new_config
 
     # ── Pipeline Construction ───────────────────────────────────────────
 
