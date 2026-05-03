@@ -15,18 +15,19 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
-from openai.types.chat.chat_completion import Choice
-from openai.types.chat.chat_completion_message_function_tool_call import (
-    ChatCompletionMessageFunctionToolCall,
-)
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionMessageParam,
     ChatCompletionToolMessageParam,
     ChatCompletionToolParam,
+)
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_message_function_tool_call import (
+    ChatCompletionMessageFunctionToolCall,
 )
 
 from src.channels.base import SendMediaCallback
@@ -34,8 +35,8 @@ from src.constants import MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_PERSIST_LENGT
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.core.event_bus import Event, get_event_bus
 from src.core.serialization import serialize_tool_call_message
-from src.core.tool_formatter import ToolLogEntry, format_single_tool_execution
 from src.core.tool_executor import ToolExecutor
+from src.core.tool_formatter import ToolLogEntry, format_single_tool_execution
 from src.exceptions import ErrorCode, LLMError
 from src.logging import get_correlation_id
 from src.monitoring import PerformanceMetrics
@@ -58,6 +59,37 @@ log = logging.getLogger(__name__)
 
 # Type alias for streaming tool execution updates
 StreamCallback = Callable[[str], Awaitable[None]]
+
+
+@dataclass(slots=True, frozen=True)
+class ReactIterationContext:
+    """Invariant parameters shared across all ReAct loop iterations.
+
+    Replaces the former 13-invariant-parameter threading into
+    ``_react_iteration()``, mirroring ``ShutdownContext`` from
+    ``src/lifecycle.py`` and ``BotDeps`` from ``src/bot/_bot.py``.
+
+    Constructed once in ``react_loop()`` and passed to each iteration
+    so that per-iteration state (``iteration``, ``messages``, etc.) is
+    the only thing that changes between calls.
+    """
+
+    # Required — always present during a ReAct loop
+    llm: LLMProvider
+    metrics: PerformanceMetrics
+    tool_executor: ToolExecutor
+    chat_id: str
+    tools: list[ChatCompletionToolParam] | None
+    workspace_dir: Path
+    stream_response: bool
+    max_tool_iterations: int
+    max_retries: int
+    initial_delay: float
+    retryable_codes: frozenset[ErrorCode]
+
+    # Optional — may be ``None`` depending on config
+    stream_callback: StreamCallback | None = None
+    channel: BaseChannel | None = None
 
 
 async def call_llm_with_retry(
@@ -175,13 +207,26 @@ async def react_loop(
     tool_log: list[ToolLogEntry] = []
     buffered_persist: list[dict] = []
 
+    ctx = ReactIterationContext(
+        llm=llm,
+        metrics=metrics,
+        tool_executor=tool_executor,
+        chat_id=chat_id,
+        tools=tools,
+        workspace_dir=workspace_dir,
+        stream_response=stream_response,
+        max_tool_iterations=max_tool_iterations,
+        max_retries=max_retries,
+        initial_delay=initial_delay,
+        retryable_codes=retryable_codes,
+        stream_callback=stream_callback,
+        channel=channel,
+    )
+
     for iteration in range(max_tool_iterations):
         with react_loop_span(chat_id, iteration + 1, max_tool_iterations) as span:
             result = await _react_iteration(
-                iteration, max_tool_iterations, chat_id,
-                llm, metrics, messages, tools, stream_callback,
-                stream_response, max_retries, initial_delay, retryable_codes,
-                tool_executor, workspace_dir, channel, tool_log, buffered_persist, span,
+                ctx, iteration, messages, tool_log, buffered_persist, span,
             )
             if result is not None:
                 return result
@@ -202,21 +247,9 @@ async def react_loop(
 
 
 async def _react_iteration(
+    ctx: ReactIterationContext,
     iteration: int,
-    max_tool_iterations: int,
-    chat_id: str,
-    llm: LLMProvider,
-    metrics: PerformanceMetrics,
     messages: list[ChatCompletionMessageParam],
-    tools: list[ChatCompletionToolParam] | None,
-    stream_callback: StreamCallback | None,
-    stream_response: bool,
-    max_retries: int,
-    initial_delay: float,
-    retryable_codes: frozenset[ErrorCode],
-    tool_executor: ToolExecutor,
-    workspace_dir: Path,
-    channel: BaseChannel | None,
     tool_log: list[ToolLogEntry],
     buffered_persist: list[dict],
     span: Span,
@@ -239,23 +272,23 @@ async def _react_iteration(
 
     # ── LLM call (wrapped in llm_call_span by call_llm_with_retry) ──────
     response = await call_llm_with_retry(
-        llm=llm,
-        metrics=metrics,
-        chat_id=chat_id,
+        llm=ctx.llm,
+        metrics=ctx.metrics,
+        chat_id=ctx.chat_id,
         messages=messages,
-        tools=tools,
-        stream_callback=stream_callback,
-        use_streaming=stream_response,
+        tools=ctx.tools,
+        stream_callback=ctx.stream_callback,
+        use_streaming=ctx.stream_response,
         iteration=iteration,
-        max_retries=max_retries,
-        initial_delay=initial_delay,
-        retryable_codes=retryable_codes,
+        max_retries=ctx.max_retries,
+        initial_delay=ctx.initial_delay,
+        retryable_codes=ctx.retryable_codes,
     )
 
     # Circuit breaker is open — LLM unavailable
     if response is None:
-        metrics.track_react_iterations(iteration + 1)
-        metrics.track_conversation_depth(chat_id, iteration + 1)
+        ctx.metrics.track_react_iterations(iteration + 1)
+        ctx.metrics.track_conversation_depth(ctx.chat_id, iteration + 1)
         span.set_attribute("custombot.react.circuit_breaker_open", True)
         return (
             "⚠️ Service temporarily unavailable. Please try again shortly.",
@@ -273,20 +306,20 @@ async def _react_iteration(
 
     # Record LLM latency and response metadata on the iteration span
     llm_latency = time.perf_counter() - start_time
-    metrics.track_llm_latency(llm_latency)
+    ctx.metrics.track_llm_latency(llm_latency)
     span.set_attribute("custombot.react.finish_reason", finish_reason or "unknown")
     span.set_attribute("custombot.llm.latency_ms", round(llm_latency * 1000, 2))
 
     # ── Tool calls present — process and continue the loop ───────────────
     if has_tool_calls or finish_reason == "tool_calls":
         iteration_tool_log, iteration_buffered = await process_tool_calls(
-            tool_executor=tool_executor,
+            tool_executor=ctx.tool_executor,
             choice=choice,
             messages=messages,
-            chat_id=chat_id,
-            workspace_dir=workspace_dir,
-            stream_callback=stream_callback,
-            channel=channel,
+            chat_id=ctx.chat_id,
+            workspace_dir=ctx.workspace_dir,
+            stream_callback=ctx.stream_callback,
+            channel=ctx.channel,
         )
         tool_log.extend(iteration_tool_log)
         buffered_persist.extend(iteration_buffered)
@@ -295,8 +328,8 @@ async def _react_iteration(
         return None
 
     # ── Terminal response (stop / length / content_filter) ───────────────
-    metrics.track_react_iterations(iteration + 1)
-    metrics.track_conversation_depth(chat_id, iteration + 1)
+    ctx.metrics.track_react_iterations(iteration + 1)
+    ctx.metrics.track_conversation_depth(ctx.chat_id, iteration + 1)
 
     if content and content.strip():
         span.set_attribute("custombot.react.response_length", len(content))
