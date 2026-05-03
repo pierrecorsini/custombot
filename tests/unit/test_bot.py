@@ -2497,8 +2497,9 @@ class TestDeliverResponse:
 
         bot._db.check_generation.assert_called_once_with("chat_conflict", 5)
         mock_log.warning.assert_any_call(
-            "Write conflict detected for chat %s — generation changed during "
-            "processing. Re-reading latest history before persist.",
+            "Write conflict for chat %s — generation changed during "
+            "processing. Persisting with potentially stale context; "
+            "tool-log entries may interleave with a concurrent turn.",
             "chat_conflict",
             extra={"chat_id": "chat_conflict"},
         )
@@ -2569,7 +2570,7 @@ class TestDeliverResponse:
         event = mock_bus.emit.call_args[0][0]
         assert event.name == EVENT_RESPONSE_SENT
         assert event.data == {"chat_id": "chat_event", "response_length": 6}
-        assert event.source == "Bot._deliver_response"
+        assert event.source == "Bot._send_to_chat"
         assert event.correlation_id == "corr-999"
 
     async def test_full_pipeline_with_all_steps(self):

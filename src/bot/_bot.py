@@ -442,11 +442,11 @@ class Bot:
                 rate_result.limit_value,
                 extra={"chat_id": msg.chat_id, "rate_limit": rate_result.limit_value},
             )
-            if channel:
-                await channel.send_message(
-                    msg.chat_id,
-                    "⚠️ You're sending messages too quickly. Please wait a moment.",
-                )
+            await self._send_to_chat(
+                msg.chat_id,
+                "⚠️ You're sending messages too quickly. Please wait a moment.",
+                channel=channel,
+            )
             clear_correlation_id()
             return None
 
@@ -940,8 +940,7 @@ class Bot:
         3. Append tool-log summary (when verbose == "summary")
         4. Check outbound dedup — suppress duplicate delivery
         5. Persist assistant message to DB (with generation-conflict detection)
-        6. Record outbound for future dedup checks
-        7. Emit ``response_sent`` event
+        6. Record outbound dedup + emit ``response_sent`` event via ``_send_to_chat``
 
         Returns the final response text, or *None* if suppressed by outbound
         dedup.
@@ -974,24 +973,23 @@ class Bot:
 
         batch = [*buffered_persist, {"role": "assistant", "content": response_text}]
         if not self._db.check_generation(chat_id, generation):
+            # Generation conflict: another write landed while we were processing.
+            # We proceed with the append anyway — save_messages_batch appends to
+            # JSONL so no data is lost, but our tool-call context may be stale,
+            # producing interleaved tool/result lines alongside the concurrent
+            # turn's messages.  A full re-read + merge would be needed to avoid
+            # this, but the per-chat lock makes true concurrency rare.
             log.warning(
-                "Write conflict detected for chat %s — generation changed during "
-                "processing. Re-reading latest history before persist.",
+                "Write conflict for chat %s — generation changed during "
+                "processing. Persisting with potentially stale context; "
+                "tool-log entries may interleave with a concurrent turn.",
                 chat_id,
                 extra={"chat_id": chat_id},
             )
         await self._db.save_messages_batch(chat_id=chat_id, messages=batch)
 
-        # Record outbound so near-future duplicates are caught.
-        if self._dedup:
-            self._dedup.record_outbound(chat_id, response_text)
-
-        await get_event_bus().emit(Event(
-            name="response_sent",
-            data={"chat_id": chat_id, "response_length": len(response_text)},
-            source="Bot._deliver_response",
-            correlation_id=get_correlation_id(),
-        ))
+        # Record outbound dedup + emit response_sent event via shared helper.
+        await self._send_to_chat(chat_id, response_text)
 
         return response_text
 
@@ -1061,6 +1059,41 @@ class Bot:
         )
 
     # ── helpers ────────────────────────────────────────────────────────────
+
+    async def _send_to_chat(
+        self,
+        chat_id: str,
+        text: str,
+        channel: "BaseChannel | None" = None,
+    ) -> None:
+        """Send a message to a chat with dedup recording and event emission.
+
+        Centralizes the send → dedup → event pipeline so that *all* outbound
+        messages (rate-limit warnings, error replies, scheduled responses) are
+        tracked consistently.  Callers that only need persistence without an
+        actual channel send (e.g. ``_deliver_response``) can pass
+        ``channel=None``.
+        """
+        if channel:
+            await channel.send_message(chat_id, text)
+
+        if self._dedup:
+            self._dedup.record_outbound(chat_id, text)
+
+        try:
+            await get_event_bus().emit(Event(
+                name="response_sent",
+                data={"chat_id": chat_id, "response_length": len(text)},
+                source="Bot._send_to_chat",
+                correlation_id=get_correlation_id(),
+            ))
+        except Exception:
+            log_noncritical(
+                NonCriticalCategory.EVENT_EMISSION,
+                "Failed to emit response_sent event for chat %s",
+                chat_id,
+                logger=log,
+            )
 
     def _load_instruction(self, filename: str) -> str:
         """Load instruction content via the InstructionLoader."""

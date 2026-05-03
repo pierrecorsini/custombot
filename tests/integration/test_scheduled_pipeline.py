@@ -673,7 +673,7 @@ class TestScheduledWriteConflictDetection:
 
         When the generation changes during processing (e.g. a scheduled task
         writes while a user message is being handled), ``_process()`` should
-        log a warning containing 'Write conflict detected'.
+        log a warning containing 'Write conflict for'.
 
         Verifies:
           (b) The generation check logs a warning when a conflict is detected
@@ -740,10 +740,10 @@ class TestScheduledWriteConflictDetection:
         # (b) Verify warning was logged
         conflict_warnings = [
             r for r in warnings
-            if "Write conflict detected" in r.getMessage()
+            if "Write conflict for" in r.getMessage()
         ]
         assert len(conflict_warnings) >= 1, (
-            f"Expected 'Write conflict detected' warning, got: {[r.getMessage() for r in warnings]}"
+            f"Expected 'Write conflict for' warning, got: {[r.getMessage() for r in warnings]}"
         )
 
         # (c) Verify conversation history is still valid
