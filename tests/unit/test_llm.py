@@ -2076,6 +2076,63 @@ class TestTokenUsageLeaderboard:
         assert usage.get_top_chats() == []
         assert usage.total_tokens == 300
 
+    def test_leaderboard_correct_after_lru_eviction(self):
+        """After BoundedOrderedDict evicts entries, get_top_chats must return only live entries.
+
+        BoundedOrderedDict(max_size=1000, eviction="half") evicts the oldest
+        500 entries when the 1001st unique key is inserted.  The leaderboard
+        still holds stale tuples for evicted chats — get_top_chats() must
+        skip them via its ``if chat_id in self._per_chat`` guard.
+        """
+        usage = TokenUsage()
+
+        # Insert 1100 unique chats.  At entry 1001 the BoundedOrderedDict
+        # evicts the oldest 500 (chat_0000..chat_0499), leaving 600 live.
+        for i in range(1100):
+            usage.add_for_chat(f"chat_{i:04d}", prompt=i + 1, completion=0)
+
+        top = usage.get_top_chats(n=1100)
+
+        # Every returned chat_id must be live in _per_chat (no stale entries).
+        for entry in top:
+            assert entry["chat_id"] in usage._per_chat
+
+        # No duplicates.
+        chat_ids = [e["chat_id"] for e in top]
+        assert len(chat_ids) == len(set(chat_ids))
+
+        # Results sorted descending by total.
+        totals = [e["total"] for e in top]
+        assert totals == sorted(totals, reverse=True)
+
+        # Exactly 600 live entries (chat_0500..chat_1099).
+        assert len(top) == 600
+        returned_ids = set(chat_ids)
+        for i in range(500):
+            assert f"chat_{i:04d}" not in returned_ids
+        for i in range(500, 1100):
+            assert f"chat_{i:04d}" in returned_ids
+
+    def test_leaderboard_purges_stale_on_readd_after_eviction(self):
+        """Re-adding a previously evicted chat purges its stale leaderboard entries."""
+        usage = TokenUsage()
+
+        # Fill to 1001 to trigger eviction — chat_0000 is evicted.
+        for i in range(1001):
+            usage.add_for_chat(f"chat_{i:04d}", prompt=1, completion=0)
+
+        # Re-add the evicted chat with a high token count.
+        usage.add_for_chat("chat_0000", prompt=9999, completion=0)
+
+        top = usage.get_top_chats(n=1)
+        assert len(top) == 1
+        assert top[0]["chat_id"] == "chat_0000"
+        assert top[0]["total"] == 9999
+
+        # Leaderboard must not have duplicate entries for chat_0000.
+        chat_0000_entries = [e for e in usage._leaderboard if e[1] == "chat_0000"]
+        assert len(chat_0000_entries) == 1
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Health probe — health-check-driven LLM failover
