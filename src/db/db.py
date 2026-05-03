@@ -68,7 +68,7 @@ from src.db.db_utils import (
 from src.db.file_pool import FileHandlePool, ReadHandlePool
 from src.db.generations import GenerationCounter
 from src.db.message_store import MessageStore
-from src.db.migration import apply_jsonl_migrations, ensure_jsonl_schema
+from src.db.migration import apply_jsonl_migrations, batch_ensure_jsonl_schema, ensure_jsonl_schema
 from src.exceptions import DatabaseError, ErrorCode
 from src.utils import (
     JsonParseMode,
@@ -500,18 +500,20 @@ class Database:
         # Load message ID index (delegated to MessageStore)
         await self._message_store.ensure_message_index()
 
-        # Migrate existing JSONL files to current schema version
+        # Migrate existing JSONL files to current schema version (batched)
         if self._messages_dir.exists():
-            for msg_file in self._messages_dir.glob("*.jsonl"):
-                try:
-                    await asyncio.to_thread(
-                        ensure_jsonl_schema, msg_file, self._file_pool.invalidate,
-                    )
-                except Exception as exc:
+            jsonl_files = list(self._messages_dir.glob("*.jsonl"))
+            if jsonl_files:
+                errors = await asyncio.to_thread(
+                    batch_ensure_jsonl_schema,
+                    jsonl_files,
+                    self._file_pool.invalidate,
+                )
+                for filename, error_msg in errors:
                     log.warning(
                         "Failed to migrate JSONL schema for %s: %s",
-                        msg_file.name,
-                        exc,
+                        filename,
+                        error_msg,
                     )
 
         self._initialized = True

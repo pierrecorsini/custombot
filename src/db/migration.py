@@ -21,6 +21,7 @@ from src.utils import json_dumps, json_loads
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "batch_ensure_jsonl_schema",
     "ensure_jsonl_schema",
     "apply_jsonl_migrations",
 ]
@@ -75,6 +76,24 @@ def ensure_jsonl_schema(
         _JSONL_SCHEMA_VERSION,
         file_path.name,
     )
+
+
+def batch_ensure_jsonl_schema(
+    file_paths: list[Path],
+    invalidate_fn: Any = None,
+) -> list[tuple[str, str]]:
+    """Run ensure_jsonl_schema on multiple files in a single thread hop.
+
+    Returns a list of ``(filename, error_message)`` tuples for any files
+    that failed migration, so callers can log errors without raising.
+    """
+    errors: list[tuple[str, str]] = []
+    for fp in file_paths:
+        try:
+            ensure_jsonl_schema(fp, invalidate_fn)
+        except Exception as exc:  # noqa: BLE001
+            errors.append((fp.name, str(exc)))
+    return errors
 
 
 def apply_jsonl_migrations(
