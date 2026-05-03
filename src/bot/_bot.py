@@ -59,7 +59,7 @@ from src.monitoring.tracing import (
     set_correlation_id_on_span,
 )
 from src.rate_limiter import RateLimiter
-from src.routing import RoutingEngine
+from src.routing import MatchingContext, RoutingEngine
 from src.security.prompt_injection import (
     detect_injection,
     filter_response_content,
@@ -830,7 +830,8 @@ class Bot:
             ))
             return None
 
-        matched_rule, instruction_filename = self._routing.match_with_rule(msg)
+        match_ctx = MatchingContext.from_message(msg)
+        matched_rule, instruction_filename = self._routing.match_with_rule(msg, ctx=match_ctx)
         if not matched_rule:
             log.info(
                 "No routing rule matched for message from %s (fromMe=%s, toMe=%s), ignoring",

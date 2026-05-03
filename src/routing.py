@@ -594,7 +594,11 @@ class RoutingEngine:
         """
         self.load_rules()
 
-    def match(self, msg: IncomingMessage) -> Optional[str]:
+    def match(
+        self,
+        msg: IncomingMessage,
+        ctx: MatchingContext | None = None,
+    ) -> Optional[str]:
         """
         Match an incoming message against loaded routing rules.
 
@@ -603,12 +607,13 @@ class RoutingEngine:
 
         Args:
             msg: The incoming message to match.
+            ctx: Optional pre-built MatchingContext to avoid redundant allocation.
 
         Returns:
             Instruction filename (e.g., 'chat.agent.md') if a rule matches,
             otherwise None.
         """
-        _, instruction = self.match_with_rule(msg)
+        _, instruction = self.match_with_rule(msg, ctx)
         return instruction
 
     def _cache_key(self, ctx: MatchingContext) -> Tuple:
@@ -622,7 +627,9 @@ class RoutingEngine:
         return (ctx.fromMe, ctx.toMe, ctx.sender_id, ctx.chat_id, ctx.channel_type, text_hash)
 
     def match_with_rule(
-        self, msg: IncomingMessage
+        self,
+        msg: IncomingMessage,
+        ctx: MatchingContext | None = None,
     ) -> tuple[Optional["RoutingRule"], Optional[str]]:
         """
         Match an incoming message and return both the rule and instruction.
@@ -633,6 +640,10 @@ class RoutingEngine:
 
         Args:
             msg: The incoming message to match.
+            ctx: Optional pre-built MatchingContext. When provided, the internal
+                ``MatchingContext.from_message()`` call is skipped, avoiding
+                redundant object allocation when the caller already has a context
+                (e.g. from a prior preflight check).
 
         Returns:
             Tuple of (rule, instruction_filename). Both are None if no match.
@@ -643,7 +654,8 @@ class RoutingEngine:
         if not self.has_rules:
             return (None, None)
 
-        ctx = MatchingContext.from_message(msg)
+        if ctx is None:
+            ctx = MatchingContext.from_message(msg)
         cache_key = self._cache_key(ctx)
 
         # Check cache first
