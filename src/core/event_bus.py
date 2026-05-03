@@ -13,6 +13,7 @@ Built-in event names:
     - ``shutdown_started``        — graceful shutdown initiated
     - ``scheduled_task_started``  — scheduled task began processing
     - ``scheduled_task_completed`` — scheduled task finished successfully
+    - ``message_dropped``          — message dropped without processing (no routing/match)
 
 Usage::
 
@@ -66,6 +67,7 @@ EVENT_ERROR_OCCURRED: str = "error_occurred"
 EVENT_SHUTDOWN_STARTED: str = "shutdown_started"
 EVENT_SCHEDULED_TASK_STARTED: str = "scheduled_task_started"
 EVENT_SCHEDULED_TASK_COMPLETED: str = "scheduled_task_completed"
+EVENT_MESSAGE_DROPPED: str = "message_dropped"
 
 KNOWN_EVENTS: frozenset[str] = frozenset(
     {
@@ -76,6 +78,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         EVENT_SHUTDOWN_STARTED,
         EVENT_SCHEDULED_TASK_STARTED,
         EVENT_SCHEDULED_TASK_COMPLETED,
+        EVENT_MESSAGE_DROPPED,
     }
 )
 
@@ -295,4 +298,5 @@ __all__ = [
     "EVENT_SHUTDOWN_STARTED",
     "EVENT_SCHEDULED_TASK_STARTED",
     "EVENT_SCHEDULED_TASK_COMPLETED",
+    "EVENT_MESSAGE_DROPPED",
 ]

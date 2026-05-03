@@ -794,6 +794,12 @@ class Bot:
         """Match routing rule, load instruction, and assemble LLM messages."""
         if not self._routing:
             log.warning("No routing engine configured, skipping message")
+            await get_event_bus().emit(Event(
+                name="message_dropped",
+                data={"chat_id": msg.chat_id, "sender_id": msg.sender_id, "reason": "no_routing"},
+                source="Bot._build_turn_context",
+                correlation_id=get_correlation_id(),
+            ))
             return None
 
         if not self._routing.has_rules:
@@ -804,6 +810,12 @@ class Bot:
                 msg.sender_id,
                 msg.chat_id,
             )
+            await get_event_bus().emit(Event(
+                name="message_dropped",
+                data={"chat_id": msg.chat_id, "sender_id": msg.sender_id, "reason": "no_rules"},
+                source="Bot._build_turn_context",
+                correlation_id=get_correlation_id(),
+            ))
             return None
 
         matched_rule, instruction_filename = self._routing.match_with_rule(msg)
@@ -814,6 +826,12 @@ class Bot:
                 msg.fromMe,
                 msg.toMe,
             )
+            await get_event_bus().emit(Event(
+                name="message_dropped",
+                data={"chat_id": msg.chat_id, "sender_id": msg.sender_id, "reason": "no_match"},
+                source="Bot._build_turn_context",
+                correlation_id=get_correlation_id(),
+            ))
             return None
 
         _routing_show_errors_var.set(matched_rule.showErrors)
