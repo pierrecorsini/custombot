@@ -2135,6 +2135,171 @@ class TestTokenUsageLeaderboard:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TokenUsage concurrent access (ThreadLock guard validation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTokenUsageConcurrentAccess:
+    """Verify add_for_chat() is safe under concurrent multi-threaded access.
+
+    Spawns multiple threads that simultaneously call add_for_chat() on a
+    shared TokenUsage instance, verifying that total_tokens equals the sum
+    of all individual increments and that no entries are lost or corrupted.
+    """
+
+    def test_concurrent_add_for_chat_global_counters(self):
+        """Global counters must be exact after concurrent multi-threaded writes."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        usage = TokenUsage()
+        num_workers = 20
+        calls_per_worker = 100
+        prompt_per_call = 3
+        completion_per_call = 7
+
+        def worker():
+            for _ in range(calls_per_worker):
+                usage.add_for_chat("shared_chat", prompt_per_call, completion_per_call)
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = [pool.submit(worker) for _ in range(num_workers)]
+            for f in futures:
+                f.result()
+
+        total_calls = num_workers * calls_per_worker
+        expected_prompt = total_calls * prompt_per_call
+        expected_completion = total_calls * completion_per_call
+        expected_total = expected_prompt + expected_completion
+
+        assert usage.prompt_tokens == expected_prompt
+        assert usage.completion_tokens == expected_completion
+        assert usage.total_tokens == expected_total
+        assert usage.request_count == total_calls
+
+    def test_concurrent_add_for_chat_per_chat_no_loss(self):
+        """Per-chat entries must reflect all increments with no data loss."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        usage = TokenUsage()
+        chat_ids = [f"chat_{i:03d}" for i in range(10)]
+        num_workers = 20
+        calls_per_worker = 50
+
+        def worker():
+            for j in range(calls_per_worker):
+                chat_id = chat_ids[j % len(chat_ids)]
+                usage.add_for_chat(chat_id, prompt=1, completion=1)
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = [pool.submit(worker) for _ in range(num_workers)]
+            for f in futures:
+                f.result()
+
+        total_calls = num_workers * calls_per_worker
+        assert usage.request_count == total_calls
+        assert usage.total_tokens == total_calls * 2  # prompt=1 + completion=1
+
+        # Every chat_id should have received its fair share of updates.
+        per_chat_calls = total_calls // len(chat_ids)
+        for chat_id in chat_ids:
+            assert chat_id in usage._per_chat
+            assert usage._per_chat[chat_id]["total"] == per_chat_calls * 2
+
+    def test_concurrent_add_for_chat_leaderboard_consistency(self):
+        """Leaderboard must be consistent after concurrent updates."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        usage = TokenUsage()
+        num_workers = 15
+        calls_per_worker = 40
+
+        def worker(worker_id):
+            chat_id = f"w_{worker_id:03d}"
+            for i in range(calls_per_worker):
+                usage.add_for_chat(chat_id, prompt=i + 1, completion=0)
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = [pool.submit(worker, i) for i in range(num_workers)]
+            for f in futures:
+                f.result()
+
+        top = usage.get_top_chats(n=num_workers)
+        assert len(top) == num_workers
+
+        # No duplicate chat_ids in results.
+        returned_ids = [e["chat_id"] for e in top]
+        assert len(returned_ids) == len(set(returned_ids))
+
+        # Results must be sorted descending by total.
+        totals = [e["total"] for e in top]
+        assert totals == sorted(totals, reverse=True)
+
+        # Each worker made calls_per_worker calls with prompt = 1+2+...+calls_per_worker.
+        expected_per_worker = sum(range(1, calls_per_worker + 1))
+        assert usage.total_tokens == expected_per_worker * num_workers
+
+    def test_concurrent_mixed_add_and_add_for_chat(self):
+        """Mixed add() and add_for_chat() must both be counted correctly."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        usage = TokenUsage()
+        num_workers = 10
+        calls_per_worker = 100
+
+        def add_only_worker():
+            for _ in range(calls_per_worker):
+                usage.add(prompt=2, completion=3)
+
+        def add_for_chat_worker():
+            for _ in range(calls_per_worker):
+                usage.add_for_chat("mixed_chat", prompt=4, completion=6)
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = []
+            for i in range(num_workers):
+                if i % 2 == 0:
+                    futures.append(pool.submit(add_only_worker))
+                else:
+                    futures.append(pool.submit(add_for_chat_worker))
+            for f in futures:
+                f.result()
+
+        add_workers = num_workers // 2
+        chat_workers = num_workers - add_workers
+        total_calls = num_workers * calls_per_worker
+
+        expected_prompt = add_workers * calls_per_worker * 2 + chat_workers * calls_per_worker * 4
+        expected_completion = add_workers * calls_per_worker * 3 + chat_workers * calls_per_worker * 6
+
+        assert usage.request_count == total_calls
+        assert usage.prompt_tokens == expected_prompt
+        assert usage.completion_tokens == expected_completion
+        assert usage.total_tokens == expected_prompt + expected_completion
+
+    def test_concurrent_high_contention_single_chat(self):
+        """High-contention scenario: many threads updating the same chat rapidly."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        usage = TokenUsage()
+        num_workers = 50
+        calls_per_worker = 200
+
+        def worker():
+            for _ in range(calls_per_worker):
+                usage.add_for_chat("hot_chat", prompt=1, completion=1)
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = [pool.submit(worker) for _ in range(num_workers)]
+            for f in futures:
+                f.result()
+
+        total_calls = num_workers * calls_per_worker
+        assert usage.request_count == total_calls
+        assert usage.total_tokens == total_calls * 2
+        assert usage._per_chat["hot_chat"]["total"] == total_calls * 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Health probe — health-check-driven LLM failover
 # ─────────────────────────────────────────────────────────────────────────────
 
