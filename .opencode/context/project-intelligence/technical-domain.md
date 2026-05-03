@@ -1,9 +1,9 @@
-<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.6 | Updated: 2026-05-03 -->
+<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.8 | Updated: 2026-05-04 -->
 
 # Technical Domain
 
 **Purpose**: Tech stack, architecture, and development patterns for custombot — a lightweight WhatsApp AI assistant.
-**Last Updated**: 2026-05-03
+**Last Updated**: 2026-05-04
 
 ## Quick Reference
 **Update Triggers**: Tech stack changes | New patterns | Architecture decisions
@@ -17,9 +17,10 @@
 | Runtime | asyncio | stdlib | Event-driven message processing |
 | LLM Client | openai | ~=2.29 | Supports OpenAI, Anthropic proxy, Ollama, OpenRouter, Groq |
 | Channel | neonize | 0.3.17.post0 | Native WhatsApp Web client (exact-pinned, QR pairing, session persistence) |
+| HTTP Client | httpx | ~=0.28 | Async HTTP for LLM connections, embedding, logging |
+| HTTP Server | aiohttp | ~=3.13 | Health server (Prometheus + JSON endpoints) |
 | CLI | Click | ~=8.3 | Command groups, options, help text |
 | Display | Rich | ~=14.3 | Terminal formatting, spinners, progress bars |
-| HTTP | aiohttp | ~=3.13 | Async HTTP client for web search and external APIs |
 | Search | duckduckgo-search | ~=8.1 | Web search integration for skills |
 | Database | SQLite | stdlib | 3 databases: main (.data/), vector_memory, projects; connection pooling via sqlite_pool.py |
 | Vector Search | sqlite-vec | 0.1.9 | Semantic memory with cosine similarity; detects embedding model changes across restarts |
@@ -27,11 +28,10 @@
 | Hashing | xxhash | ~=3.5 | Deduplication hash computation; outbound dedup in scheduler |
 | Logging | stdlib + Rich + OTel | 1.30 | Structured logs, correlation IDs, OpenTelemetry spans; http_logging, llm_logging, logging_config |
 | Config | JSON + dataclasses + watchdog | >=4.0 | Hot-reload via atomic config swap pattern |
-| Health | HTTP (stdlib) | — | Prometheus + JSON endpoints, configurable host (default localhost), rate-limited |
 | Process | psutil | ~=6.0 | System resource monitoring |
-| Linting | Ruff | >=0.15 | Combined linter + formatter (replaces flake8, black, isort) + PL ruleset non-blocking |
+| Linting | Ruff | >=0.15 | Combined linter + formatter (E/W/F/I/UP/B/SIM/TCH/PL rulesets); PL non-blocking |
 | Typing | mypy | >=1.20 | Gradual strict mode (`disallow_untyped_defs = false`) |
-| Testing | pytest + hypothesis | >=9.0 | Unit + property-based + benchmarks (73 test files); dev extras in pyproject.toml |
+| Testing | pytest + hypothesis | >=9.0 | Unit + property-based + benchmarks (75 test+bench files); dev extras in pyproject.toml |
 
 ---
 
@@ -39,9 +39,7 @@
 
 ### Async LLM Client
 ```python
-# OpenAI-compatible provider with circuit breaker + retry
 from src.llm_provider import LLMProvider
-
 provider = LLMProvider(config.llm)
 response: str = await provider.chat(messages=[...], tools=[...])
 # Supports streaming, tool calls, warmup probes, health checks
@@ -51,38 +49,10 @@ response: str = await provider.chat(messages=[...], tools=[...])
 ### Config Hot-Reload (Atomic Swap Pattern)
 ```python
 # Bot, LLMProvider, ContextAssembler expose public update_config() methods
-# ConfigChangeApplier swaps the entire Config reference atomically
-# (not field-by-field mutation) so concurrent coroutines never see
-# a partially-updated config under the GIL.
-bot.update_config(new_bot_cfg)              # validated, logged
-provider.update_config(new_llm_cfg)         # temperature bounds, non-empty model
-context_assembler.update_config(new_cfg)    # propagates to context assembly
-```
-
-### SQLite Connection Pooling
-```python
-# Reusable pool for SQLite; thread-safe lifecycle. Used by db.py, message_store.py, vector_memory
-from src.db.sqlite_pool import ...
-```
-
-### Bounded Concurrency
-```python
-# App._on_message() → asyncio.Semaphore | DedupService → BoundedOrderedDict(ttl=...)
-# TaskScheduler → _tasks_dirty flag | Memory → known chat dir cache to skip os calls
-```
-
-### Resilience & Error Categorization
-```python
-# _classify_main_loop_error() → LLM_TRANSIENT, CHANNEL_DISCONNECT, etc.
-# EventBus emits EVENT_ERROR_OCCURRED | EVENT_MESSAGE_DROPPED (no routing match)
-# Routing retains previous rules on zero-reload
-# React loop: finish_reason='length' → truncation warning | Context vars reset in finally
-```
-
-### Health Server Middleware Stack
-```python
-# Layered (cheapest first): method → path (HEALTH_ALLOWED_PATHS) → size → rate limit → HMAC
-# SecretRedactingFilter scrubs HMAC tokens from all log output
+# ConfigChangeApplier swaps entire Config reference atomically (not field-by-field)
+bot.update_config(new_bot_cfg)
+provider.update_config(new_llm_cfg)
+context_assembler.update_config(new_cfg)
 ```
 
 ### Structured Dependency Injection
@@ -95,8 +65,20 @@ class BotComponents:
 class BotDeps:
     config: BotConfig; db: Database; llm: LLMProvider
     memory: MemoryProtocol; skills: SkillRegistry
-    routing: RoutingEngine | None = None      # Optional — Bot supplies fallbacks
+    routing: RoutingEngine | None = None
     dedup: DeduplicationService | None = None
+
+@dataclass(slots=True, frozen=True)  # ReAct loop invariants (replaces 13-param threading)
+class ReactIterationContext:
+    llm: LLMProvider; metrics: PerformanceMetrics; tool_executor: ToolExecutor
+    chat_id: str; tools: list[...] | None; workspace_dir: Path
+```
+
+### Channel Abstraction Layer
+```python
+from src.channels import BaseChannel, IncomingMessage, CommandLineChannel
+# BaseChannel ABC: connect(), disconnect(), send_text(), send_media()
+# Bot depends on BaseChannel, never on a specific transport
 ```
 
 ### Module Structure (every file follows this)
@@ -127,7 +109,6 @@ raise LLMError("API timeout", provider="openai", model="gpt-4")
 | Functions | snake_case | `build_bot()`, `perform_shutdown()` |
 | Constants | UPPER_SNAKE_CASE | `WORKSPACE_DIR`, `MEMORY_FILENAME` |
 | Private | Leading underscore | `_run_bot()`, `_setup_logging()` |
-| Directories | snake_case | `vector_memory/`, `message_queue.py` |
 | Tests | test_ prefix | `test_routing.py`, `test_config.py` |
 
 ---
@@ -139,60 +120,65 @@ raise LLMError("API timeout", provider="openai", model="gpt-4")
 - `TYPE_CHECKING` guard for type-only imports (avoid circular deps)
 - `__all__` exports in all public modules (100% coverage)
 - Frozen dataclasses for immutable data; `slots=True` for mutable state
-- Structured dependency injection: `BotDeps`, `ShutdownContext`, `BuilderContext` replace multi-param constructors
-- Protocol classes for dependency injection boundaries
+- Structured dependency injection: `BotDeps`, `ShutdownContext`, `ReactIterationContext`, `BuilderContext` replace multi-param constructors
+- Protocol classes for DI boundaries: `MemoryProtocol`, `Stoppable`, `Closeable`, `BackgroundService`, `LockProvider` (14+ in `src/utils/protocols.py`)
+- Channel abstraction: `BaseChannel` ABC with `CommandLineChannel` and `NeonizeWhatsAppChannel` implementations
 - Step orchestrator pattern for multi-phase startup/build (declarative `ComponentSpec`)
-- Config hot-reload uses atomic reference swap (single assignment, not field-by-field mutation; `Application._swap_config()`)
-- Connection pooling abstraction for SQLite (sqlite_pool.py, file_pool.py)
-- Health server: layered middleware stack (path → method → size → rate limit → HMAC auth) with `HEALTH_ALLOWED_PATHS` frozenset
-- Offload blocking I/O to threads via `asyncio.to_thread()` (e.g., Memory log recovery)
-- Snapshot mutable state before use (scheduler snapshots task dict fields)
+- Config hot-reload uses atomic reference swap (`Application._swap_config()`)
+- Connection pooling for SQLite (sqlite_pool.py, file_pool.py)
+- Health server: layered middleware (path → method → size → rate limit → HMAC) with `HEALTH_ALLOWED_PATHS` frozenset
+- Offload blocking I/O via `asyncio.to_thread()`; snapshot mutable state before use
 - TOCTOU-safe file operations with `os.O_EXCL` atomic open
 - Double quotes for strings (ruff format), line length 100
 - Docstrings: triple-double-quoted, Google-style Args/Returns
-- Dev dependencies consolidated in pyproject.toml `[dev]` extras (no separate requirements-dev.txt)
+- Dev dependencies in pyproject.toml `[dev]` extras
 
 ---
 
 ## Security Requirements
 
-- Path validation: all file access sandboxed to workspace directory (`is_path_in_workspace`)
+- Path validation: all file access sandboxed to workspace (`is_path_in_workspace`)
 - Instruction loader: `_validate_path()` rejects directory components and resolved-path escapes
 - URL sanitization: strip credentials from logged URLs (`sanitize_url_for_logging`)
-- Prompt injection detection: classify and reject adversarial inputs; strip inline `(?i)` flags from combined regex
+- Prompt injection detection: classify and reject adversarial inputs
 - Secret redaction: `Config.__repr__()` uses `_redact_secrets()` to mask API keys
 - Config file permission check: warn if config.json readable by group/others (Unix)
-- Input validation: `IncomingMessage` fields validated before use; `ConfigurationError` raised on invalid config
+- Input validation: `IncomingMessage` fields validated before use
 - Defense-in-depth: 6-module security subsystem (`src/security/`)
 - Supply-chain: Dockerfile pins base image by digest, neonize/sqlite-vec exact-pinned
-- Health server: binds to configurable host (default 127.0.0.1 only), rate-limited endpoints
-- TOCTOU-safe workspace seeding: uses `os.O_EXCL` atomic open for file creation
+- Health server: binds to configurable host (default 127.0.0.1), rate-limited
+- TOCTOU-safe workspace seeding with `os.O_EXCL`; symlink rejection in routing
 
 ---
 
 ## 📂 Codebase References
 
 **Entry Point**: `main.py` — Click CLI: `start`, `options`, `diagnose` (+ `--health-host`)
-**App Lifecycle**: `src/app.py` — `Application` + `AppPhase` state machine + error categorization + config swap
-**Builder**: `src/builder.py` — `build_bot()` → `BotComponents` (public API)
-**Bot Core**: `src/bot/` — `_bot.py` (Bot+BotDeps, handle_message, outbound dedup), `crash_recovery.py`, `preflight.py`, `react_loop.py` (truncation handling)
+**App**: `src/app.py` — `Application` + `AppPhase` state machine + error categorization + config swap
+**Builder**: `src/builder.py` — `build_bot()` → `BotComponents`
+**Bot**: `src/bot/` — `_bot.py` (Bot+BotDeps, outbound dedup), `crash_recovery.py`, `preflight.py`, `react_loop.py` (ReactIterationContext)
+**Channels**: `src/channels/` — `base.py` (BaseChannel ABC), `cli.py`, `neonize_backend.py`, `stealth.py`, `validation.py`, `whatsapp.py`
 **Config**: `src/config/` — Schema defs, loader, validation, `config_watcher.py` (atomic swap, 5 modules)
-**LLM**: `src/llm.py`, `src/llm_provider.py`, `src/llm_error_classifier.py` — Async client + circuit breaker + error classification
-**Memory**: `src/memory.py` — Per-chat `MEMORY.md` files + chat dir caching + async recovery via to_thread
-**Routing**: `src/routing.py` — YAML frontmatter rules + retry on transient parse failures + zero-rule graceful degradation
-**Message Queue**: `src/message_queue.py`, `src/message_queue_persistence.py` — Swap-buffers flush pattern, streaming JSONL persistence
-**Scheduler**: `src/scheduler.py` — Cached time-to-next-due via _tasks_dirty flag; outbound dedup
+**LLM**: `src/llm.py`, `src/llm_provider.py`, `src/llm_error_classifier.py` — httpx-based async client + circuit breaker
+**Memory**: `src/memory.py` — Per-chat MEMORY.md + chat dir caching + async recovery
+**Routing**: `src/routing.py` — YAML frontmatter rules, MatchingContext pre-computation, zero-rule graceful degradation
+**Message Queue**: `src/message_queue.py`, `src/message_queue_persistence.py` — Swap-buffers flush, streaming JSONL
+**Scheduler**: `src/scheduler.py` — Cached time-to-next-due, outbound dedup
 **Skills**: `src/skills/` — `BaseSkill` (Python) + prompt-based skills (Markdown)
 **Security**: `src/security/` — Path validator, prompt injection, URL sanitizer, audit, signing (6 modules)
-**Health**: `src/health/` — server.py, middleware.py (path/method/size validation, HMAC, rate limiting, secret redaction), prometheus.py, checks.py, models.py (6 modules, configurable host)
+**Health**: `src/health/` — server.py, middleware.py (path/method/size/HMAC/rate-limit), prometheus.py, checks.py (6 modules)
 **DB**: `src/db/` — sqlite_pool.py, file_pool.py, migration, message_store, generations (12 modules)
+**Utils**: `src/utils/` — 14+ Protocol classes, locking, circuit_breaker, dag, singleton, retry, timing, type_guards (18 modules)
+**Constants**: `src/constants/` — Domain-organized constants (13 sub-modules: cache, db, health, llm, memory, messaging, network, routing, scheduler, security, shutdown, skills, workspace)
+**Project**: `src/project/` — store, graph, recall, dates (project knowledge subsystem)
 **Monitoring**: `src/monitoring/` — Performance, memory, tracing, workspace monitor
 **Logging**: `src/logging/` — http_logging, llm_logging (redaction), logging_config (3 modules)
-**Other**: `src/workspace_integrity.py`, `src/core/startup.py`, `src/rate_limiter.py`, `src/lifecycle.py`, `src/shutdown.py`
-**Tests**: `tests/` — 73 test files; dev extras in pyproject.toml
-**Build**: `pyproject.toml`, `Makefile` (pip-compile), `requirements.txt`, `.pre-commit-config.yaml` (ruff), Dockerfile
+**UI**: `src/ui/` — cli_output.py, options_tui.py (optional questionary dependency)
+**Templates**: `src/templates/` — Instruction templates
+**Tests**: `tests/` — 75 test+bench files; dev extras in pyproject.toml
+**Build**: `pyproject.toml`, `Makefile`, `requirements.txt`, `.pre-commit-config.yaml` (ruff), Dockerfile
 
 ## Related Files
-- Project Context: `.opencode/context/project/navigation.md`
+- Navigation: `.opencode/context/project/navigation.md`
 - Improvement Plan: `PLAN.md`
-- Architecture Concepts: `.opencode/context/project/concepts/architecture-overview.md`
+- Architecture: `.opencode/context/project/concepts/architecture-overview.md`

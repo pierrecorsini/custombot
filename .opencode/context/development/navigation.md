@@ -94,6 +94,7 @@ development/
 |-------|------|
 | **typing.Protocol** | `lookup/typing-protocol.md` |
 | **Protocol Patterns** | `lookup/typing-protocol-patterns.md` |
+| **Ruff TC Rules** | `lookup/ruff-tc-rules.md` |
 
 ---
 

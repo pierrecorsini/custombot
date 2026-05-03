@@ -1,0 +1,16 @@
+{
+  "version": "1.1",
+  "last_updated": "2026-05-04T00:00:00Z",
+  "libraries": {},
+  "harvest_log": [
+    {
+      "date": "2026-05-04",
+      "action": "harvested",
+      "source": ".tmp/external-context/ruff/flake8-type-checking-tch.md",
+      "target": ".opencode/context/development/lookup/ruff-tc-rules.md",
+      "original_lines": 314,
+      "compacted_lines": 65,
+      "note": "Compacted to MVI format, archived to .tmp/archive/harvested/2026-05-04/"
+    }
+  ]
+}
