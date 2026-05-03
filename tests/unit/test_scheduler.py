@@ -1248,6 +1248,83 @@ class TestAdaptiveSleep:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class TestTimeToNextDueCache:
+    """Tests for _tasks_dirty caching of _time_to_next_due()."""
+
+    def test_cache_hit_returns_same_value(self, scheduler: TaskScheduler):
+        """Consecutive calls with no mutations return cached value."""
+        assert scheduler._tasks_dirty is True
+        # No tasks → None
+        result1 = scheduler._time_to_next_due()
+        assert result1 is None
+        assert scheduler._tasks_dirty is False
+        # Second call hits cache
+        result2 = scheduler._time_to_next_due()
+        assert result2 is None
+
+    @pytest.mark.asyncio
+    async def test_add_task_invalidates_cache(self, scheduler: TaskScheduler):
+        """Adding a task sets _tasks_dirty and recomputes."""
+        # Prime cache as empty
+        assert scheduler._time_to_next_due() is None
+        assert scheduler._tasks_dirty is False
+
+        await scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+        assert scheduler._tasks_dirty is True
+        result = scheduler._time_to_next_due()
+        assert result is not None
+        assert result == 0.0
+
+    @pytest.mark.asyncio
+    async def test_remove_task_invalidates_cache(self, scheduler: TaskScheduler):
+        """Removing a task sets _tasks_dirty and recomputes."""
+        await scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=60))
+        # Prime cache
+        scheduler._time_to_next_due()
+        assert scheduler._tasks_dirty is False
+
+        await scheduler.remove_task_async("chat1", "task_001")
+        assert scheduler._tasks_dirty is True
+        assert scheduler._time_to_next_due() is None
+
+    @pytest.mark.asyncio
+    async def test_execute_task_invalidates_cache(self, scheduler: TaskScheduler):
+        """Executing a task sets _tasks_dirty so next computation is fresh."""
+        task_dict = _make_task(schedule_type="interval", seconds=600)
+        await scheduler.add_task("chat1", task_dict)
+        # Prime cache
+        scheduler._time_to_next_due()
+        assert scheduler._tasks_dirty is False
+
+        await scheduler._execute_task("chat1", task_dict)
+        assert scheduler._tasks_dirty is True
+
+    @pytest.mark.asyncio
+    async def test_load_invalidates_cache(self, scheduler: TaskScheduler):
+        """Loading tasks from disk sets _tasks_dirty."""
+        # Prime cache as empty
+        scheduler._time_to_next_due()
+        assert scheduler._tasks_dirty is False
+
+        # Write a tasks file to disk
+        tasks_path = _tasks_file(scheduler._workspace, "chat1")
+        tasks_path.parent.mkdir(parents=True, exist_ok=True)
+        tasks_path.write_text(json.dumps([{
+            "task_id": "task_001",
+            "prompt": "loaded task",
+            "schedule": {"type": "interval", "seconds": 60},
+            "enabled": True,
+        }]))
+
+        await scheduler._load("chat1")
+        assert scheduler._tasks_dirty is True
+        result = scheduler._time_to_next_due()
+        assert result is not None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class TestIntegration:
     """End-to-end scenarios combining multiple operations."""
 

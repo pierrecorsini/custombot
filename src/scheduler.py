@@ -102,6 +102,9 @@ class TaskScheduler(BaseBackgroundService):
         self._consecutive_failures: int = 0
         # Unified dedup service — set via set_dedup_service()
         self._dedup: DeduplicationService | None = None
+        # Cache for _time_to_next_due() — invalidated when tasks change
+        self._tasks_dirty: bool = True
+        self._cached_time_to_next: float | None = None
 
     def set_dedup_service(self, dedup: DeduplicationService) -> None:
         """Set the unified dedup service for outbound message dedup."""
@@ -212,6 +215,7 @@ class TaskScheduler(BaseBackgroundService):
         task["last_result"] = None
         task["enabled"] = True
         tasks.append(task)
+        self._tasks_dirty = True
         return task_id
 
     async def add_task(self, chat_id: str, task: dict[str, Any]) -> str:
@@ -233,6 +237,7 @@ class TaskScheduler(BaseBackgroundService):
         before = len(tasks)
         self._tasks[chat_id] = [t for t in tasks if t["task_id"] != task_id]
         if len(self._tasks[chat_id]) < before:
+            self._tasks_dirty = True
             await self._persist(chat_id)
             return True
         return False
@@ -334,6 +339,7 @@ class TaskScheduler(BaseBackgroundService):
                         )
                         return
                 self._tasks[chat_id] = json.loads(raw)
+                self._tasks_dirty = True
         except (JSONDecodeError, OSError) as exc:
             log.error("Failed to load scheduler tasks for %s: %s", chat_id, exc)
 
@@ -551,6 +557,7 @@ class TaskScheduler(BaseBackgroundService):
             task["last_result"] = (result or "")[:2000]
             task["last_run"] = now_dt.isoformat()
             task["last_run_epoch"] = now_dt.timestamp()
+            self._tasks_dirty = True
 
             # Deliver result — transport layer handles reconnection
             if not result:
@@ -645,10 +652,16 @@ class TaskScheduler(BaseBackgroundService):
 
         Uses a heap to find the minimum time-to-due in O(n) build +
         O(1) peek instead of the previous O(n) full scan approach.
-        The heap is rebuilt each call (lightweight for typical task
-        counts < 100).
+        Result is cached and reused until tasks are mutated (via
+        ``_tasks_dirty`` flag), reducing heap rebuilds from ~2880/day
+        to only when task state actually changes.
         """
+        if not self._tasks_dirty:
+            return self._cached_time_to_next
+
         if not self._tasks:
+            self._cached_time_to_next = None
+            self._tasks_dirty = False
             return None
 
         now = _now()
@@ -708,9 +721,13 @@ class TaskScheduler(BaseBackgroundService):
                 candidates.append(candidate)
 
         if not candidates:
+            self._cached_time_to_next = None
+            self._tasks_dirty = False
             return None
         heapq.heapify(candidates)
-        return candidates[0]
+        self._cached_time_to_next = candidates[0]
+        self._tasks_dirty = False
+        return self._cached_time_to_next
 
     def _compute_adaptive_sleep(self) -> float:
         """Return the sleep duration for the next loop iteration.
