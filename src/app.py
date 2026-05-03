@@ -549,8 +549,18 @@ class Application:
                 state.config_watcher.stop(), timeout=CLEANUP_STEP_TIMEOUT
             )
         except asyncio.TimeoutError:
-            log.warning(
-                "Config watcher stop timed out after %.1fs", CLEANUP_STEP_TIMEOUT
+            log_noncritical(
+                NonCriticalCategory.SHUTDOWN,
+                "Config watcher stop timed out after %.1fs",
+                CLEANUP_STEP_TIMEOUT,
+                logger=log,
+                level=logging.WARNING,
+                exc_info=False,
+                extra={
+                    "shutdown_step": "config_watcher_stop",
+                    "timeout_seconds": CLEANUP_STEP_TIMEOUT,
+                    "affected_components": ["config_watcher"],
+                },
             )
         except Exception as exc:
             log.warning("Error stopping config watcher: %s", exc)
@@ -561,8 +571,18 @@ class Application:
                 state.workspace_monitor.stop(), timeout=CLEANUP_STEP_TIMEOUT
             )
         except asyncio.TimeoutError:
-            log.warning(
-                "Workspace monitor stop timed out after %.1fs", CLEANUP_STEP_TIMEOUT
+            log_noncritical(
+                NonCriticalCategory.SHUTDOWN,
+                "Workspace monitor stop timed out after %.1fs",
+                CLEANUP_STEP_TIMEOUT,
+                logger=log,
+                level=logging.WARNING,
+                exc_info=False,
+                extra={
+                    "shutdown_step": "workspace_monitor_stop",
+                    "timeout_seconds": CLEANUP_STEP_TIMEOUT,
+                    "affected_components": ["workspace_monitor"],
+                },
             )
         except Exception as exc:
             log.warning("Error stopping workspace monitor: %s", exc)
@@ -589,8 +609,22 @@ class Application:
                 timeout=CLEANUP_STEP_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            log.warning(
-                "Perform shutdown timed out after %.1fs", CLEANUP_STEP_TIMEOUT
+            log_noncritical(
+                NonCriticalCategory.SHUTDOWN,
+                "Perform shutdown timed out after %.1fs",
+                CLEANUP_STEP_TIMEOUT,
+                logger=log,
+                level=logging.WARNING,
+                exc_info=False,
+                extra={
+                    "shutdown_step": "perform_shutdown",
+                    "timeout_seconds": CLEANUP_STEP_TIMEOUT,
+                    "affected_components": [
+                        "channel", "scheduler", "health_server", "db",
+                        "vector_memory", "project_store", "message_queue",
+                        "llm", "bot", "executor", "routing_engine",
+                    ],
+                },
             )
 
         self._transition(AppPhase.STOPPED)

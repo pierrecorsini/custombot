@@ -657,11 +657,19 @@ class TestShutdownCleanup:
         with (
             patch("src.app.CLEANUP_STEP_TIMEOUT", 0.05),
             patch("src.app.perform_shutdown", new_callable=AsyncMock) as mock_ps,
+            patch("src.app.log_noncritical") as mock_log_nc,
         ):
             await app._shutdown_cleanup()
 
         # perform_shutdown still called despite config watcher timeout
         mock_ps.assert_awaited_once()
+
+        # Verify structured shutdown log emitted
+        mock_log_nc.assert_called_once()
+        call_kwargs = mock_log_nc.call_args
+        assert call_kwargs[1]["extra"]["shutdown_step"] == "config_watcher_stop"
+        assert call_kwargs[1]["extra"]["timeout_seconds"] == 0.05
+        assert call_kwargs[1]["extra"]["affected_components"] == ["config_watcher"]
 
     async def test_workspace_monitor_timeout_does_not_block_cleanup(
         self, test_config: Config
@@ -700,10 +708,18 @@ class TestShutdownCleanup:
         with (
             patch("src.app.CLEANUP_STEP_TIMEOUT", 0.05),
             patch("src.app.perform_shutdown", new_callable=AsyncMock) as mock_ps,
+            patch("src.app.log_noncritical") as mock_log_nc,
         ):
             await app._shutdown_cleanup()
 
         mock_ps.assert_awaited_once()
+
+        # Verify structured shutdown log emitted
+        mock_log_nc.assert_called_once()
+        call_kwargs = mock_log_nc.call_args
+        assert call_kwargs[1]["extra"]["shutdown_step"] == "workspace_monitor_stop"
+        assert call_kwargs[1]["extra"]["timeout_seconds"] == 0.05
+        assert call_kwargs[1]["extra"]["affected_components"] == ["workspace_monitor"]
 
     async def test_perform_shutdown_timeout_still_transitions_to_stopped(
         self, test_config: Config
@@ -741,11 +757,21 @@ class TestShutdownCleanup:
         with (
             patch("src.app.CLEANUP_STEP_TIMEOUT", 0.05),
             patch("src.app.perform_shutdown", side_effect=_hang_forever) as mock_ps,
+            patch("src.app.log_noncritical") as mock_log_nc,
         ):
             await app._shutdown_cleanup()
 
         mock_ps.assert_awaited_once()
         assert app._phase == AppPhase.STOPPED
+
+        # Verify structured shutdown log emitted
+        mock_log_nc.assert_called_once()
+        call_kwargs = mock_log_nc.call_args
+        assert call_kwargs[1]["extra"]["shutdown_step"] == "perform_shutdown"
+        assert call_kwargs[1]["extra"]["timeout_seconds"] == 0.05
+        assert "channel" in call_kwargs[1]["extra"]["affected_components"]
+        assert "db" in call_kwargs[1]["extra"]["affected_components"]
+        assert "bot" in call_kwargs[1]["extra"]["affected_components"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
