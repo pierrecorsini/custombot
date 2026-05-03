@@ -450,6 +450,7 @@ class Application:
             bot=components.bot,
             channel=channel,
             verbose=self._verbose,
+            dedup=components.dedup,
         )
         return build_pipeline_from_config(
             middleware_order=mw_cfg.middleware_order,
@@ -583,6 +584,7 @@ class Application:
                     verbose=self._verbose,
                     bot=state.components.bot,
                     executor=state.executor,
+                    routing_engine=state.components.routing_engine,
                 )),
                 timeout=CLEANUP_STEP_TIMEOUT,
             )

@@ -46,6 +46,7 @@ from src.ui.cli_output import log_message_flow
 if TYPE_CHECKING:
     from src.bot import Bot
     from src.channels.base import BaseChannel
+    from src.core.dedup import DeduplicationService
     from src.monitoring import SessionMetrics
     from src.shutdown import GracefulShutdown
 
@@ -124,6 +125,7 @@ class PipelineDependencies:
     bot: "Bot"
     channel: "BaseChannel"
     verbose: bool
+    dedup: "DeduplicationService | None" = None
 
 
 MiddlewareFactory = Callable[[PipelineDependencies], Any]
@@ -160,7 +162,9 @@ def _typing_factory(d: PipelineDependencies) -> TypingMiddleware:
 
 
 def _error_handler_factory(d: PipelineDependencies) -> ErrorHandlerMiddleware:
-    return ErrorHandlerMiddleware(d.channel, d.session_metrics, verbose=d.verbose)
+    return ErrorHandlerMiddleware(
+        d.channel, d.session_metrics, verbose=d.verbose, dedup=d.dedup
+    )
 
 
 def _handle_message_factory(d: PipelineDependencies) -> HandleMessageMiddleware:
@@ -341,17 +345,73 @@ class TypingMiddleware:
 
 
 class ErrorHandlerMiddleware:
-    """Catches processing errors, increments error counter, sends user-facing error."""
+    """Catches processing errors, increments error counter, sends user-facing error.
+
+    Uses ``_send_error_reply()`` to centralize send → dedup → event so that
+    error-channel traffic is observable in metrics and dedup logs, matching
+    the ``Bot._send_to_chat()`` pattern used for all other outbound paths.
+    """
 
     def __init__(
         self,
         channel: BaseChannel,
         metrics: SessionMetrics,
         verbose: bool = False,
+        dedup: DeduplicationService | None = None,
     ) -> None:
         self._channel = channel
         self._metrics = metrics
         self._verbose = verbose
+        self._dedup = dedup
+
+    async def _send_error_reply(self, chat_id: str, text: str) -> None:
+        """Send an error reply with dedup recording and event emission.
+
+        Mirrors ``Bot._send_to_chat()``: channel send → outbound dedup
+        record → ``response_sent`` event.  This ensures error responses
+        appear in dedup logs and event-bus metrics just like normal
+        responses, rate-limit warnings, and scheduled replies.
+        """
+        try:
+            await self._channel.send_message(chat_id, text)
+        except Exception as send_exc:
+            log.warning(
+                "Failed to send error message to %s "
+                "(channel may be disconnected): %s",
+                chat_id,
+                send_exc,
+            )
+            return
+
+        if self._dedup:
+            self._dedup.record_outbound(chat_id, text)
+
+        try:
+            from src.core.event_bus import Event, get_event_bus
+
+            await get_event_bus().emit(Event(
+                name="response_sent",
+                data={"chat_id": chat_id, "response_length": len(text)},
+                source="ErrorHandlerMiddleware._send_error_reply",
+                correlation_id=self._get_correlation_id(),
+            ))
+        except Exception:
+            log_noncritical(
+                NonCriticalCategory.EVENT_EMISSION,
+                "Failed to emit response_sent event for error reply to %s",
+                chat_id,
+                logger=log,
+            )
+
+    @staticmethod
+    def _get_correlation_id() -> str | None:
+        """Retrieve the current correlation ID for event emission."""
+        try:
+            from src.logging import get_correlation_id
+
+            return get_correlation_id()
+        except Exception:
+            return None
 
     async def __call__(
         self,
@@ -375,15 +435,7 @@ class ErrorHandlerMiddleware:
             log.error(
                 "Error handling message: %s", exc, exc_info=self._verbose
             )
-            try:
-                await self._channel.send_message(ctx.msg.chat_id, error_msg)
-            except Exception as send_exc:
-                log.warning(
-                    "Failed to send error message to %s "
-                    "(channel may be disconnected): %s",
-                    ctx.msg.chat_id,
-                    send_exc,
-                )
+            await self._send_error_reply(ctx.msg.chat_id, error_msg)
 
 
 class HandleMessageMiddleware:
