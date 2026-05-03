@@ -208,7 +208,7 @@ _Round 8 — Senior technical review (2026-05-03). 20 items across 6 categories.
 ## Security
 
 - [x] Validate `IncomingMessage.correlation_id` format in `Bot.handle_message()` — the correlation ID is propagated to logging context, OTel spans, and event bus events. A malicious or corrupted correlation ID containing control characters (newlines, ANSI escapes) could inject false log entries or corrupt structured log consumers. Truncate to a reasonable length and strip non-printable characters.
-- [ ] Sanitize `tool_call.function.name` before using in log entries and audit trail — `ToolExecutor.execute()` uses the skill name directly in structured log `extra` dicts and audit log entries. A malicious LLM response could inject a name containing log-forging characters (newlines, JSON-breaking quotes). Strip or replace dangerous characters before the first log/audit use.
+- [x] Sanitize `tool_call.function.name` before using in log entries and audit trail — `ToolExecutor.execute()` uses the skill name directly in structured log `extra` dicts and audit log entries. A malicious LLM response could inject a name containing log-forging characters (newlines, JSON-breaking quotes). Strip or replace dangerous characters before the first log/audit use.
 - [ ] Add `Strict-Transport-Security` header to `HealthServer` responses when accessed over HTTPS — the health server already sets `Content-Security-Policy` and `X-Content-Type-Options` from Round 7, but lacks HSTS. If the server is deployed behind a TLS-terminating proxy, the header instructs browsers to only use HTTPS for future requests, hardening against protocol downgrade attacks on internal dashboards.
 
 ## DevOps & CI

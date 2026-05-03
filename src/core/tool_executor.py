@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
@@ -30,6 +31,21 @@ from src.utils.timing import skill_timer
 
 MAX_ARGS_DEPTH = 10
 MAX_ARGS_BYTES = 1_048_576  # 1 MiB
+_MAX_TOOL_NAME_LENGTH = 100
+
+# Control characters, newlines, ANSI escape sequences stripped from tool names
+# to prevent log forging and audit trail injection.
+_TOOL_NAME_SANITIZE_RE = re.compile(
+    r"\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f-\x9f]"
+)
+
+
+def _sanitize_tool_name(name: str) -> str:
+    """Strip control characters and truncate tool/skill names for safe logging."""
+    cleaned = _TOOL_NAME_SANITIZE_RE.sub("", name)
+    if len(cleaned) > _MAX_TOOL_NAME_LENGTH:
+        cleaned = cleaned[:_MAX_TOOL_NAME_LENGTH]
+    return cleaned or "unknown"
 
 if TYPE_CHECKING:
     from src.monitoring import PerformanceMetrics
@@ -116,7 +132,7 @@ class ToolExecutor:
         """
         # Extract and validate skill name
         try:
-            name = tool_call.function.name
+            name = _sanitize_tool_name(tool_call.function.name)
         except AttributeError:
             log.error(
                 "Malformed tool call: missing 'function' or 'name' attribute",
