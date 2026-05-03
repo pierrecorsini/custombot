@@ -779,6 +779,87 @@ class TestShutdownCleanup:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: _transition() phase validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPhaseTransitions:
+    """Tests for Application._transition() validating phase transitions."""
+
+    def test_invalid_created_to_stopped(self, test_config: Config) -> None:
+        app = Application(test_config)
+        assert app._phase == AppPhase.CREATED
+
+        with pytest.raises(RuntimeError, match="Invalid phase transition"):
+            app._transition(AppPhase.STOPPED)
+
+        # Phase unchanged after rejection
+        assert app._phase == AppPhase.CREATED
+
+    def test_invalid_created_to_running(self, test_config: Config) -> None:
+        app = Application(test_config)
+        with pytest.raises(RuntimeError, match="Invalid phase transition"):
+            app._transition(AppPhase.RUNNING)
+
+    def test_invalid_running_to_starting(self, test_config: Config) -> None:
+        app = Application(test_config)
+        app._phase = AppPhase.RUNNING
+        with pytest.raises(RuntimeError, match="Invalid phase transition"):
+            app._transition(AppPhase.STARTING)
+
+    def test_invalid_running_to_stopped(self, test_config: Config) -> None:
+        app = Application(test_config)
+        app._phase = AppPhase.RUNNING
+        with pytest.raises(RuntimeError, match="Invalid phase transition"):
+            app._transition(AppPhase.STOPPED)
+
+    def test_invalid_stopped_to_any(self, test_config: Config) -> None:
+        """STOPPED is terminal — no transitions out."""
+        app = Application(test_config)
+        app._phase = AppPhase.STOPPED
+        for target in AppPhase:
+            if target == AppPhase.STOPPED:
+                continue
+            with pytest.raises(RuntimeError, match="Invalid phase transition"):
+                app._transition(target)
+
+    def test_valid_full_lifecycle_sequence(self, test_config: Config) -> None:
+        """CREATED → STARTING → RUNNING → SHUTTING_DOWN → STOPPED succeeds."""
+        app = Application(test_config)
+        assert app._phase == AppPhase.CREATED
+
+        app._transition(AppPhase.STARTING)
+        assert app._phase == AppPhase.STARTING
+
+        app._transition(AppPhase.RUNNING)
+        assert app._phase == AppPhase.RUNNING
+
+        app._transition(AppPhase.SHUTTING_DOWN)
+        assert app._phase == AppPhase.SHUTTING_DOWN
+
+        app._transition(AppPhase.STOPPED)
+        assert app._phase == AppPhase.STOPPED
+
+    def test_valid_starting_to_shutting_down(self, test_config: Config) -> None:
+        """STARTING may go to SHUTTING_DOWN (startup failure path)."""
+        app = Application(test_config)
+        app._phase = AppPhase.STARTING
+        app._transition(AppPhase.SHUTTING_DOWN)
+        assert app._phase == AppPhase.SHUTTING_DOWN
+
+    def test_error_message_includes_phase_names(self, test_config: Config) -> None:
+        """RuntimeError message contains both the source and target phase names."""
+        app = Application(test_config)
+        with pytest.raises(RuntimeError, match="CREATED.*STOPPED"):
+            app._transition(AppPhase.STOPPED)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: Property accessors (pre-startup guards)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class TestPropertyGuards:
     """Tests that property accessors raise before _startup() is called."""
 
