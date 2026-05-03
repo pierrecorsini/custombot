@@ -94,7 +94,45 @@ _Round 5 — Senior technical review (2026-05-02). 22 items across 6 categories.
 
 ---
 
-_Round 6 — Senior technical review (2026-05-02). 25 items across 6 categories._
+_Round 7 — Senior technical review (2026-05-03). 20 items across 6 categories._
+
+## Architecture & Refactoring
+
+- [x] Close `RoutingEngine` watchdog observer during `perform_shutdown()` — `RoutingEngine.close()` exists and stops the OS-native observer thread, but `lifecycle.py` never calls it. The watchdog thread continues running until process exit, which can produce spurious dirty-flag writes and prevents clean teardown in environments that reuse the process (e.g. hot-reload development servers).
+- [ ] Extract `_send_to_chat(chat_id, text, channel)` helper in `Bot` — `_handle_message_inner` sends a rate-limit warning via `channel.send_message()` directly, bypassing outbound dedup recording and event emission. A shared `_send_to_chat()` method would centralize send + dedup + `response_sent` event, used by both the rate-limit path and `_deliver_response`, ensuring all outbound messages are tracked consistently.
+- [ ] Fix misleading generation-conflict handling in `Bot._deliver_response()` — `check_generation()` returns `False` when the generation counter changed during processing, but the comment says "Re-reading latest history before persist" and no re-reading actually occurs. The code proceeds to `save_messages_batch` unconditionally, which can overwrite newer messages from a concurrent turn. Either implement the re-read (read latest messages, append response, write back) or update the comment to accurately describe the current "log-and-proceed" behavior and document the data-loss risk.
+
+## Performance & Scalability
+
+- [ ] Use swap-buffers pattern in `MessageQueue._flush_loop` to avoid blocking enqueue/complete during disk writes — the flush loop acquires `self._lock` before calling `_flush_write_buffer()`, which holds the lock for the entire fsync duration. Under burst traffic, enqueued messages queue behind the flush. Swap the write buffer atomically (pointer swap under lock), then flush the detached buffer without the lock.
+- [ ] Build reverse index for `TokenUsage._leaderboard` to avoid O(n) `_purge_chat_from_leaderboard` scans — the purge function iterates the entire leaderboard list for every new `chat_id` insertion. For deployments with hundreds of chats and high turnover, maintain a `dict[chat_id, list[int]]` reverse index so purging is O(k) where k is that chat's entries, not O(n) for all entries.
+- [ ] Short-circuit `RoutingEngine.match_with_rule()` before cache key computation when no rules are loaded — `match_with_rule()` first calls `_is_stale()` and `load_rules()`, then constructs a `MatchingContext` and computes an `xxhash.xxh64` cache key. When `_rules_list` is empty (common during initial startup before instruction files are added), the expensive xxhash computation is wasted. Check `has_rules` early and return `(None, None)` immediately.
+
+## Error Handling & Resilience
+
+- [ ] Emit `message_dropped` event when `_build_turn_context()` produces no match — the method silently returns `None` in two cases: routing engine has no rules loaded, and no rule matched the message. Emit a structured event (e.g. `message_dropped` with `reason="no_rules"` or `reason="no_match"`) so monitoring subscribers can track silently-dropped messages without parsing log lines.
+- [ ] Handle `asyncio.CancelledError` explicitly in `Bot._handle_message_inner()` — the `except Exception` catch in the processing try block does not distinguish cancellation (expected during shutdown via `per_chat_timeout` or `wait_for`) from real errors. CancelledError should not increment error metrics, emit `error_occurred` events, or trigger `record_exception_safe` on the span. Add an explicit `except asyncio.CancelledError` before the generic `except Exception`.
+- [ ] Validate and truncate `IncomingMessage.sender_name` before first use — `sender_name` is used directly in `log.info()` calls and passed as `name=` to `save_message()` without length or character validation. A very long sender_name (>10 KB) or one containing control characters (ANSI escapes, null bytes) can pollute structured log entries and downstream JSON consumers. Truncate to 200 characters and strip non-printable characters in `handle_message()`.
+
+## Testing & Quality
+
+- [ ] Add test for `Bot._deliver_response()` with generation conflict — mock `check_generation()` to return `False`, verify that the warning is logged and `save_messages_batch()` is still called (current behavior). Documents the existing design choice that generation conflicts are logged but not retried.
+- [ ] Add test for `RoutingEngine.close()` stopping the watchdog observer — construct a `RoutingEngine` with `use_watchdog=True`, call `load_rules()` to start the observer, then call `close()` and verify `_observer` is `None` and the observer thread has stopped (`observer.is_alive() == False`).
+- [ ] Add test for `ContextAssembler` graceful degradation when one of the four async reads fails — mock `memory.read_memory()` to raise `OSError`, verify `assemble()` returns a valid `ContextResult` with the default value (`None`) substituted for the failed read and the other three reads unaffected.
+- [ ] Add integration test for `MessageQueue` concurrent flush and enqueue — start the `_flush_loop`, enqueue messages in parallel from multiple coroutines, verify all messages are persisted to disk after the flush cycle completes and no data is lost or corrupted.
+- [ ] Add test for `Bot._deliver_response()` with outbound dedup suppression — mock `check_outbound_duplicate()` to return `True`, verify the method returns `None` without calling `save_messages_batch()` or `record_outbound()`, confirming that dedup-suppressed responses don't create phantom DB entries.
+
+## Security
+
+- [ ] Reject symlinks in `RoutingEngine` instruction file scanning — `load_rules()` and `_scan_file_mtimes()` iterate `.md` files via `glob()` and `os.scandir()` without checking for symlinks. A symlink within the instructions directory pointing outside the workspace could cause the engine to parse arbitrary files as routing rules. Add `os.path.islink()` checks when iterating instruction files.
+- [ ] Validate `schedule.weekdays` range (0-6) in `TaskScheduler._validate_task()` — the cron schedule type accepts a `weekdays` list but doesn't validate that values are integers in the range 0-6. A malformed `tasks.json` with `weekdays: [7, 8]` would silently match no days, causing the task to never execute. Add range validation with a clear error message.
+- [ ] Add `Content-Security-Policy: default-src 'none'` and `X-Content-Type-Options: nosniff` headers to `HealthServer` responses — the health endpoint already has path validation and rate limiting, but adding security headers hardens it against content-type sniffing and script injection if the endpoint is inadvertently exposed to browsers (e.g. via an internal dashboard iframe).
+
+## DevOps & CI
+
+- [ ] Add `.gitattributes` with `* text=auto eol=lf` for cross-platform line ending normalization — the project is developed on Windows but deployed to Linux (Dockerfile). Without `.gitattributes`, line endings drift between CRLF (Windows editors) and LF (Docker/CI), causing spurious diffs and potential script failures (e.g. `h24loop.sh` with Windows line endings).
+- [ ] Add `ruff` `PL` (pylint) ruleset to lint config — currently `E, W, F, I, UP, B, SIM, TCH` are selected. Adding `PL` catches additional patterns: `PLR0913` (too many arguments — useful for future constructors), `PLR2004` (magic value comparison), and `PLW2901` (redefined loop variable). Run as non-blocking initially to avoid disrupting existing code.
+- [ ] Add `pytest-xdist -n auto` to CI for parallel test execution — `pytest-xdist` is in dev dependencies but may not be used with `-n auto` in CI. The test suite has 55+ test files; parallel execution can reduce CI feedback time by 2-4× on multi-core runners without any test changes (all tests use `asyncio_mode = "auto"` and independent temp directories).
 
 ## Architecture & Refactoring
 
