@@ -545,6 +545,18 @@ class Bot:
                         },
                     )
                     return None
+                except asyncio.CancelledError:
+                    log.info(
+                        "Message %s cancelled in chat %s (shutdown or timeout)",
+                        msg.message_id,
+                        msg.chat_id,
+                        extra={
+                            "chat_id": msg.chat_id,
+                            "message_id": msg.message_id,
+                            "correlation_id": correlation_id,
+                        },
+                    )
+                    raise
                 except Exception as exc:
                     record_exception_safe(proc_span, exc)
                     log.error(
