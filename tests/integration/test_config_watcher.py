@@ -46,7 +46,7 @@ def _base_config(tmp_path: Path, **llm_overrides) -> Config:
     )
 
 
-def _make_applier(config: Config):
+def _make_applier(config: Config, on_config_swap=None):
     """Wire up a ConfigChangeApplier with mock components."""
     mock_bot = MagicMock()
     mock_bot._cfg = BotConfig(
@@ -71,7 +71,7 @@ def _make_applier(config: Config):
     shutdown_mgr = GracefulShutdown(timeout=30.0)
     reconfigure_logging = MagicMock()
 
-    return ConfigChangeApplier(
+    kwargs = dict(
         app_config=config,
         bot=mock_bot,
         channel=mock_channel,
@@ -79,6 +79,10 @@ def _make_applier(config: Config):
         shutdown_mgr=shutdown_mgr,
         reconfigure_logging=reconfigure_logging,
     )
+    if on_config_swap is not None:
+        kwargs["on_config_swap"] = on_config_swap
+
+    return ConfigChangeApplier(**kwargs)
 
 
 def _write_raw(path: Path, content: str) -> None:
@@ -429,4 +433,224 @@ class TestConfigChangeApplierDestructiveFields:
         )
         assert bot._cfg.max_tool_iterations == 5, (
             "Bot should receive NEW max_tool_iterations — safe field applied"
+        )
+
+    def test_apply_llm_config_preserves_destructive_fields_on_provider(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        ``_apply_llm_config`` must preserve destructive fields (model, api_key)
+        on the live LLM provider even when the new config changes them.
+        Safe fields (temperature) are applied.
+
+        Uses a realistic mock where ``update_config`` actually replaces
+        ``_cfg`` — mirroring :meth:`LLMClient.update_config` — so the test
+        asserts on the provider's internal state, not just the call argument.
+        """
+        initial = _base_config(tmp_path, temperature=0.3)
+        applier = _make_applier(initial)
+
+        # Wire LLM mock to actually replace _cfg on update_config,
+        # mirroring the real LLMClient.update_config() behavior.
+        def _llm_update_config(new_cfg: LLMConfig) -> None:
+            applier._llm._cfg = new_cfg
+
+        applier._llm.update_config = _llm_update_config
+
+        # New config changes BOTH destructive (model, api_key) and safe (temperature)
+        updated = Config(
+            llm=LLMConfig(
+                model="gpt-4o-mini",           # destructive — must NOT reach provider
+                base_url="https://api.openai.com/v1",
+                api_key="sk-new-dangerous-key",  # destructive — must NOT reach provider
+                temperature=0.8,                 # safe — MUST reach provider
+                timeout=60.0,
+            ),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+            ),
+            skills_auto_load=False,
+        )
+
+        # Act: call _apply_llm_config directly with safe changed set
+        applier._apply_llm_config(
+            updated,
+            changed={"llm.temperature", "llm.timeout"},
+            old_llm_cfg=initial.llm,
+        )
+
+        # Assert: provider's _cfg preserves destructive fields from old config
+        provider_cfg = applier._llm._cfg
+        assert provider_cfg.model == "gpt-4o", (
+            "Provider _cfg.model should remain OLD — destructive field preserved"
+        )
+        assert provider_cfg.api_key == "sk-test-watcher", (
+            "Provider _cfg.api_key should remain OLD — destructive field preserved"
+        )
+
+        # Assert: safe fields from new config ARE applied
+        assert provider_cfg.temperature == 0.8, (
+            "Provider _cfg.temperature should be NEW — safe field applied"
+        )
+
+
+class TestConfigChangeApplierAtomicSwap:
+    """Verify that _update_app_config() uses an atomic reference swap."""
+
+    def test_swap_replaces_config_object_not_mutates(self, tmp_path: Path) -> None:
+        """
+        _update_app_config() must replace the entire config reference rather
+        than mutating fields in-place.  After the swap, ``applier._config``
+        must be the *same object* as ``new_config``, not the old object with
+        overwritten fields.
+        """
+        initial = _base_config(tmp_path)
+        applier = _make_applier(initial)
+
+        updated = _base_config(tmp_path, temperature=0.9)
+        updated.memory_max_history = 999
+
+        old_ref = applier._config
+        assert old_ref is initial
+
+        applier._update_app_config(updated)
+
+        # The reference must have been swapped, not mutated
+        assert applier._config is updated, (
+            "ConfigChangeApplier._config should be the NEW config object"
+        )
+        assert applier._config is not old_ref, (
+            "ConfigChangeApplier._config should no longer be the old object"
+        )
+
+    def test_swap_callback_propagates_to_application(self, tmp_path: Path) -> None:
+        """
+        When ``on_config_swap`` is provided, it must be called with the new
+        config so that ``Application._config`` is updated atomically alongside
+        the applier's internal reference.
+        """
+        initial = _base_config(tmp_path)
+
+        # Simulate Application holding the config reference
+        app_config_ref = {"config": initial}
+        applier = _make_applier(
+            initial,
+            on_config_swap=lambda cfg: app_config_ref.update(config=cfg),
+        )
+
+        updated = _base_config(tmp_path, temperature=0.42)
+        applier._update_app_config(updated)
+
+        # Both applier and "Application" must see the new config
+        assert applier._config is updated
+        assert app_config_ref["config"] is updated
+
+    def test_no_callback_still_swaps(self, tmp_path: Path) -> None:
+        """
+        When ``on_config_swap`` is None (e.g. tests without Application),
+        the swap still works correctly on the applier's internal reference.
+        """
+        initial = _base_config(tmp_path)
+        applier = _make_applier(initial)  # no on_config_swap
+
+        updated = _base_config(tmp_path, temperature=0.1)
+        applier._update_app_config(updated)
+
+        assert applier._config is updated
+
+    def test_invalid_config_does_not_swap(self, tmp_path: Path) -> None:
+        """
+        An invalid config must NOT trigger the swap — the old config must
+        remain in place for both the applier and the callback target.
+        """
+        initial = _base_config(tmp_path)
+
+        app_config_ref = {"config": initial}
+        applier = _make_applier(
+            initial,
+            on_config_swap=lambda cfg: app_config_ref.update(config=cfg),
+        )
+
+        bad_config = Config(
+            llm=LLMConfig(
+                model="",  # empty → invalid
+                base_url="https://api.openai.com/v1",
+                api_key="sk-test",
+            ),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+            ),
+            skills_auto_load=False,
+        )
+
+        with pytest.raises(ConfigurationError):
+            applier._update_app_config(bad_config)
+
+        # Both must still point to the original config
+        assert applier._config is initial
+        assert app_config_ref["config"] is initial
+
+    @pytest.mark.asyncio
+    async def test_no_hybrid_state_during_concurrent_reads(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Concurrent coroutines reading config fields during a hot-reload must
+        never observe a hybrid state (e.g. new temperature but old timeout).
+        With the atomic swap pattern, a reader sees either all-old or all-new.
+        """
+        initial = _base_config(tmp_path, temperature=0.5)
+        initial.log_verbosity = "normal"
+        initial.shutdown_timeout = 30.0
+
+        applier = _make_applier(initial)
+
+        # Reader coroutine that repeatedly snapshots config fields
+        hybrid_detected = asyncio.Event()
+        stop_reading = asyncio.Event()
+
+        async def reader():
+            while not stop_reading.is_set():
+                cfg = applier._config
+                # In the old config: temp=0.5, verbosity=normal, timeout=30
+                # In the new config: temp=0.9, verbosity=verbose, timeout=60
+                # A hybrid state would be mixing these (e.g. temp=0.9 but timeout=30)
+                is_old = (
+                    cfg.llm.temperature == 0.5
+                    and cfg.log_verbosity == "normal"
+                    and cfg.shutdown_timeout == 30.0
+                )
+                is_new = (
+                    cfg.llm.temperature == 0.9
+                    and cfg.log_verbosity == "verbose"
+                    and cfg.shutdown_timeout == 60.0
+                )
+                if not is_old and not is_new:
+                    hybrid_detected.set()
+                    return
+                await asyncio.sleep(0)
+
+        # Start readers
+        readers = [asyncio.create_task(reader()) for _ in range(5)]
+
+        # Give readers a moment to start
+        await asyncio.sleep(0.01)
+
+        # Apply config change (atomic swap)
+        updated = _base_config(tmp_path, temperature=0.9)
+        updated.log_verbosity = "verbose"
+        updated.shutdown_timeout = 60.0
+        applier._update_app_config(updated)
+
+        # Let readers observe the new state
+        await asyncio.sleep(0.02)
+
+        stop_reading.set()
+        for r in readers:
+            await r
+
+        assert not hybrid_detected.is_set(), (
+            "Detected hybrid config state — atomic swap failed"
         )
