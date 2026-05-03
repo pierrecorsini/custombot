@@ -628,6 +628,9 @@ class RoutingEngine:
         if self._is_stale():
             self.load_rules()
 
+        if not self.has_rules:
+            return (None, None)
+
         ctx = MatchingContext.from_message(msg)
         cache_key = self._cache_key(ctx)
 
