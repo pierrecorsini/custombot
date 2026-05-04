@@ -16,6 +16,7 @@ from src.core.event_bus import (
     Event,
     EventBus,
     EventHandler,
+    emit_error_event,
     get_event_bus,
     reset_event_bus,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "EVENT_RESPONSE_SENT",
     "EVENT_SHUTDOWN_STARTED",
     "EVENT_SKILL_EXECUTED",
+    "emit_error_event",
     "format_skill_error",
     "get_error_suggestion",
     "build_context",

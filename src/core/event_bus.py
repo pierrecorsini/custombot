@@ -51,6 +51,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.core.errors import NonCriticalCategory, log_noncritical
+from src.logging.logging_config import get_correlation_id
 from src.utils.locking import AsyncLock
 from src.utils.singleton import get_or_create_singleton, reset_singleton
 
@@ -272,6 +273,55 @@ async def _safe_call(handler: EventHandler, event: Event) -> None:
         )
 
 
+# ── Public helpers ──────────────────────────────────────────────────────
+
+
+async def emit_error_event(
+    exc: BaseException,
+    source: str,
+    *,
+    extra_data: dict[str, Any] | None = None,
+    correlation_id: str | None = None,
+) -> None:
+    """Emit an ``EVENT_ERROR_OCCURRED`` event with standardised error metadata.
+
+    Constructs an :class:`Event` containing ``error_type`` and
+    ``error_message`` keys plus any caller-supplied *extra_data*.
+    Emission failures are caught and logged as non-critical so they
+    never break the caller's error-handling path.
+
+    Args:
+        exc: The exception to report.
+        source: Identifier of the emitting component (e.g. ``"Application.run"``).
+        extra_data: Optional additional key-value pairs merged into the
+            event ``data`` dict.
+        correlation_id: Optional correlation ID; defaults to the current
+            context-local ID via :func:`get_correlation_id`.
+    """
+    data: dict[str, Any] = {
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+    }
+    if extra_data:
+        data.update(extra_data)
+    cid = correlation_id if correlation_id is not None else get_correlation_id()
+    try:
+        await get_event_bus().emit(
+            Event(
+                name=EVENT_ERROR_OCCURRED,
+                data=data,
+                source=source,
+                correlation_id=cid,
+            )
+        )
+    except Exception:
+        log_noncritical(
+            NonCriticalCategory.EVENT_EMISSION,
+            f"Failed to emit error_occurred event from {source}",
+            logger=log,
+        )
+
+
 # ── Singleton access ─────────────────────────────────────────────────────
 
 
@@ -290,6 +340,7 @@ __all__ = [
     "EventBus",
     "EventHandler",
     "KNOWN_EVENTS",
+    "emit_error_event",
     "get_event_bus",
     "reset_event_bus",
     # Event name constants

@@ -20,7 +20,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Optional
 
 from src.constants import CLEANUP_STEP_TIMEOUT, DEFAULT_CHANNEL_STARTUP_TIMEOUT
-from src.core.event_bus import EVENT_ERROR_OCCURRED, EVENT_STARTUP_COMPLETED, Event, get_event_bus
+from src.core.event_bus import EVENT_STARTUP_COMPLETED, emit_error_event, get_event_bus
 from src.core.message_pipeline import MessageContext
 from src.core.startup import StartupContext, StartupOrchestrator
 from src.core.errors import NonCriticalCategory, log_noncritical
@@ -375,26 +375,11 @@ class Application:
             get_metrics_collector().track_error()
 
             # Emit structured error event for monitoring subscribers.
-            try:
-                await get_event_bus().emit(
-                    Event(
-                        name=EVENT_ERROR_OCCURRED,
-                        data={
-                            "category": category,
-                            "error_type": type(exc).__name__,
-                            "error_message": str(exc),
-                            "source": "main_loop",
-                        },
-                        source="Application.run",
-                        correlation_id=get_correlation_id(),
-                    )
-                )
-            except Exception:
-                log_noncritical(
-                    NonCriticalCategory.EVENT_EMISSION,
-                    "Failed to emit error_occurred event from main loop",
-                    logger=log,
-                )
+            await emit_error_event(
+                exc,
+                "Application.run",
+                extra_data={"category": category, "source": "main_loop"},
+            )
         finally:
             await self._shutdown_cleanup()
 
@@ -576,26 +561,11 @@ class Application:
                 # Emit an error_occurred event so that monitoring subscribers are
                 # notified of pipeline failures.  Event emission itself must never
                 # break the error-handling path.
-                try:
-                    await get_event_bus().emit(
-                        Event(
-                            name=EVENT_ERROR_OCCURRED,
-                            data={
-                                "chat_id": msg.chat_id,
-                                "error_type": type(exc).__name__,
-                                "error_message": str(exc),
-                            },
-                            source="Application._on_message",
-                            correlation_id=get_correlation_id(),
-                        )
-                    )
-                except Exception:
-                    log_noncritical(
-                        NonCriticalCategory.EVENT_EMISSION,
-                        "Failed to emit error_occurred event for chat %s",
-                        msg.chat_id,
-                        logger=log,
-                    )
+                await emit_error_event(
+                    exc,
+                    "Application._on_message",
+                    extra_data={"chat_id": msg.chat_id},
+                )
                 raise
             finally:
                 clear_correlation_id()
