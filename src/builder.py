@@ -302,6 +302,7 @@ async def _step_vector_memory(ctx: BuilderContext) -> str | None:
         ctx.vector_memory = vm
         # Wire vector memory into DB for embedding compression summaries
         ctx.db.set_vector_memory(vm)  # type: ignore[union-attr]
+        embed_http = None  # ownership transferred to AsyncOpenAI / VectorMemory
         return f"model={ctx.config.llm.embedding_model}, {probe_msg} [{embed_source}]"
     except Exception as exc:
         log.warning(
@@ -310,6 +311,9 @@ async def _step_vector_memory(ctx: BuilderContext) -> str | None:
             type(exc).__name__,
             exc,
         )
+        ctx.vector_memory = None
+        return "DEGRADED — unavailable (memory VSS skills disabled)"
+    finally:
         if embed_http is not None:
             try:
                 await embed_http.aclose()
@@ -319,8 +323,6 @@ async def _step_vector_memory(ctx: BuilderContext) -> str | None:
                     "Failed to close dedicated embedding HTTP client during degradation",
                     logger=log,
                 )
-        ctx.vector_memory = None
-        return "DEGRADED — unavailable (memory VSS skills disabled)"
 
 
 async def _step_project_store(ctx: BuilderContext) -> str | None:
