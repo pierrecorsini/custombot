@@ -42,6 +42,7 @@ dev = [
     "pytest-benchmark>=4.0.0",
     "pip-audit>=2.10.0",
     "pip-tools>=7.4.0",
+    "pytest-timeout>=2.3.0",
 ]
 
 [project.scripts]
@@ -133,7 +134,7 @@ python_files = ["test_*.py", "bench_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --timeout=120"
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
