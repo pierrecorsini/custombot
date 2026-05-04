@@ -1256,8 +1256,9 @@ class TestProcess:
         bot = _make_bot()
         msg = _make_message(text="Hello bot")
         routing = MagicMock()
+        routing.has_rules = True
         rule = _make_routing_rule()
-        routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
+        routing.match_with_rule = AsyncMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
 
         response = make_chat_response(content="Hi!")
@@ -1284,8 +1285,9 @@ class TestProcess:
         bot = _make_bot()
         msg = _make_message()
         routing = MagicMock()
+        routing.has_rules = True
         rule = _make_routing_rule()
-        routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
+        routing.match_with_rule = AsyncMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
 
         response = make_chat_response(content="Final answer")
@@ -1311,8 +1313,9 @@ class TestProcess:
         bot = _make_bot()
         msg = _make_message()
         routing = MagicMock()
+        routing.has_rules = True
         rule = _make_routing_rule(skillExecVerbose="summary")
-        routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
+        routing.match_with_rule = AsyncMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
 
         tool_call = make_tool_call()
@@ -1349,8 +1352,9 @@ class TestProcess:
         bot = _make_bot()
         msg = _make_message()
         routing = MagicMock()
+        routing.has_rules = True
         rule = _make_routing_rule(skillExecVerbose="full")
-        routing.match_with_rule = MagicMock(return_value=(rule, "chat.agent.md"))
+        routing.match_with_rule = AsyncMock(return_value=(rule, "chat.agent.md"))
         bot._routing = routing
 
         response = make_chat_response(content="Hi!")
@@ -3049,3 +3053,65 @@ class TestProcessScheduledHMAC:
         assert result is None
         bot._db.upsert_chat.assert_not_awaited()
         bot._db.save_messages_batch.assert_not_awaited()
+
+
+class TestSendToChat:
+    """Tests for Bot._send_to_chat — shared send + dedup + event helper.
+
+    Verifies that dedup recording and event emission happen regardless of
+    whether a channel is provided, and that channel.send_message is only
+    called when a channel is passed.
+    """
+
+    async def test_with_channel_sends_records_and_emits(self):
+        """With channel: send_message called, dedup recorded, event emitted."""
+        bot = _make_bot()
+        mock_channel = AsyncMock()
+
+        with (
+            patch("src.bot._bot.get_event_bus") as mock_get_bus,
+            patch("src.bot._bot.get_correlation_id", return_value="corr-1"),
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            await bot._send_to_chat("chat_abc", "Hello!", channel=mock_channel)
+
+        # (a) channel.send_message called
+        mock_channel.send_message.assert_awaited_once_with("chat_abc", "Hello!")
+
+        # (b) dedup recorded
+        bot._dedup.record_outbound.assert_called_once_with("chat_abc", "Hello!")
+
+        # (c) response_sent event emitted
+        mock_bus.emit.assert_awaited_once()
+        event = mock_bus.emit.call_args[0][0]
+        assert event.name == "response_sent"
+        assert event.data == {"chat_id": "chat_abc", "response_length": 6}
+        assert event.source == "Bot._send_to_chat"
+        assert event.correlation_id == "corr-1"
+
+    async def test_without_channel_still_records_and_emits(self):
+        """Without channel: no send, but dedup and event still fire."""
+        bot = _make_bot()
+
+        with (
+            patch("src.bot._bot.get_event_bus") as mock_get_bus,
+            patch("src.bot._bot.get_correlation_id", return_value=None),
+        ):
+            mock_bus = AsyncMock()
+            mock_get_bus.return_value = mock_bus
+
+            await bot._send_to_chat("chat_xyz", "No channel response")
+
+        # (a) no channel.send_message call (no channel passed)
+        # nothing to assert — just no AttributeError from None channel
+
+        # (b) dedup still recorded
+        bot._dedup.record_outbound.assert_called_once_with("chat_xyz", "No channel response")
+
+        # (c) event still emitted
+        mock_bus.emit.assert_awaited_once()
+        event = mock_bus.emit.call_args[0][0]
+        assert event.name == "response_sent"
+        assert event.data == {"chat_id": "chat_xyz", "response_length": 19}
