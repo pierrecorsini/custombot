@@ -41,13 +41,13 @@ from src.constants import (
 from src.core.context_assembler import ContextAssembler
 from src.core.context_builder import ChatMessage
 from src.core.errors import NonCriticalCategory, log_noncritical
-from src.core.event_bus import EVENT_GENERATION_CONFLICT, Event, EventBus, get_event_bus
+from src.core.event_bus import EVENT_ERROR_OCCURRED, EVENT_GENERATION_CONFLICT, Event, EventBus, get_event_bus
 from src.core.instruction_loader import InstructionLoader
 from src.core.project_context import ProjectContextLoader as _ProjectContextLoaderImpl
 from src.core.tool_executor import ToolExecutor
 from src.core.tool_formatter import format_response_with_tool_log
 from src.db import _validate_chat_id
-from src.exceptions import ErrorCode, LLMError
+from src.exceptions import DatabaseError, ErrorCode, LLMError
 from src.logging import clear_correlation_id, get_correlation_id, set_correlation_id
 from src.monitoring import get_metrics_collector
 from src.monitoring.tracing import (
@@ -1116,7 +1116,38 @@ class Bot:
                     correlation_id=get_correlation_id(),
                 )
             )
-        await self._db.save_messages_batch(chat_id=chat_id, messages=batch)
+        try:
+            await self._db.save_messages_batch(chat_id=chat_id, messages=batch)
+        except (OSError, DatabaseError) as exc:
+            # Disk full, permission denied, or DB circuit-breaker open.
+            # The response is already generated — deliver it to the user
+            # even if persistence fails.  Log and emit an event so that
+            # monitoring subscribers can track write failures.
+            log_noncritical(
+                NonCriticalCategory.DB_OPERATION,
+                f"Failed to persist response for chat {chat_id}: {exc}",
+                logger=log,
+            )
+            try:
+                await get_event_bus().emit(
+                    Event(
+                        name=EVENT_ERROR_OCCURRED,
+                        data={
+                            "chat_id": chat_id,
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc),
+                            "source": "Bot._deliver_response.save_messages_batch",
+                        },
+                        source="Bot._deliver_response",
+                        correlation_id=get_correlation_id(),
+                    )
+                )
+            except Exception:
+                log_noncritical(
+                    NonCriticalCategory.EVENT_EMISSION,
+                    f"Failed to emit error_occurred event for chat {chat_id}",
+                    logger=log,
+                )
 
         # Record outbound dedup + emit response_sent event via shared helper.
         await self._send_to_chat(chat_id, response_text)
