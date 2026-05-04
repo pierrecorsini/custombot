@@ -146,6 +146,22 @@ jobs:
       - name: Verify config.example.json matches CONFIG_SCHEMA
         run: python scripts/check_config_example_sync.py
 
+  # Validate PLAN.md checkbox syntax — catches malformed checkboxes
+  # (e.g. - [X], - [x ], - [ x]) that would be invisible to progress
+  # tracking scripts.
+  check-plan-syntax:
+    name: PLAN.md Checkbox Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate PLAN.md checkbox format
+        run: python scripts/check_plan_syntax.py
+
   typecheck:
     name: Type Check
     runs-on: ubuntu-latest
