@@ -801,7 +801,7 @@ class Bot:
                     )
 
                 await self._db.upsert_chat(chat_id, "Scheduler")
-                await self._db.save_messages_batch(
+                _ids = await self._db.save_messages_batch(
                     chat_id=chat_id,
                     messages=[
                         {
@@ -980,7 +980,7 @@ class Bot:
 
         await self._db.upsert_chat(msg.chat_id, msg.sender_name)
         try:
-            await self._db.save_message(
+            _msg_id = await self._db.save_message(
                 chat_id=msg.chat_id,
                 role="user",
                 content=msg.text,
@@ -1117,7 +1117,7 @@ class Bot:
                 )
             )
         try:
-            await self._db.save_messages_batch(chat_id=chat_id, messages=batch)
+            _ids = await self._db.save_messages_batch(chat_id=chat_id, messages=batch)
         except (OSError, DatabaseError) as exc:
             # Disk full, permission denied, or DB circuit-breaker open.
             # The response is already generated — deliver it to the user
