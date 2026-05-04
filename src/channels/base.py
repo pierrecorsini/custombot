@@ -93,9 +93,7 @@ def _validate_chat_id(chat_id: object, *, max_length: int = 200) -> None:
     from src.constants import MAX_CHAT_ID_LENGTH
 
     if not isinstance(chat_id, str):
-        raise TypeError(
-            f"IncomingMessage.chat_id must be a str, got {type(chat_id).__name__}"
-        )
+        raise TypeError(f"IncomingMessage.chat_id must be a str, got {type(chat_id).__name__}")
     if not chat_id:
         raise ValueError("IncomingMessage.chat_id must not be empty")
     effective_max = max_length or MAX_CHAT_ID_LENGTH
@@ -165,9 +163,7 @@ def _validate_sender_id(sender_id: object, *, max_length: int = 200) -> None:
     from src.constants import MAX_SENDER_ID_LENGTH
 
     if not isinstance(sender_id, str):
-        raise TypeError(
-            f"IncomingMessage.sender_id must be a str, got {type(sender_id).__name__}"
-        )
+        raise TypeError(f"IncomingMessage.sender_id must be a str, got {type(sender_id).__name__}")
     if not sender_id:
         raise ValueError("IncomingMessage.sender_id must not be empty")
     effective_max = max_length or MAX_SENDER_ID_LENGTH
@@ -179,6 +175,108 @@ def _validate_sender_id(sender_id: object, *, max_length: int = 200) -> None:
     if not _SENDER_ID_RE.match(sender_id):
         raise ValueError(
             f"IncomingMessage.sender_id contains invalid characters: {sender_id!r}. "
+            "Only alphanumeric characters, dash, underscore, dot, and @ are allowed."
+        )
+
+
+# Characters allowed in sender_name.
+# Broader than the ID regex: allows spaces, commas, Unicode letters,
+# and common punctuation that appear in real display names.
+# Rejects control characters, path separators, and other dangerous chars.
+_SENDER_NAME_RE = re.compile(r"^[^\x00-\x1f\x7f/\\<>\"|?*]+$")
+
+
+def _validate_sender_name(sender_name: object, *, max_length: int = 200) -> None:
+    """Validate ``sender_name`` at the IncomingMessage boundary.
+
+    Rejects excessively long names and characters that could corrupt
+    logs, terminal output, or filesystem paths (control chars, path
+    separators, etc.).  Empty string is allowed — some channels omit
+    display names.
+
+    Raises:
+        TypeError: If ``sender_name`` is not a string.
+        ValueError: If ``sender_name`` is too long or contains unsafe
+            characters.
+    """
+    from src.constants import MAX_SENDER_NAME_LENGTH
+
+    if not isinstance(sender_name, str):
+        raise TypeError(
+            f"IncomingMessage.sender_name must be a str, got {type(sender_name).__name__}"
+        )
+    effective_max = max_length or MAX_SENDER_NAME_LENGTH
+    if len(sender_name) > effective_max:
+        raise ValueError(
+            f"IncomingMessage.sender_name exceeds maximum length "
+            f"({len(sender_name)} > {effective_max}): {sender_name[:40]!r}..."
+        )
+    # Empty sender_name is allowed (some channels don't provide a display name).
+    if sender_name and not _SENDER_NAME_RE.match(sender_name):
+        raise ValueError(
+            f"IncomingMessage.sender_name contains unsafe characters: {sender_name!r}. "
+            "Control characters, path separators, and shell metacharacters are not allowed."
+        )
+
+
+def _validate_timestamp(timestamp: object) -> None:
+    """Validate ``timestamp`` at the IncomingMessage boundary.
+
+    Rejects non-numeric types, NaN, Infinity, and values outside the
+    plausible Unix-epoch range (1970 through 2100).
+
+    Raises:
+        TypeError: If ``timestamp`` is not a number.
+        ValueError: If ``timestamp`` is NaN, Inf, or outside the valid range.
+    """
+    from src.constants import TIMESTAMP_MAX, TIMESTAMP_MIN
+
+    if not isinstance(timestamp, (int, float)):
+        raise TypeError(
+            f"IncomingMessage.timestamp must be a number, got {type(timestamp).__name__}"
+        )
+    if isinstance(timestamp, float) and (timestamp != timestamp):  # NaN check
+        raise ValueError("IncomingMessage.timestamp must not be NaN")
+    if isinstance(timestamp, float):
+        import math
+
+        if math.isinf(timestamp):
+            raise ValueError("IncomingMessage.timestamp must not be Inf")
+    if timestamp < TIMESTAMP_MIN:
+        raise ValueError(f"IncomingMessage.timestamp is too small ({timestamp} < {TIMESTAMP_MIN})")
+    if timestamp > TIMESTAMP_MAX:
+        raise ValueError(f"IncomingMessage.timestamp is too large ({timestamp} > {TIMESTAMP_MAX})")
+
+
+def _validate_correlation_id(correlation_id: object, *, max_length: int = 200) -> None:
+    """Validate ``correlation_id`` at the IncomingMessage boundary.
+
+    Only called when ``correlation_id`` is not None.  Enforces type,
+    length, and character-safety constraints so tracing/logging backends
+    never receive crafted payloads.
+
+    Raises:
+        TypeError: If ``correlation_id`` is not a string.
+        ValueError: If ``correlation_id`` is empty, too long, or contains
+            unsafe characters.
+    """
+    from src.constants import MAX_CORRELATION_ID_LENGTH
+
+    if not isinstance(correlation_id, str):
+        raise TypeError(
+            f"IncomingMessage.correlation_id must be a str, got {type(correlation_id).__name__}"
+        )
+    if not correlation_id:
+        raise ValueError("IncomingMessage.correlation_id must not be empty")
+    effective_max = max_length or MAX_CORRELATION_ID_LENGTH
+    if len(correlation_id) > effective_max:
+        raise ValueError(
+            f"IncomingMessage.correlation_id exceeds maximum length "
+            f"({len(correlation_id)} > {effective_max}): {correlation_id[:40]!r}..."
+        )
+    if not _CHAT_ID_RE.match(correlation_id):
+        raise ValueError(
+            f"IncomingMessage.correlation_id contains invalid characters: {correlation_id!r}. "
             "Only alphanumeric characters, dash, underscore, dot, and @ are allowed."
         )
 
@@ -232,6 +330,10 @@ class IncomingMessage:
         _validate_chat_id(self.chat_id)
         _validate_message_id(self.message_id)
         _validate_sender_id(self.sender_id)
+        _validate_sender_name(self.sender_name)
+        _validate_timestamp(self.timestamp)
+        if self.correlation_id is not None:
+            _validate_correlation_id(self.correlation_id)
 
         if self.channel_type in VALID_CHANNEL_TYPES:
             return
@@ -452,7 +554,7 @@ async def _confirm_send(chat_id: str, display_id: str) -> bool:
     automatically rejected to prevent an infinite prompt loop from
     misconfigured or automated input sources.
     """
-    from src.constants import SAFE_MODE_MAX_CONFIRM_RETRIES
+    from src.constants import SAFE_MODE_CONFIRM_TIMEOUT, SAFE_MODE_MAX_CONFIRM_RETRIES
 
     if not sys.stdin.isatty():
         log.warning(
@@ -462,7 +564,19 @@ async def _confirm_send(chat_id: str, display_id: str) -> bool:
         return False
 
     for attempt in range(1, SAFE_MODE_MAX_CONFIRM_RETRIES + 1):
-        raw = await asyncio.to_thread(input, f"  Send to {display_id}? [Y/N]: ")
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(input, f"  Send to {display_id}? [Y/N]: "),
+                timeout=SAFE_MODE_CONFIRM_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            print("  Confirmation timed out. Send rejected.")
+            log.warning(
+                "Safe-mode confirmation timed out after %.0fs for chat %s",
+                SAFE_MODE_CONFIRM_TIMEOUT,
+                chat_id,
+            )
+            return False
         choice = raw.strip().lower()
         if choice in ("y", "yes"):
             return True
@@ -470,7 +584,9 @@ async def _confirm_send(chat_id: str, display_id: str) -> bool:
             return False
         remaining = SAFE_MODE_MAX_CONFIRM_RETRIES - attempt
         if remaining > 0:
-            print(f"  Please enter Y or N. ({remaining} attempt{'s' if remaining != 1 else ''} remaining)")
+            print(
+                f"  Please enter Y or N. ({remaining} attempt{'s' if remaining != 1 else ''} remaining)"
+            )
         else:
             print("  Too many invalid inputs. Send rejected.")
             log.warning(

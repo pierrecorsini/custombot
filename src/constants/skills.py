@@ -24,6 +24,10 @@ SLOW_SKILL_THRESHOLD_SECONDS: float = 5.0
 # automated input sources.
 SAFE_MODE_MAX_CONFIRM_RETRIES: int = 3
 
+# Timeout (in seconds) for each stdin read during safe-mode confirmation.
+# Prevents indefinite blocking when stdin is a pipe or misconfigured environment.
+SAFE_MODE_CONFIRM_TIMEOUT: float = 60.0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool Result Persistence Limits
 # ─────────────────────────────────────────────────────────────────────────────
