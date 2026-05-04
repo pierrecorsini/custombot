@@ -23,7 +23,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, Protocol, Sequence
 
 from src.constants import WORKSPACE_DIR
 from src.core.errors import NonCriticalCategory, log_noncritical
@@ -33,6 +33,7 @@ from src.lifecycle import (
 )
 from src.progress import ProgressBar, maybe_spinner_async
 from src.security.url_sanitizer import sanitize_url_for_logging
+from src.utils.registry import ComponentRegistry
 
 if TYPE_CHECKING:
     from src.config import Config
@@ -76,75 +77,61 @@ class BotComponents:
 class BuilderContext:
     """Mutable state bag shared across all builder steps.
 
-    Each step reads from and writes to this object.  Fields start as
-    ``None`` and are populated as steps execute.
+    Uses a ``ComponentRegistry`` to store dynamically-populated
+    components.  Required fields (``config``, ``workspace``) are
+    typed dataclass fields; step-populated components (``db``,
+    ``llm``, etc.) are stored in the registry and accessed via
+    natural ``ctx.db`` / ``ctx.db = db`` attribute syntax.
     """
+
+    _OWN_SLOTS: ClassVar[frozenset[str]] = frozenset((
+        "config", "workspace", "session_metrics",
+        "component_durations", "_registry",
+    ))
 
     config: Config
     workspace: Path
     session_metrics: SessionMetrics | None = None
 
-    # Populated by steps
-    db: Database | None = None
-    dedup: DeduplicationService | None = None
-    token_usage: TokenUsage | None = None
-    llm: LLMProvider | None = None
-    memory: Memory | None = None
-    vector_memory: VectorMemory | None = None
-    project_store: ProjectStore | None = None
-    message_queue: MessageQueue | None = None
-    routing: RoutingEngine | None = None
-    project_ctx: ProjectContextLoader | None = None
-    instruction_loader: InstructionLoader | None = None
-    skills: SkillRegistry | None = None
-    bot: Bot | None = None
-
     # Tracking
     component_durations: dict[str, float] = field(default_factory=dict)
 
+    # Dynamic component storage — replaces per-field ``X | None = None``
+    _registry: ComponentRegistry = field(default_factory=ComponentRegistry, repr=False)
+
+    def __getattr__(self, name: str) -> Any:
+        """Look up non-slot attributes in the component registry."""
+        try:
+            registry = object.__getattribute__(self, "_registry")
+        except AttributeError:
+            raise AttributeError(name)
+        return registry.get(name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Store known slots normally; everything else in the registry."""
+        if name in self._OWN_SLOTS:
+            object.__setattr__(self, name, value)
+        else:
+            self._registry.register(name, value)
+
     def to_bot_components(self) -> BotComponents:
-        """Build the immutable result from the populated state."""
-        self._validate_required()
-        # Asserts for type-narrowing (validated above).
-        assert self.bot is not None
-        assert self.db is not None
-        assert self.project_store is not None
-        assert self.token_usage is not None
-        assert self.message_queue is not None
-        assert self.llm is not None
-        assert self.dedup is not None
+        """Build the immutable result from the populated registry."""
+        self._registry.validate_required((
+            "bot", "db", "project_store", "token_usage",
+            "message_queue", "llm", "dedup",
+        ))
         return BotComponents(
-            bot=self.bot,
-            db=self.db,
-            vector_memory=self.vector_memory,
-            project_store=self.project_store,
-            token_usage=self.token_usage,
-            message_queue=self.message_queue,
-            llm=self.llm,
-            dedup=self.dedup,
-            routing_engine=self.routing,
+            bot=self._registry.require("bot"),
+            db=self._registry.require("db"),
+            vector_memory=self._registry.get("vector_memory"),
+            project_store=self._registry.require("project_store"),
+            token_usage=self._registry.require("token_usage"),
+            message_queue=self._registry.require("message_queue"),
+            llm=self._registry.require("llm"),
+            dedup=self._registry.require("dedup"),
+            routing_engine=self._registry.get("routing"),
             component_durations=self.component_durations,
         )
-
-    def _validate_required(self) -> None:
-        """Raise if any required component was not populated by a step."""
-        missing = [
-            name
-            for name, val in (
-                ("bot", self.bot),
-                ("db", self.db),
-                ("project_store", self.project_store),
-                ("token_usage", self.token_usage),
-                ("message_queue", self.message_queue),
-                ("llm", self.llm),
-                ("dedup", self.dedup),
-            )
-            if val is None
-        ]
-        if missing:
-            raise RuntimeError(
-                f"BuilderContext incomplete — step(s) did not populate: {', '.join(missing)}"
-            )
 
 
 class BuilderStepFactory(Protocol):

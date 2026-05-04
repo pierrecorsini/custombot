@@ -25,7 +25,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, ClassVar, Protocol, Sequence
 
 from src.config import CONFIG_PATH
 from src.constants import (
@@ -36,6 +36,7 @@ from src.constants import (
     WORKSPACE_DIR,
 )
 from src.core.orchestrator import StepOrchestrator
+from src.utils.registry import ComponentRegistry
 from src.lifecycle import _log_startup_begin
 
 if TYPE_CHECKING:
@@ -61,28 +62,43 @@ log = logging.getLogger(__name__)
 class StartupContext:
     """Mutable state bag shared across all startup steps.
 
-    Each step reads from and writes to this object.  Fields start as
-    ``None`` and are populated as steps execute.
+    Uses a ``ComponentRegistry`` to store dynamically-populated
+    components.  Required fields (``config``, ``session_metrics``,
+    ``app``) are typed dataclass fields; step-populated components
+    are stored in the registry and accessed via natural attribute
+    syntax (``ctx.channel``, ``ctx.scheduler = scheduler``, etc.).
     """
+
+    _OWN_SLOTS: ClassVar[frozenset[str]] = frozenset((
+        "config", "session_metrics", "app",
+        "initialized_components", "component_durations", "_registry",
+    ))
 
     config: Config
     session_metrics: SessionMetrics
     app: Application  # TYPE_CHECKING-guarded to avoid circular import
 
-    # Populated by steps
-    shutdown_mgr: GracefulShutdown | None = None
-    executor: ThreadPoolExecutor | None = None
-    components: BotComponents | None = None
-    scheduler: TaskScheduler | None = None
-    channel: BaseChannel | None = None
-    pipeline: MessagePipeline | None = None
-    workspace_monitor: WorkspaceMonitor | None = None
-    config_watcher: ConfigWatcher | None = None
-    health_server: HealthServer | None = None
-
     # Tracking
     initialized_components: list[str] = field(default_factory=list)
     component_durations: dict[str, float] = field(default_factory=dict)
+
+    # Dynamic component storage — replaces per-field ``X | None = None``
+    _registry: ComponentRegistry = field(default_factory=ComponentRegistry, repr=False)
+
+    def __getattr__(self, name: str) -> Any:
+        """Look up non-slot attributes in the component registry."""
+        try:
+            registry = object.__getattribute__(self, "_registry")
+        except AttributeError:
+            raise AttributeError(name)
+        return registry.get(name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Store known slots normally; everything else in the registry."""
+        if name in self._OWN_SLOTS:
+            object.__setattr__(self, name, value)
+        else:
+            self._registry.register(name, value)
 
     def validate_populated(self) -> _PopulatedStartupContext:
         """Validate that all required components have been populated.
@@ -93,41 +109,19 @@ class StartupContext:
         Returns a ``_PopulatedStartupContext`` with non-optional types,
         enabling type-safe downstream access without Optional unwrapping.
         """
-        required: list[tuple[str, object]] = [
-            ("shutdown_mgr", self.shutdown_mgr),
-            ("components", self.components),
-            ("scheduler", self.scheduler),
-            ("channel", self.channel),
-            ("pipeline", self.pipeline),
-            ("executor", self.executor),
-            ("workspace_monitor", self.workspace_monitor),
-            ("config_watcher", self.config_watcher),
-        ]
-        missing = [name for name, value in required if value is None]
-        if missing:
-            raise RuntimeError(
-                f"Startup completed but required components are missing: "
-                f"{', '.join(missing)}"
-            )
-        # The loop above guarantees all values are non-None.
-        # Assert per-field so mypy narrows Optional[X] → X.
-        assert self.shutdown_mgr is not None
-        assert self.components is not None
-        assert self.scheduler is not None
-        assert self.channel is not None
-        assert self.pipeline is not None
-        assert self.executor is not None
-        assert self.workspace_monitor is not None
-        assert self.config_watcher is not None
+        self._registry.validate_required((
+            "shutdown_mgr", "components", "scheduler", "channel",
+            "pipeline", "executor", "workspace_monitor", "config_watcher",
+        ))
         return _PopulatedStartupContext(
-            shutdown_mgr=self.shutdown_mgr,
-            components=self.components,
-            scheduler=self.scheduler,
-            channel=self.channel,
-            pipeline=self.pipeline,
-            executor=self.executor,
-            workspace_monitor=self.workspace_monitor,
-            config_watcher=self.config_watcher,
+            shutdown_mgr=self._registry.require("shutdown_mgr"),
+            components=self._registry.require("components"),
+            scheduler=self._registry.require("scheduler"),
+            channel=self._registry.require("channel"),
+            pipeline=self._registry.require("pipeline"),
+            executor=self._registry.require("executor"),
+            workspace_monitor=self._registry.require("workspace_monitor"),
+            config_watcher=self._registry.require("config_watcher"),
         )
 
 
@@ -217,9 +211,7 @@ async def _step_shutdown_manager(ctx: StartupContext) -> str | None:
 async def _step_thread_pool(ctx: StartupContext) -> str | None:
     """Create and install the default thread-pool executor."""
     workers = ctx.config.max_thread_pool_workers or DEFAULT_THREAD_POOL_WORKERS
-    executor = ThreadPoolExecutor(
-        max_workers=workers, thread_name_prefix="cb-worker"
-    )
+    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="cb-worker")
     asyncio.get_running_loop().set_default_executor(executor)
     ctx.executor = executor
     ctx.app._executor = executor
@@ -323,9 +315,7 @@ async def _step_health_server(ctx: StartupContext) -> str | None:
             token_usage=ctx.components.token_usage,
             bot=ctx.components.bot,
             scheduler=ctx.scheduler,
-            llm_log_dir=(
-                f"{WORKSPACE_DIR}/logs/llm" if ctx.config.log_llm else None
-            ),
+            llm_log_dir=(f"{WORKSPACE_DIR}/logs/llm" if ctx.config.log_llm else None),
             workspace_dir=WORKSPACE_DIR,
             shutdown_mgr=ctx.shutdown_mgr,
             startup_durations=startup_durations,
@@ -384,11 +374,10 @@ async def _step_config_watcher(ctx: StartupContext) -> str | None:
         llm=ctx.components.llm,
         shutdown_mgr=ctx.shutdown_mgr,
         reconfigure_logging=ctx.app._reconfigure_logging,
+        on_config_swap=ctx.app._swap_config,
     )
     if applier is None:
-        log.debug(
-            "Config watcher: channel does not support hot-reload — using no-op applier"
-        )
+        log.debug("Config watcher: channel does not support hot-reload — using no-op applier")
 
         applier = _NoOpApplier()
 
