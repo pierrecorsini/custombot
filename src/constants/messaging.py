@@ -42,6 +42,27 @@ OUTBOUND_DEDUP_TTL_SECONDS: float = 60.0
 # unbounded memory growth.  Each entry is a SHA-256 hex digest + timestamp.
 OUTBOUND_DEDUP_MAX_SIZE: int = 500
 
+# Maximum number of buffered outbound recordings before an early flush is
+# forced.  During burst delivery, record_outbound() appends (chat_id, text)
+# pairs to a plain list that is flushed lazily.  Without a cap, a sustained
+# burst could grow the list unboundedly, spiking memory.  When the cap is
+# hit, the buffer is flushed immediately and a warning is logged.
+OUTBOUND_DEDUP_BUFFER_MAX_SIZE: int = 1_000
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Inbound Message Dedup LRU Cache
+# ─────────────────────────────────────────────────────────────────────────────
+
+# TTL (seconds) for the inbound dedup LRU cache.  After a message_id is looked
+# up in the database, the result is cached to avoid repeated async DB calls.
+# True duplicates arrive within seconds; unique IDs never need re-checking
+# after the first miss ages out.
+INBOUND_DEDUP_CACHE_TTL_SECONDS: float = 300.0  # 5 minutes
+
+# Maximum number of inbound dedup cache entries.  Bounded LRU eviction
+# prevents unbounded memory growth under high-throughput bursts.
+INBOUND_DEDUP_CACHE_MAX_SIZE: int = 10_000
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Event Bus Configuration
 # ─────────────────────────────────────────────────────────────────────────────

@@ -4,7 +4,8 @@ src/core/dedup.py — Unified deduplication service.
 Consolidates inbound (message-id) and outbound (content-hash) dedup
 strategies behind a single service with unified stats tracking.
 
-- Inbound: checks message_id against the database's persistent index.
+- Inbound: checks message_id against the database's persistent index,
+  with an in-memory LRU cache to short-circuit repeated async DB lookups.
 - Outbound: xxHash (xxh64) content hash with TTL-based LRU cache.
 
 Usage::
@@ -30,7 +31,13 @@ from typing import TYPE_CHECKING
 
 import xxhash
 
-from src.constants import OUTBOUND_DEDUP_MAX_SIZE, OUTBOUND_DEDUP_TTL_SECONDS
+from src.constants import (
+    INBOUND_DEDUP_CACHE_MAX_SIZE,
+    INBOUND_DEDUP_CACHE_TTL_SECONDS,
+    OUTBOUND_DEDUP_BUFFER_MAX_SIZE,
+    OUTBOUND_DEDUP_MAX_SIZE,
+    OUTBOUND_DEDUP_TTL_SECONDS,
+)
 from src.exceptions import DatabaseError
 from src.utils import BoundedOrderedDict
 
@@ -78,17 +85,34 @@ class DeduplicationService:
     guaranteed, so no additional locking is needed for the outbound cache.
     """
 
-    __slots__ = ("_db", "_outbound_cache", "_stats")
+    __slots__ = (
+        "_db",
+        "_inbound_cache",
+        "_outbound_buffer",
+        "_outbound_buffer_max",
+        "_outbound_cache",
+        "_stats",
+    )
 
     def __init__(
         self,
         db: Storage,
         outbound_max_size: int = OUTBOUND_DEDUP_MAX_SIZE,
         outbound_ttl: float = OUTBOUND_DEDUP_TTL_SECONDS,
+        inbound_cache_max_size: int = INBOUND_DEDUP_CACHE_MAX_SIZE,
+        inbound_cache_ttl: float = INBOUND_DEDUP_CACHE_TTL_SECONDS,
+        outbound_buffer_max: int = OUTBOUND_DEDUP_BUFFER_MAX_SIZE,
     ) -> None:
         self._db = db
+        self._inbound_cache: BoundedOrderedDict[str, bool] = BoundedOrderedDict(
+            max_size=inbound_cache_max_size,
+            ttl=inbound_cache_ttl,
+        )
+        self._outbound_buffer: list[tuple[str, str]] = []
+        self._outbound_buffer_max = outbound_buffer_max
         self._outbound_cache: BoundedOrderedDict[str, bool] = BoundedOrderedDict(
-            max_size=outbound_max_size, ttl=outbound_ttl,
+            max_size=outbound_max_size,
+            ttl=outbound_ttl,
         )
         self._stats = DedupStats()
 
@@ -97,13 +121,26 @@ class DeduplicationService:
     async def is_inbound_duplicate(self, message_id: str) -> bool:
         """Check if *message_id* was already processed.
 
-        Delegates to the database's in-memory message-ID index (rebuilt from
-        JSONL on startup).  Tracks hits/misses for metrics.
+        An in-memory LRU cache is checked first to short-circuit the
+        async DB call.  Cache entries store the boolean result from the
+        DB query and expire after the configured TTL.  True duplicates
+        arrive within seconds, and unique IDs never need re-checking
+        after the first miss ages out.
 
         On database failure, logs a warning and returns ``False`` so the
         message is allowed through — graceful degradation during transient
-        DB outages.
+        DB outages.  The failure is NOT cached to avoid stale negative
+        entries masking a recoverable DB.
         """
+        # Fast path: check in-memory LRU cache before the async DB call.
+        cached = self._inbound_cache.get(message_id)
+        if cached is not None:
+            if cached:
+                self._stats.inbound_hits += 1
+            else:
+                self._stats.inbound_misses += 1
+            return cached
+
         try:
             exists = await self._db.message_exists(message_id)
         except DatabaseError:
@@ -113,6 +150,10 @@ class DeduplicationService:
                 exc_info=True,
             )
             return False
+
+        # Persist the DB result in the LRU cache.
+        self._inbound_cache[message_id] = exists
+
         if exists:
             self._stats.inbound_hits += 1
         else:
@@ -129,8 +170,12 @@ class DeduplicationService:
         the cache.  This two-phase API prevents false positives when
         the send fails after the check passes.
 
+        Flushes any buffered outbound recordings before checking so
+        that recently-recorded entries are visible.
+
         TTL expiry is handled lazily by ``BoundedOrderedDict``.
         """
+        self.flush_outbound_batch()
         key = outbound_key(chat_id, text)
         if self._outbound_cache.get(key) is not None:
             self._stats.outbound_hits += 1
@@ -150,6 +195,7 @@ class DeduplicationService:
             successful send).  This method records on miss, which causes
             false positives if the send subsequently fails.
         """
+        self.flush_outbound_batch()
         key = outbound_key(chat_id, text)
         if self._outbound_cache.get(key) is not None:
             self._stats.outbound_hits += 1
@@ -159,13 +205,40 @@ class DeduplicationService:
         return False
 
     def record_outbound(self, chat_id: str, text: str) -> None:
-        """Explicitly record that *text* was sent to *chat_id*.
+        """Buffer an outbound recording for batch insertion.
 
-        Call this **after** the send succeeds to populate the dedup cache.
-        Safe to call multiple times — overwrites the previous entry.
+        Call this **after** the send succeeds.  Entries are accumulated in
+        an internal buffer and flushed to the dedup cache before the next
+        outbound check or on explicit :meth:`flush_outbound_batch`.  During
+        burst delivery this defers hash computation and cache eviction,
+        reducing per-message overhead.
+
+        If the buffer reaches ``_outbound_buffer_max``, it is flushed
+        immediately to prevent unbounded memory growth during sustained
+        bursts.
         """
-        key = outbound_key(chat_id, text)
-        self._outbound_cache[key] = True
+        if len(self._outbound_buffer) >= self._outbound_buffer_max:
+            log.warning(
+                "Outbound dedup buffer reached cap (%d) — flushing early",
+                self._outbound_buffer_max,
+            )
+            self.flush_outbound_batch()
+        self._outbound_buffer.append((chat_id, text))
+
+    def flush_outbound_batch(self) -> None:
+        """Flush buffered outbound recordings to the dedup cache.
+
+        Computes content hashes for all buffered ``(chat_id, text)`` pairs
+        and inserts them into the ``BoundedOrderedDict`` in a single batch,
+        amortising eviction overhead.  Called automatically before outbound
+        checks; can also be called explicitly after a burst of sends.
+        """
+        if not self._outbound_buffer:
+            return
+        buffer = self._outbound_buffer
+        self._outbound_buffer = []
+        now_entries = [(outbound_key(cid, txt), True) for cid, txt in buffer]
+        self._outbound_cache.batch_set(now_entries)
 
     def check_and_record_outbound(self, chat_id: str, text: str) -> bool:
         """Combined check + record: returns ``True`` if duplicate.
@@ -174,7 +247,11 @@ class DeduplicationService:
         check and (on miss) the recording in a single pass.  Use this
         instead of calling :meth:`check_outbound_duplicate` followed by
         :meth:`record_outbound` to avoid redundant xxh64 computation.
+
+        Flushes any buffered outbound recordings before checking so
+        that recently-recorded entries are visible.
         """
+        self.flush_outbound_batch()
         key = outbound_key(chat_id, text)
         if self._outbound_cache.get(key) is not None:
             self._stats.outbound_hits += 1
