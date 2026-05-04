@@ -555,14 +555,35 @@ class Database:
         return count
 
     async def close(self) -> None:
-        """Flush any pending writes and close database."""
-        # Flush any debounced chat writes
+        """Flush any pending writes and close database.
+
+        Each flush is wrapped individually so that a failure in one does
+        not prevent the others or the handle-pool cleanup from running.
+        Failures are logged as warnings rather than propagated so that
+        ``close()`` always releases OS file descriptors.
+        """
+        # Flush any debounced chat writes — best-effort during shutdown.
         if self._chats_dirty:
-            await self._save_chats()
+            try:
+                await self._save_chats()
+                self._chats_dirty = False
+            except Exception:
+                log.warning(
+                    "Failed to flush dirty chats during close — data may be lost",
+                    exc_info=True,
+                    extra=_db_log_extra(),
+                )
         # Flush debounced index writes via MessageStore
         if self._message_store.index_dirty:
-            await self._message_store.save_message_index()
-            self._message_store.index_dirty = False
+            try:
+                await self._message_store.save_message_index()
+                self._message_store.index_dirty = False
+            except Exception:
+                log.warning(
+                    "Failed to flush message index during close",
+                    exc_info=True,
+                    extra=_db_log_extra(),
+                )
         # Close all pooled file handles to release OS file descriptors
         self._file_pool.close_all()
         self._read_pool.close_all()
@@ -649,6 +670,45 @@ class Database:
             _upsert,
             timeout=DEFAULT_DB_TIMEOUT,
             operation="upsert_chat",
+        )
+
+    async def upsert_chat_and_save_message(
+        self,
+        chat_id: str,
+        sender_name: str,
+        role: str,
+        content: str,
+        name: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> str:
+        """Upsert chat metadata and persist a message in one logical operation.
+
+        Performs the lightweight in-memory chat update inline (no
+        ``_guarded_write``) and delegates only the message write through the
+        guarded pipeline, reducing circuit-breaker checks and retry overhead
+        from two calls to one.
+        """
+        now = time.time()
+        async with self._chats_lock:
+            if chat_id in self._chats:
+                self._chats[chat_id]["last_active"] = now
+                if sender_name:
+                    self._chats[chat_id]["name"] = sender_name
+            else:
+                self._chats[chat_id] = {
+                    "name": sender_name,
+                    "created_at": now,
+                    "last_active": now,
+                    "metadata": {},
+                }
+            self._chats_dirty = True
+
+        return await self.save_message(
+            chat_id=chat_id,
+            role=role,
+            content=content,
+            name=name,
+            message_id=message_id,
         )
 
     async def flush_chats(self) -> None:

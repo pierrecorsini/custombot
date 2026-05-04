@@ -67,9 +67,7 @@ class TestGenerationCounter:
     def test_initial_generation_is_zero(self, db: Database) -> None:
         assert db.get_generation("chat_1") == 0
 
-    async def test_generation_increments_on_save_message(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_generation_increments_on_save_message(self, initialized_db: Database) -> None:
         db = initialized_db
         await db.save_message("chat_1", "user", "hello", "Alice")
         assert db.get_generation("chat_1") == 1
@@ -85,9 +83,7 @@ class TestGenerationCounter:
         await db.save_messages_batch("chat_1", messages)
         assert db.get_generation("chat_1") == 1
 
-    async def test_generation_increments_multiple_writes(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_generation_increments_multiple_writes(self, initialized_db: Database) -> None:
         db = initialized_db
         await db.save_message("chat_1", "user", "msg1", "Alice")
         await db.save_message("chat_1", "assistant", "resp1")
@@ -126,15 +122,19 @@ class TestBatchWriteAtomicity:
         content_rows = [r for r in rows if r.get("content")]
         assert len(content_rows) == 3
 
-    async def test_concurrent_batch_writes_serialized(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_concurrent_batch_writes_serialized(self, initialized_db: Database) -> None:
         """Concurrent save_messages_batch calls for the same chat are serialized."""
         db = initialized_db
         await db.upsert_chat("chat_1", "Alice")
 
-        batch1 = [{"role": "user", "content": "batch1-msg1"}, {"role": "assistant", "content": "batch1-resp1"}]
-        batch2 = [{"role": "user", "content": "batch2-msg1"}, {"role": "assistant", "content": "batch2-resp1"}]
+        batch1 = [
+            {"role": "user", "content": "batch1-msg1"},
+            {"role": "assistant", "content": "batch1-resp1"},
+        ]
+        batch2 = [
+            {"role": "user", "content": "batch2-msg1"},
+            {"role": "assistant", "content": "batch2-resp1"},
+        ]
 
         # Run both batches concurrently
         results = await asyncio.gather(
@@ -196,9 +196,7 @@ class TestNameSanitization:
     def test_name_with_emoji_preserved(self) -> None:
         assert _sanitize_name("Alice 😊") == "Alice 😊"
 
-    async def test_build_message_record_sanitizes_name(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_build_message_record_sanitizes_name(self, initialized_db: Database) -> None:
         db = initialized_db
         await db.upsert_chat("chat_1", "Alice")
         await db.save_message("chat_1", "user", "hello", "Bob\x00 Evil")
@@ -208,9 +206,7 @@ class TestNameSanitization:
         assert len(content_rows) == 1
         assert content_rows[0]["name"] == "Bob Evil"
 
-    async def test_build_message_record_truncates_long_name(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_build_message_record_truncates_long_name(self, initialized_db: Database) -> None:
         db = initialized_db
         await db.upsert_chat("chat_1", "Alice")
         long_name = "X" * 300
@@ -361,9 +357,7 @@ class TestChatGenerationsBoundedGrowth:
         # (c) Early chats were evicted — get_generation() returns 0 without error.
         for i in range(0, MAX_CHAT_GENERATIONS, 100):
             chat_id = f"chat_{i:08d}"
-            assert db.get_generation(chat_id) == 0, (
-                f"Evicted {chat_id} should return generation 0"
-            )
+            assert db.get_generation(chat_id) == 0, f"Evicted {chat_id} should return generation 0"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -379,17 +373,13 @@ class TestWriteCircuitBreaker:
         assert db.write_breaker.state == CircuitState.CLOSED
         assert db.write_breaker.failure_count == 0
 
-    async def test_write_succeeds_when_closed(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_write_succeeds_when_closed(self, initialized_db: Database) -> None:
         """Normal write goes through when breaker is CLOSED."""
         mid = await initialized_db.save_message("chat_1", "user", "hello")
         assert mid is not None
         assert initialized_db.write_breaker.state == CircuitState.CLOSED
 
-    async def test_breaker_opens_after_consecutive_failures(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_breaker_opens_after_consecutive_failures(self, initialized_db: Database) -> None:
         """Breaker transitions to OPEN after failure_threshold consecutive failures."""
         db = initialized_db
         # Force the append to fail by pointing it at a method that raises.
@@ -411,9 +401,7 @@ class TestWriteCircuitBreaker:
         # Restore so teardown doesn't break
         db._message_store._append_to_file = original_append  # type: ignore[assignment]
 
-    async def test_fast_fail_when_open(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_fast_fail_when_open(self, initialized_db: Database) -> None:
         """When breaker is OPEN, writes are rejected immediately without timeout."""
         db = initialized_db
 
@@ -425,9 +413,7 @@ class TestWriteCircuitBreaker:
         with pytest.raises(DatabaseError, match="circuit breaker open"):
             await db.save_message("chat_1", "user", "should be rejected")
 
-    async def test_success_resets_failures(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_success_resets_failures(self, initialized_db: Database) -> None:
         """A successful write resets the failure counter in CLOSED state."""
         db = initialized_db
 
@@ -441,9 +427,7 @@ class TestWriteCircuitBreaker:
         assert db.write_breaker.failure_count == 0
         assert db.write_breaker.state == CircuitState.CLOSED
 
-    async def test_batch_write_guarded(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_batch_write_guarded(self, initialized_db: Database) -> None:
         """save_messages_batch is also protected by the write breaker."""
         db = initialized_db
 
@@ -453,13 +437,14 @@ class TestWriteCircuitBreaker:
         assert db.write_breaker.state == CircuitState.OPEN
 
         with pytest.raises(DatabaseError, match="circuit breaker open"):
-            await db.save_messages_batch("chat_1", [
-                {"role": "user", "content": "batch msg"},
-            ])
+            await db.save_messages_batch(
+                "chat_1",
+                [
+                    {"role": "user", "content": "batch msg"},
+                ],
+            )
 
-    async def test_upsert_chat_guarded(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_upsert_chat_guarded(self, initialized_db: Database) -> None:
         """upsert_chat is also protected by the write breaker."""
         db = initialized_db
 
@@ -471,9 +456,7 @@ class TestWriteCircuitBreaker:
         with pytest.raises(DatabaseError, match="circuit breaker open"):
             await db.upsert_chat("chat_1", "Alice")
 
-    async def test_read_not_blocked_by_open_breaker(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_read_not_blocked_by_open_breaker(self, initialized_db: Database) -> None:
         """Read operations bypass the write circuit breaker entirely."""
         db = initialized_db
 
@@ -491,9 +474,7 @@ class TestWriteCircuitBreaker:
         content_messages = [m for m in messages if m.get("content")]
         assert len(content_messages) == 1
 
-    async def test_breaker_uses_async_lock(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_breaker_uses_async_lock(self, initialized_db: Database) -> None:
         """CircuitBreaker uses AsyncLock for event-loop compatibility.
 
         The breaker's methods (is_open, record_success, record_failure) are
@@ -589,12 +570,8 @@ class TestConcurrentBatchAndCompression:
             await db.save_message(chat_id, "user", f"prefill-{i}-{padding}")
 
         # Act — two batches written concurrently; first triggers compression
-        batch1 = [
-            {"role": "user", "content": f"batch1-msg{i}-{padding}"} for i in range(5)
-        ]
-        batch2 = [
-            {"role": "user", "content": f"batch2-msg{i}-{padding}"} for i in range(5)
-        ]
+        batch1 = [{"role": "user", "content": f"batch1-msg{i}-{padding}"} for i in range(5)]
+        batch2 = [{"role": "user", "content": f"batch2-msg{i}-{padding}"} for i in range(5)]
 
         ids1, ids2 = await asyncio.gather(
             db.save_messages_batch(chat_id, batch1),
@@ -608,9 +585,7 @@ class TestConcurrentBatchAndCompression:
         # JSONL file must be valid and fully parseable
         msg_file = db._message_file(chat_id)
         raw_lines = [
-            line
-            for line in msg_file.read_text(encoding="utf-8").splitlines()
-            if line.strip()
+            line for line in msg_file.read_text(encoding="utf-8").splitlines() if line.strip()
         ]
         for line in raw_lines:
             parsed = json.loads(line)
@@ -710,9 +685,7 @@ class TestReadFileLinesReverseSeek:
     ) -> None:
         """Small file (<64KB): _read_file_lines returns last ``limit`` lines."""
         file_path = tmp_path / "small.jsonl"
-        file_path.write_text(
-            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
-        )
+        file_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
         db = Database(str(tmp_path / ".data"))
         result = db._message_store._read_file_lines(file_path, limit=limit)
@@ -722,14 +695,10 @@ class TestReadFileLinesReverseSeek:
         lines=st.lists(_line_text, min_size=0, max_size=30),
     )
     @_hs
-    def test_file_smaller_than_limit_returns_all(
-        self, tmp_path: Path, lines: list[str]
-    ) -> None:
+    def test_file_smaller_than_limit_returns_all(self, tmp_path: Path, lines: list[str]) -> None:
         """When file has fewer lines than limit, all non-empty lines are returned."""
         file_path = tmp_path / "short.jsonl"
-        file_path.write_text(
-            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
-        )
+        file_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
         db = Database(str(tmp_path / ".data"))
         result = db._message_store._read_file_lines(file_path, limit=100)
@@ -765,9 +734,7 @@ class TestReadFileLinesReverseSeek:
     ) -> None:
         """Empty lines in the file are filtered from results."""
         file_path = tmp_path / "mixed.jsonl"
-        file_path.write_text(
-            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
-        )
+        file_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
         db = Database(str(tmp_path / ".data"))
         result = db._message_store._read_file_lines(file_path, limit=limit)
@@ -821,9 +788,7 @@ class TestReadFileLinesReverseSeek:
         expected = self._expected_lines_large(lines, limit)
         # Verify ordering: each line should sort before the next
         for i in range(len(result) - 1):
-            assert result[i] < result[i + 1], (
-                f"Lines not in chronological order at index {i}"
-            )
+            assert result[i] < result[i + 1], f"Lines not in chronological order at index {i}"
         assert result == expected
 
     # ── Deterministic edge-case tests ──────────────────────────────────
@@ -878,9 +843,7 @@ class TestReadFileLinesReverseSeek:
 
     # ── Large-file edge-case tests ──────────────────────────────────────
 
-    def test_large_file_no_newlines_falls_back_to_deque(
-        self, tmp_path: Path
-    ) -> None:
+    def test_large_file_no_newlines_falls_back_to_deque(self, tmp_path: Path) -> None:
         """Large corrupted file (>64KB, no newlines) triggers _MAX_SEEK_ITERATIONS
         fallback and returns the single long line via the deque path."""
         # Build a file >64KB with no newlines
@@ -900,9 +863,7 @@ class TestReadFileLinesReverseSeek:
         limit=st.integers(min_value=1, max_value=50),
     )
     @_hs
-    def test_boundary_near_64kb(
-        self, tmp_path: Path, line_count: int, limit: int
-    ) -> None:
+    def test_boundary_near_64kb(self, tmp_path: Path, line_count: int, limit: int) -> None:
         """File near the 64KB small/large threshold returns correct lines
         regardless of which code path is taken."""
         # Each line is ~80 bytes, so 300-700 lines spans roughly 24KB-56KB.
@@ -1005,9 +966,7 @@ class TestMessageFilePathCache:
         assert path1 == path2
         assert path1 is path2  # same object from cache
 
-    def test_different_chat_ids_return_different_paths(
-        self, db: Database
-    ) -> None:
+    def test_different_chat_ids_return_different_paths(self, db: Database) -> None:
         """Different chat_ids resolve to different message files."""
         path_a = db._message_file("chat_alpha")
         path_b = db._message_file("chat_beta")
@@ -1022,9 +981,7 @@ class TestMessageFilePathCache:
         assert path.suffix == ".jsonl"
         assert path.stem == "chat_123"
 
-    def test_invalid_chat_id_empty_raises_before_caching(
-        self, db: Database
-    ) -> None:
+    def test_invalid_chat_id_empty_raises_before_caching(self, db: Database) -> None:
         """Empty chat_id raises ValueError and is NOT cached."""
         with pytest.raises(ValueError, match="chat_id"):
             db._message_file("")
@@ -1056,9 +1013,7 @@ class TestMessageFilePathCache:
             db._message_file("   ")
         assert "   " not in db._message_file_cache
 
-    def test_valid_chat_id_cached_after_first_call(
-        self, db: Database
-    ) -> None:
+    def test_valid_chat_id_cached_after_first_call(self, db: Database) -> None:
         """A valid chat_id appears in the cache after first resolution."""
         assert "chat_valid" not in db._message_file_cache
         db._message_file("chat_valid")
@@ -1107,9 +1062,7 @@ class TestMessageFilePathCache:
         assert "chat_mid" in db._message_file_cache
         assert "chat_new_overflow" in db._message_file_cache
 
-    def test_repeated_access_refreshes_lru_position(
-        self, db: Database
-    ) -> None:
+    def test_repeated_access_refreshes_lru_position(self, db: Database) -> None:
         """Accessing a cached entry moves it to most-recently-used."""
         from src.constants import MAX_LRU_CACHE_SIZE
 
@@ -1254,9 +1207,7 @@ class TestFileHandlePool:
         finally:
             monkeypatch.undo()
 
-    def test_oserror_persistent_raises_database_error(
-        self, tmp_path: Path
-    ) -> None:
+    def test_oserror_persistent_raises_database_error(self, tmp_path: Path) -> None:
         """If retry also fails with OSError, DatabaseError is raised."""
         pool = _FileHandlePool(max_size=10)
         f = tmp_path / "messages.jsonl"
@@ -1408,7 +1359,8 @@ class TestReadHandlePool:
         assert len(pool._handles) == 1
 
     def test_staleness_detection_reopens_on_size_change(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """Handle is reopened when the file size changes since last open."""
         f = tmp_path / "messages.jsonl"
@@ -1457,7 +1409,8 @@ class TestReadHandlePool:
             monkeypatch.undo()
 
     def test_oserror_persistent_raises_database_error(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """If retry also fails, DatabaseError is raised."""
         f = tmp_path / "messages.jsonl"
@@ -1539,9 +1492,7 @@ class TestSaveChatsEdgeCases:
         raw = db._chats_file.read_text(encoding="utf-8")
         assert raw.strip() == "{}"
 
-    async def test_save_chats_with_unicode_names(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_save_chats_with_unicode_names(self, initialized_db: Database) -> None:
         """Unicode chat names are persisted without corruption."""
         db = initialized_db
         await db.upsert_chat("chat_1", "Tëst 用户 😊")
@@ -1552,9 +1503,7 @@ class TestSaveChatsEdgeCases:
         raw = db._chats_file.read_text(encoding="utf-8")
         assert "Tëst 用户 😊" in raw
 
-    async def test_save_chats_with_special_chars_in_name(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_save_chats_with_special_chars_in_name(self, initialized_db: Database) -> None:
         """Chat names with special characters like quotes/backslashes are escaped."""
         db = initialized_db
         await db.upsert_chat('chat_"x"', 'Name with "quotes"')
@@ -1568,9 +1517,7 @@ class TestSaveChatsEdgeCases:
         parsed = json.loads(raw)
         assert 'Name with "quotes"' in str(parsed)
 
-    async def test_save_chats_debounce_skips_rapid_saves(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_save_chats_debounce_skips_rapid_saves(self, initialized_db: Database) -> None:
         """Rapid upsert_chat calls debounce writes — only one _save_chats."""
         db = initialized_db
         await db.upsert_chat("c1", "A")
@@ -1591,9 +1538,7 @@ class TestSaveChatsEdgeCases:
         parsed = json.loads(raw)
         assert len(parsed) == 3
 
-    async def test_save_chats_atomic_write_on_tmp_file(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_save_chats_atomic_write_on_tmp_file(self, initialized_db: Database) -> None:
         """_save_chats writes atomically — intermediate tmp file shouldn't leak."""
         db = initialized_db
         await db.upsert_chat("chat_1", "Test")
@@ -1604,9 +1549,7 @@ class TestSaveChatsEdgeCases:
         tmp_file = db._chats_file.with_suffix(".json.tmp")
         assert not tmp_file.exists()
 
-    async def test_flush_chats_noop_when_not_dirty(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_flush_chats_noop_when_not_dirty(self, initialized_db: Database) -> None:
         """flush_chats() is a no-op when _chats_dirty is False."""
         db = initialized_db
 
@@ -1626,9 +1569,7 @@ class TestSaveChatsEdgeCases:
         mtime_after = db._chats_file.stat().st_mtime
         assert mtime_before == mtime_after
 
-    async def test_list_chats_returns_sorted_by_last_active(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_list_chats_returns_sorted_by_last_active(self, initialized_db: Database) -> None:
         """list_chats returns chats sorted by last_active (most recent first)."""
         db = initialized_db
 
@@ -1703,9 +1644,7 @@ class TestJsonlSchemaMigration:
         assert header.get("type") == "header"
         assert header.get("_version") == 1
 
-    def test_file_with_existing_header_not_modified(
-        self, tmp_path: Path
-    ) -> None:
+    def test_file_with_existing_header_not_modified(self, tmp_path: Path) -> None:
         """JSONL that already has a current-version header is not modified."""
         data_dir = tmp_path / ".data"
         db = Database(str(data_dir))
@@ -1766,9 +1705,7 @@ class TestRunWithTimeout:
 class TestGuardedWriteRetry:
     """Verify _guarded_write retries on transient OSError."""
 
-    async def test_oserror_retried_and_eventually_succeeds(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_oserror_retried_and_eventually_succeeds(self, initialized_db: Database) -> None:
         """First write_fn() raises OSError, second succeeds."""
         db = initialized_db
         call_count = 0
@@ -1780,15 +1717,11 @@ class TestGuardedWriteRetry:
                 raise OSError("transient disk error")
             return "ok"
 
-        result = await db._guarded_write(
-            _flaky_write, timeout=5.0, operation="test_retry"
-        )
+        result = await db._guarded_write(_flaky_write, timeout=5.0, operation="test_retry")
         assert result == "ok"
         assert call_count == 2
 
-    async def test_oserror_exhausted_retries_raises(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_oserror_exhausted_retries_raises(self, initialized_db: Database) -> None:
         """When all retries fail with OSError, the OSError is re-raised."""
         db = initialized_db
 
@@ -1796,13 +1729,9 @@ class TestGuardedWriteRetry:
             raise OSError("persistent disk error")
 
         with pytest.raises(OSError, match="persistent disk error"):
-            await db._guarded_write(
-                _always_fail, timeout=5.0, operation="test_exhausted"
-            )
+            await db._guarded_write(_always_fail, timeout=5.0, operation="test_exhausted")
 
-    async def test_database_error_not_retried(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_database_error_not_retried(self, initialized_db: Database) -> None:
         """DatabaseError (e.g. from timeout) is NOT retried — re-raised immediately."""
         db = initialized_db
         call_count = 0
@@ -1813,15 +1742,11 @@ class TestGuardedWriteRetry:
             raise DatabaseError("operation timed out", operation="test")
 
         with pytest.raises(DatabaseError, match="timed out"):
-            await db._guarded_write(
-                _timeout_write, timeout=5.0, operation="test_db_error"
-            )
+            await db._guarded_write(_timeout_write, timeout=5.0, operation="test_db_error")
         # Should only be called once (no retry)
         assert call_count == 1
 
-    async def test_circuit_breaker_open_rejects_immediately(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_circuit_breaker_open_rejects_immediately(self, initialized_db: Database) -> None:
         """When circuit breaker is open, _guarded_write rejects without calling write_fn."""
         db = initialized_db
         call_count = 0
@@ -1836,18 +1761,14 @@ class TestGuardedWriteRetry:
             return "unexpected"
 
         with pytest.raises(DatabaseError, match="circuit breaker open"):
-            await db._guarded_write(
-                _should_not_run, timeout=5.0, operation="test_breaker_open"
-            )
+            await db._guarded_write(_should_not_run, timeout=5.0, operation="test_breaker_open")
         assert call_count == 0
 
 
 class TestSaveChatsGuardedWrite:
     """Verify _save_chats uses _guarded_write with retry and circuit breaker."""
 
-    async def test_save_chats_retries_on_transient_oserror(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_save_chats_retries_on_transient_oserror(self, initialized_db: Database) -> None:
         """_save_chats retries when the atomic write hits a transient OSError."""
         db = initialized_db
         await db.upsert_chat("c1", "Test")
@@ -1874,9 +1795,7 @@ class TestSaveChatsGuardedWrite:
         finally:
             db._atomic_write = original_atomic_write  # type: ignore[assignment]
 
-    async def test_save_chats_with_many_chats(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_save_chats_with_many_chats(self, initialized_db: Database) -> None:
         """Saving a large number of chats produces valid JSON."""
         db = initialized_db
         for i in range(100):
@@ -1886,6 +1805,7 @@ class TestSaveChatsGuardedWrite:
 
         raw = db._chats_file.read_text(encoding="utf-8")
         import json
+
         parsed = json.loads(raw)
         assert len(parsed) == 100
 
@@ -1898,17 +1818,13 @@ class TestSaveChatsGuardedWrite:
 class TestValidateConnection:
     """Verify validate_connection edge cases covering error/warning paths."""
 
-    async def test_valid_connection_returns_no_errors(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_valid_connection_returns_no_errors(self, initialized_db: Database) -> None:
         """Freshly initialized DB passes validation."""
         result = await initialized_db.validate_connection()
         assert result.valid is True
         assert result.errors == []
 
-    async def test_nonexistent_data_dir_reported(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_nonexistent_data_dir_reported(self, tmp_path: Path) -> None:
         """Data dir that doesn't exist is reported as an error."""
         missing = tmp_path / "absent"
         db = Database(str(missing))
@@ -1934,9 +1850,7 @@ class TestValidateConnection:
         assert any("not writable" in e for e in result.errors)
         assert result.details.get("data_dir_writable") is False
 
-    async def test_missing_messages_dir_is_warning(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_missing_messages_dir_is_warning(self, tmp_path: Path) -> None:
         """Missing messages dir is a warning (not error) since it's auto-created."""
         data_dir = tmp_path / ".data"
         data_dir.mkdir()
@@ -1944,9 +1858,7 @@ class TestValidateConnection:
         result = await db.validate_connection()
         assert any("Messages directory" in w for w in result.warnings)
 
-    async def test_corrupted_chats_json_reported(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_corrupted_chats_json_reported(self, tmp_path: Path) -> None:
         """Invalid chats.json is reported as an error."""
         data_dir = tmp_path / ".data"
         data_dir.mkdir()
@@ -1956,9 +1868,7 @@ class TestValidateConnection:
         assert any("chats.json" in e for e in result.errors)
         assert result.details.get("chats_json_valid") is False
 
-    async def test_chats_json_type_error_reported(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_chats_json_type_error_reported(self, tmp_path: Path) -> None:
         """chats.json that is a valid JSON array (not object) is reported as type error."""
         data_dir = tmp_path / ".data"
         data_dir.mkdir()
@@ -1967,9 +1877,7 @@ class TestValidateConnection:
         result = await db.validate_connection()
         assert any("not a valid JSON object" in e for e in result.errors)
 
-    async def test_corrupted_message_index_reported_as_warning(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_corrupted_message_index_reported_as_warning(self, tmp_path: Path) -> None:
         """Invalid message_index.json is reported as a warning (will be rebuilt)."""
         data_dir = tmp_path / ".data"
         data_dir.mkdir()
@@ -1978,9 +1886,7 @@ class TestValidateConnection:
         result = await db.validate_connection()
         assert any("message_index.json" in w for w in result.warnings)
 
-    async def test_message_index_type_error_reported(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_message_index_type_error_reported(self, tmp_path: Path) -> None:
         """message_index.json that is a valid JSON object (not array) is reported."""
         data_dir = tmp_path / ".data"
         data_dir.mkdir()
@@ -1989,9 +1895,7 @@ class TestValidateConnection:
         result = await db.validate_connection()
         assert any("not a valid JSON array" in e for e in result.errors)
 
-    async def test_valid_chats_json_populates_count(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_valid_chats_json_populates_count(self, tmp_path: Path) -> None:
         """Valid chats.json populates chats_count in details."""
         data_dir = tmp_path / ".data"
         data_dir.mkdir()
@@ -2004,9 +1908,7 @@ class TestValidateConnection:
         assert result.details.get("chats_count") == 2
         assert result.details.get("chats_json_valid") is True
 
-    async def test_message_file_corruption_detected(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_message_file_corruption_detected(self, tmp_path: Path) -> None:
         """Malformed JSON lines in message files are detected as warnings.
 
         NOTE: ``safe_json_parse`` with LINE mode returns ``{}`` (empty dict)
@@ -2038,9 +1940,7 @@ class TestValidateConnection:
         )
         assert has_corruption
 
-    async def test_checksum_error_detected(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_checksum_error_detected(self, tmp_path: Path) -> None:
         """Messages with invalid checksums are detected as warnings."""
         data_dir = tmp_path / ".data"
         data_dir.mkdir()
@@ -2125,6 +2025,7 @@ class TestDatabaseLifecycle:
         # The file should now have a header
         lines = (msg_dir / "legacy.jsonl").read_text(encoding="utf-8").splitlines()
         import json
+
         header = json.loads(lines[0])
         assert header.get("type") == "header"
 
@@ -2139,9 +2040,7 @@ class TestDatabaseLifecycle:
 class TestUpsertChatUpdate:
     """Verify upsert_chat updates existing chats and creates new ones."""
 
-    async def test_update_existing_chat_updates_name(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_update_existing_chat_updates_name(self, initialized_db: Database) -> None:
         """Upserting an existing chat with a new name updates it."""
         db = initialized_db
         await db.upsert_chat("c1", "Original")
@@ -2163,9 +2062,7 @@ class TestUpsertChatUpdate:
         await db.upsert_chat("c1")
         assert db._chats["c1"]["name"] == "Original"
 
-    async def test_upsert_new_chat_creates_metadata(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_upsert_new_chat_creates_metadata(self, initialized_db: Database) -> None:
         """Upserting a new chat creates proper metadata fields."""
         db = initialized_db
         await db.upsert_chat("new_chat", "NewUser")
@@ -2191,15 +2088,11 @@ class TestDelegationAndAccessors:
         db.set_vector_memory(mock_vm)
         assert db._vector_memory is mock_vm
 
-    async def test_message_exists_returns_false_for_unknown(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_message_exists_returns_false_for_unknown(self, initialized_db: Database) -> None:
         """message_exists returns False for unknown IDs."""
         assert await initialized_db.message_exists("nonexistent") is False
 
-    async def test_get_recovery_status_initially_none(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_get_recovery_status_initially_none(self, initialized_db: Database) -> None:
         """get_recovery_status returns None when no recovery happened (fresh DB)."""
         status = initialized_db.get_recovery_status()
         # If a recovery ran during init (e.g. index rebuild), status may be non-None
@@ -2207,15 +2100,11 @@ class TestDelegationAndAccessors:
         if status is not None:
             assert status.preserved_count == 0
 
-    async def test_clear_recovery_status_noop(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_clear_recovery_status_noop(self, initialized_db: Database) -> None:
         """clear_recovery_status does not raise when no recovery happened."""
         initialized_db.clear_recovery_status()
 
-    async def test_compressed_summary_file_returns_path(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_compressed_summary_file_returns_path(self, initialized_db: Database) -> None:
         """_compressed_summary_file returns a Path for the chat."""
         path = initialized_db._compressed_summary_file("chat_1")
         assert isinstance(path, Path)
@@ -2228,54 +2117,46 @@ class TestDelegationAndAccessors:
         result = await initialized_db.get_compressed_summary("chat_1")
         assert result is None
 
-    async def test_detect_corruption_for_clean_file(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_detect_corruption_for_clean_file(self, initialized_db: Database) -> None:
         """detect_corruption returns clean result for a valid message file."""
         db = initialized_db
         await db.save_message("chat_1", "user", "hello")
         result = await db.detect_corruption("chat_1")
         assert result.is_corrupted is False
 
-    async def test_validate_all_message_files_no_repair(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_validate_all_message_files_no_repair(self, initialized_db: Database) -> None:
         """validate_all_message_files with repair=False returns results dict."""
         db = initialized_db
         await db.save_message("chat_1", "user", "hello")
         results = await db.validate_all_message_files(repair=False)
         assert isinstance(results, dict)
 
-    async def test_validate_all_message_files_with_repair(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_validate_all_message_files_with_repair(self, initialized_db: Database) -> None:
         """validate_all_message_files with repair=True repairs corrupted files."""
         db = initialized_db
         await db.save_message("chat_1", "user", "hello")
         results = await db.validate_all_message_files(repair=True)
         assert isinstance(results, dict)
 
-    async def test_validate_all_message_files_missing_dir(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_validate_all_message_files_missing_dir(self, initialized_db: Database) -> None:
         """validate_all_message_files with repair=True returns empty when no messages dir."""
         db = initialized_db
         # Remove the messages dir to test the early return
         import shutil
+
         if db._messages_dir.exists():
             shutil.rmtree(db._messages_dir)
         results = await db.validate_all_message_files(repair=True)
         assert results == {}
 
-    async def test_backup_corrupted_file(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_backup_corrupted_file(self, initialized_db: Database) -> None:
         """backup_corrupted_file creates a backup and returns the backup path."""
         db = initialized_db
         await db.save_message("chat_1", "user", "hello")
         backup_path = await db.backup_corrupted_file("chat_1")
         assert backup_path is not None
         import os
+
         assert os.path.exists(backup_path)
 
 
@@ -2364,9 +2245,7 @@ class TestValidateConnectionErrorPaths:
         finally:
             monkeypatch.undo()
 
-    async def test_message_file_corrupted_json_detected(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_message_file_corrupted_json_detected(self, tmp_path: Path) -> None:
         """Malformed JSON lines in message files are detected (lines 443, 446-447).
 
         Tests the path where safe_json_parse returns None for a bad line,
@@ -2402,9 +2281,7 @@ class TestValidateConnectionErrorPaths:
         finally:
             monkeypatch.undo()
 
-    async def test_corruption_detection_log_emitted(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_corruption_detection_log_emitted(self, tmp_path: Path) -> None:
         """Corruption detection log is emitted when corrupted files exist (lines 455-456, 462-467)."""
         data_dir = tmp_path / ".data"
         data_dir.mkdir()
@@ -2437,9 +2314,7 @@ class TestConnectCloseEdgeCases:
     Target lines: 523-524, 539-540, 547-548, 556.
     """
 
-    async def test_connect_handles_migration_exception(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_connect_handles_migration_exception(self, tmp_path: Path) -> None:
         """connect() logs and continues when JSONL migration fails (lines 523-524)."""
         data_dir = tmp_path / ".data"
         data_dir.mkdir()
@@ -2467,9 +2342,7 @@ class TestConnectCloseEdgeCases:
         assert db._initialized is True
         await db.close()
 
-    async def test_close_flushes_dirty_index(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_close_flushes_dirty_index(self, tmp_path: Path) -> None:
         """close() flushes when MessageStore.index_dirty is True (lines 539-540)."""
         data_dir = tmp_path / ".data"
         db = Database(str(data_dir))
@@ -2480,6 +2353,67 @@ class TestConnectCloseEdgeCases:
 
         await db.close()
         assert db._message_store._index_dirty is False
+
+    async def test_close_resilient_to_save_chats_failure(self, tmp_path: Path) -> None:
+        """close() completes cleanup even when _save_chats() raises."""
+        data_dir = tmp_path / ".data"
+        db = Database(str(data_dir))
+        await db.connect()
+
+        # Make the DB dirty so close() attempts a flush
+        db._chats_dirty = True
+
+        # Monkey-patch _save_chats to raise
+        original_save = db._save_chats
+
+        async def _failing_save():
+            raise OSError("disk full during close")
+
+        db._save_chats = _failing_save  # type: ignore[assignment]
+
+        # close() should NOT raise — it logs a warning and continues cleanup
+        await db.close()
+
+        # Cleanup must still have happened
+        assert db._initialized is False
+
+        db._save_chats = original_save  # type: ignore[assignment]
+
+    async def test_close_resets_dirty_flag_on_success(self, tmp_path: Path) -> None:
+        """close() resets _chats_dirty after a successful flush."""
+        data_dir = tmp_path / ".data"
+        db = Database(str(data_dir))
+        await db.connect()
+
+        db._chats_save_interval = 9999.0
+        await db.upsert_chat("c1", "Test")
+        db._chats_dirty = True
+
+        await db.close()
+        assert db._chats_dirty is False
+
+    async def test_close_resilient_to_index_flush_failure(self, tmp_path: Path) -> None:
+        """close() completes cleanup even when index flush raises."""
+        data_dir = tmp_path / ".data"
+        db = Database(str(data_dir))
+        await db.connect()
+
+        db._message_store._index_dirty = True
+
+        # Monkey-patch save_message_index to raise
+        original_save_index = db._message_store.save_message_index
+
+        async def _failing_save_index():
+            raise OSError("index write failed")
+
+        db._message_store.save_message_index = _failing_save_index  # type: ignore[assignment]
+
+        await db.close()
+
+        # Cleanup must still have happened
+        assert db._initialized is False
+
+        db._message_store.save_message_index = original_save_index  # type: ignore[assignment]
 
     async def test_aenter_returns_database(self, tmp_path: Path) -> None:
         """__aenter__ returns the Database instance (lines 547-548)."""
@@ -2524,9 +2458,7 @@ class TestJsonlSchemaMigrationAdvanced:
         # File should remain unchanged (blank first line → early return)
         assert f.read_text(encoding="utf-8") == "\n"
 
-    def test_old_version_header_triggers_migration(
-        self, tmp_path: Path
-    ) -> None:
+    def test_old_version_header_triggers_migration(self, tmp_path: Path) -> None:
         """Header with version < _JSONL_SCHEMA_VERSION triggers migration (line 585).
 
         Since _JSONL_MIGRATIONS is empty by default, _apply_jsonl_migrations
@@ -2559,6 +2491,7 @@ class TestJsonlSchemaMigrationAdvanced:
             lines = f.read_text(encoding="utf-8").splitlines()
             assert len(lines) == 2
             import json
+
             header = json.loads(lines[0])
             assert header["type"] == "header"
             assert header["_version"] == _JSONL_SCHEMA_VERSION
@@ -2569,9 +2502,7 @@ class TestJsonlSchemaMigrationAdvanced:
             migration_module._JSONL_MIGRATIONS = original_migrations
             db_module._JSONL_MIGRATIONS = original_migrations
 
-    def test_apply_migrations_with_unparseable_line(
-        self, tmp_path: Path
-    ) -> None:
+    def test_apply_migrations_with_unparseable_line(self, tmp_path: Path) -> None:
         """_apply_jsonl_migrations skips unparseable lines gracefully (lines 614-622)."""
         from src.db.db import _JSONL_SCHEMA_VERSION
 
@@ -2598,6 +2529,7 @@ class TestJsonlSchemaMigrationAdvanced:
             # Should have header + unparseable line preserved + migrated message
             assert len(lines) == 3
             import json
+
             header = json.loads(lines[0])
             assert header["_version"] == _JSONL_SCHEMA_VERSION
             # Unparseable line preserved as-is
@@ -2609,9 +2541,7 @@ class TestJsonlSchemaMigrationAdvanced:
             migration_module._JSONL_MIGRATIONS = original_migrations
             db_module._JSONL_MIGRATIONS = original_migrations
 
-    def test_apply_migrations_no_header_in_file(
-        self, tmp_path: Path
-    ) -> None:
+    def test_apply_migrations_no_header_in_file(self, tmp_path: Path) -> None:
         """_apply_jsonl_migrations inserts header when file has no header line (lines 639-641)."""
         from src.db.db import _JSONL_SCHEMA_VERSION
 
@@ -2636,6 +2566,7 @@ class TestJsonlSchemaMigrationAdvanced:
 
             lines = f.read_text(encoding="utf-8").splitlines()
             import json
+
             # Header should have been inserted at the start
             header = json.loads(lines[0])
             assert header["type"] == "header"
@@ -2645,9 +2576,7 @@ class TestJsonlSchemaMigrationAdvanced:
             migration_module._JSONL_MIGRATIONS = original_migrations
             db_module._JSONL_MIGRATIONS = original_migrations
 
-    def test_apply_migrations_empty_migrations_list(
-        self, tmp_path: Path
-    ) -> None:
+    def test_apply_migrations_empty_migrations_list(self, tmp_path: Path) -> None:
         """When _JSONL_MIGRATIONS is empty, _apply_jsonl_migrations returns early (lines 601-602)."""
         data_dir = tmp_path / ".data"
         db = Database(str(data_dir))
@@ -2670,9 +2599,7 @@ class TestJsonlSchemaMigrationAdvanced:
 class TestCompressChatHistoryDelegation:
     """Cover compress_chat_history delegation (line 848)."""
 
-    async def test_compress_chat_history_delegates(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_compress_chat_history_delegates(self, initialized_db: Database) -> None:
         """compress_chat_history delegates to CompressionService."""
         db = initialized_db
         result = await db.compress_chat_history("chat_1")
@@ -2688,9 +2615,7 @@ class TestCompressChatHistoryDelegation:
 class TestRepairMessageFile:
     """Cover repair_message_file with actual corruption (lines 868-878)."""
 
-    async def test_repair_non_corrupted_file_returns_early(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_repair_non_corrupted_file_returns_early(self, initialized_db: Database) -> None:
         """repair_message_file returns early when file is not corrupted."""
         db = initialized_db
         await db.save_message("chat_1", "user", "hello")
@@ -2698,9 +2623,7 @@ class TestRepairMessageFile:
         assert result.is_corrupted is False
         assert result.repaired is False
 
-    async def test_repair_corrupted_file_with_backup(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_repair_corrupted_file_with_backup(self, initialized_db: Database) -> None:
         """repair_message_file detects corruption, creates backup, and repairs (lines 868-878)."""
         db = initialized_db
 
@@ -2727,9 +2650,7 @@ class TestRepairMessageFile:
         # Repair should have been attempted
         assert result.repaired is not None
 
-    async def test_repair_corrupted_file_without_backup(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_repair_corrupted_file_without_backup(self, initialized_db: Database) -> None:
         """repair_message_file with backup=False skips backup creation."""
         db = initialized_db
 
@@ -2750,9 +2671,7 @@ class TestRepairMessageFile:
         assert result.backup_path is None
         assert result.repaired is not None
 
-    async def test_validate_all_with_repair_and_files(
-        self, initialized_db: Database
-    ) -> None:
+    async def test_validate_all_with_repair_and_files(self, initialized_db: Database) -> None:
         """validate_all_message_files(repair=True) processes all message files."""
         db = initialized_db
         await db.save_message("chat_a", "user", "msg_a")
