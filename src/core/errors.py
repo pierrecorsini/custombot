@@ -26,8 +26,13 @@ from enum import Enum
 from typing import Any
 
 
-class NonCriticalCategory(str, Enum):
-    """Categories for non-critical operations."""
+class NonCriticalCategory(Enum):
+    """Categories for non-critical operations.
+
+    Pure enum — does **not** inherit from ``str`` so that type checkers
+    (mypy / pyright) reject raw string arguments to ``log_noncritical()``.
+    Use ``member.value`` when the underlying string is needed (e.g. log output).
+    """
 
     EVENT_EMISSION = "event_emission"
     METRICS = "metrics"
