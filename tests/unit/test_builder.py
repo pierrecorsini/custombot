@@ -13,7 +13,6 @@ the import statements within build_bot() resolve to our mocks.
 from __future__ import annotations
 
 from contextlib import ExitStack
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,6 +21,10 @@ from src.builder import BotComponents, BuilderContext, build_bot, _step_vector_m
 from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
 from src.skills import SkillRegistry
 from src.skills.base import BaseSkill
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,13 +222,19 @@ class TestVectorMemoryConstruction:
             stack.enter_context(patch("src.db.Database", mocks["db_cls"]))
             stack.enter_context(patch("src.llm.LLMClient", mocks["llm_cls"]))
             stack.enter_context(patch("src.memory.Memory", mocks["memory_cls"]))
-            stack.enter_context(patch("src.vector_memory.VectorMemory", side_effect=RuntimeError("sqlite-vec missing")))
+            stack.enter_context(
+                patch(
+                    "src.vector_memory.VectorMemory", side_effect=RuntimeError("sqlite-vec missing")
+                )
+            )
             stack.enter_context(patch("src.project.store.ProjectStore", mocks["ps_cls"]))
             stack.enter_context(patch("src.routing.RoutingEngine", mocks["routing_cls"]))
             stack.enter_context(patch("src.skills.SkillRegistry", mocks["skills_cls"]))
             stack.enter_context(patch("src.message_queue.MessageQueue", mocks["mq_cls"]))
             stack.enter_context(patch("src.builder.ProgressBar", return_value=mocks["progress"]))
-            stack.enter_context(patch("src.builder.maybe_spinner_async", return_value=mocks["spinner"]))
+            stack.enter_context(
+                patch("src.builder.maybe_spinner_async", return_value=mocks["spinner"])
+            )
             stack.enter_context(patch("src.builder.WORKSPACE_DIR", str(tmp_path)))
             stack.enter_context(patch("src.core.instruction_loader.InstructionLoader", MagicMock()))
             stack.enter_context(patch("src.core.project_context.ProjectContextLoader", MagicMock()))
@@ -262,7 +271,9 @@ class TestSkillRegistryConstruction:
         assert call_kwargs["vector_memory"] is mocks["vm"]
         assert call_kwargs["project_store"] is mocks["project_store"]
 
-    async def test_user_skills_not_loaded_when_auto_load_disabled(self, test_config: Config, tmp_path: Path):
+    async def test_user_skills_not_loaded_when_auto_load_disabled(
+        self, test_config: Config, tmp_path: Path
+    ):
         _, mocks = await _run_build_bot(test_config, tmp_path)
         mocks["skills"].load_user_skills.assert_not_called()
 
@@ -309,9 +320,14 @@ class TestBotComponentsDataclass:
         vm = MagicMock()
         ps = MagicMock()
         bc = BotComponents(
-            bot=bot, db=db, vector_memory=vm, project_store=ps,
-            token_usage=MagicMock(), message_queue=MagicMock(),
-            llm=MagicMock(), dedup=MagicMock(),
+            bot=bot,
+            db=db,
+            vector_memory=vm,
+            project_store=ps,
+            token_usage=MagicMock(),
+            message_queue=MagicMock(),
+            llm=MagicMock(),
+            dedup=MagicMock(),
         )
         with pytest.raises(AttributeError):
             bc.bot = MagicMock()  # type: ignore[misc]
@@ -322,9 +338,14 @@ class TestBotComponentsDataclass:
         vm = MagicMock()
         ps = MagicMock()
         bc = BotComponents(
-            bot=bot, db=db, vector_memory=vm, project_store=ps,
-            token_usage=MagicMock(), message_queue=MagicMock(),
-            llm=MagicMock(), dedup=MagicMock(),
+            bot=bot,
+            db=db,
+            vector_memory=vm,
+            project_store=ps,
+            token_usage=MagicMock(),
+            message_queue=MagicMock(),
+            llm=MagicMock(),
+            dedup=MagicMock(),
         )
         assert bc.bot is bot
         assert bc.db is db
@@ -432,9 +453,7 @@ class TestVectorMemoryStartupDegradation:
             db=AsyncMock(),
         )
 
-    async def test_probe_failure_sets_vector_memory_none(
-        self, degradation_ctx: BuilderContext
-    ):
+    async def test_probe_failure_sets_vector_memory_none(self, degradation_ctx: BuilderContext):
         """When embedding probe fails, vector_memory should be None."""
         vm_mock = self._make_probe_fail_vm()
         spinner = self._make_mock_spinner()
@@ -460,9 +479,7 @@ class TestVectorMemoryStartupDegradation:
 
         vm_mock.close.assert_called_once()
 
-    async def test_probe_failure_returns_degraded_status(
-        self, degradation_ctx: BuilderContext
-    ):
+    async def test_probe_failure_returns_degraded_status(self, degradation_ctx: BuilderContext):
         """Step should return DEGRADED status string on probe failure."""
         vm_mock = self._make_probe_fail_vm()
         spinner = self._make_mock_spinner()
@@ -476,9 +493,7 @@ class TestVectorMemoryStartupDegradation:
         assert result is not None
         assert "DEGRADED" in result
 
-    async def test_probe_failure_logs_warning(
-        self, degradation_ctx: BuilderContext, caplog
-    ):
+    async def test_probe_failure_logs_warning(self, degradation_ctx: BuilderContext, caplog):
         """Degradation should be logged at WARNING level for observability."""
         vm_mock = self._make_probe_fail_vm()
         spinner = self._make_mock_spinner()
@@ -511,9 +526,7 @@ class TestVectorMemoryStartupDegradation:
         assert result is not None
         assert "DEGRADED" in result
 
-    async def test_db_not_wired_on_probe_failure(
-        self, degradation_ctx: BuilderContext
-    ):
+    async def test_db_not_wired_on_probe_failure(self, degradation_ctx: BuilderContext):
         """set_vector_memory() should NOT be called when probe fails."""
         vm_mock = self._make_probe_fail_vm()
         spinner = self._make_mock_spinner()
@@ -525,3 +538,238 @@ class TestVectorMemoryStartupDegradation:
             await _step_vector_memory(degradation_ctx)
 
         degradation_ctx.db.set_vector_memory.assert_not_called()
+
+
+class TestVectorMemoryDedicatedEmbeddingDegradation:
+    """Tests for _step_vector_memory() with a dedicated embedding URL.
+
+    When ``embedding_base_url`` is set, the builder creates a dedicated
+    ``httpx.AsyncClient`` and ``AsyncOpenAI`` client for embeddings.
+    If the probe fails, the dedicated HTTP client must be closed in the
+    ``finally`` block to prevent connection leaks.
+    """
+
+    @staticmethod
+    def _make_probe_fail_vm() -> MagicMock:
+        vm = MagicMock()
+        vm.connect = MagicMock()
+        vm.close = MagicMock()
+        vm.probe_embedding_model = AsyncMock(return_value=(False, "Connection refused"))
+        return vm
+
+    @staticmethod
+    def _make_probe_ok_vm() -> MagicMock:
+        vm = MagicMock()
+        vm.connect = MagicMock()
+        vm.close = MagicMock()
+        vm.probe_embedding_model = AsyncMock(return_value=(True, "ok"))
+        return vm
+
+    @staticmethod
+    def _make_mock_spinner() -> MagicMock:
+        spinner = MagicMock()
+        spinner.__aenter__ = AsyncMock(return_value=None)
+        spinner.__aexit__ = AsyncMock(return_value=False)
+        return spinner
+
+    @pytest.fixture
+    def dedicated_config(self, tmp_path: Path) -> Config:
+        """Config with embedding_base_url set to trigger dedicated client path."""
+        return Config(
+            llm=LLMConfig(
+                model="gpt-4o",
+                base_url="https://api.openai.com/v1",
+                api_key="sk-test",
+                embedding_model="text-embedding-3-small",
+                embedding_dimensions=1536,
+                embedding_base_url="https://embed.example.com/v1",
+                embedding_api_key="sk-embed-test",
+            ),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+            ),
+            skills_auto_load=False,
+        )
+
+    @pytest.fixture
+    def dedicated_ctx(self, tmp_path: Path, dedicated_config: Config) -> BuilderContext:
+        """BuilderContext wired for dedicated embedding URL tests."""
+        mock_llm = MagicMock()
+        mock_llm.openai_client = MagicMock()
+        return BuilderContext(
+            config=dedicated_config,
+            workspace=tmp_path,
+            llm=mock_llm,
+            db=AsyncMock(),
+        )
+
+    async def test_dedicated_embed_http_closed_on_probe_failure(
+        self, dedicated_ctx: BuilderContext
+    ):
+        """Dedicated httpx client must be closed when probe fails."""
+        vm_mock = self._make_probe_fail_vm()
+        spinner = self._make_mock_spinner()
+        mock_http = AsyncMock()
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+            patch("httpx.AsyncClient", return_value=mock_http) as http_cls,
+        ):
+            await _step_vector_memory(dedicated_ctx)
+
+        http_cls.assert_called_once()
+        mock_http.aclose.assert_awaited_once()
+        assert dedicated_ctx.vector_memory is None
+
+    async def test_dedicated_embed_http_not_closed_on_success(
+        self, dedicated_ctx: BuilderContext
+    ):
+        """On success, ownership transfers — finally block should NOT close embed_http."""
+        vm_mock = self._make_probe_ok_vm()
+        spinner = self._make_mock_spinner()
+        mock_http = AsyncMock()
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+            patch("httpx.AsyncClient", return_value=mock_http),
+        ):
+            result = await _step_vector_memory(dedicated_ctx)
+
+        mock_http.aclose.assert_not_awaited()
+        assert dedicated_ctx.vector_memory is vm_mock
+        assert result is not None
+        assert "dedicated" in result
+
+    async def test_dedicated_embed_http_close_failure_still_degrades(
+        self, dedicated_ctx: BuilderContext
+    ):
+        """If embed_http.aclose() raises, degradation still completes."""
+        vm_mock = self._make_probe_fail_vm()
+        spinner = self._make_mock_spinner()
+        mock_http = AsyncMock()
+        mock_http.aclose.side_effect = OSError("connection reset")
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+            patch("httpx.AsyncClient", return_value=mock_http),
+        ):
+            result = await _step_vector_memory(dedicated_ctx)
+
+        mock_http.aclose.assert_awaited_once()
+        assert dedicated_ctx.vector_memory is None
+        assert result is not None
+        assert "DEGRADED" in result
+
+    async def test_dedicated_uses_embedding_api_key(self, dedicated_ctx: BuilderContext):
+        """AsyncOpenAI should receive the dedicated embedding_api_key."""
+        vm_mock = self._make_probe_fail_vm()
+        spinner = self._make_mock_spinner()
+        mock_http = AsyncMock()
+        mock_openai_cls = MagicMock()
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+            patch("httpx.AsyncClient", return_value=mock_http),
+            patch("openai.AsyncOpenAI", mock_openai_cls) as openai_cls,
+        ):
+            await _step_vector_memory(dedicated_ctx)
+
+        openai_cls.assert_called_once()
+        call_kwargs = openai_cls.call_args[1]
+        assert call_kwargs["api_key"] == "sk-embed-test"
+        assert call_kwargs["base_url"] == "https://embed.example.com/v1"
+
+    async def test_dedicated_embed_http_closed_on_connect_failure(
+        self, dedicated_ctx: BuilderContext
+    ):
+        """When vm.connect() raises, dedicated embed_http must still be closed.
+
+        This tests a different error path than probe failure: VectorMemory is
+        constructed successfully but connect() fails (e.g. disk I/O error,
+        permission denied on database file). The embed_http client is still
+        alive and must be cleaned up in the finally block.
+        """
+        spinner = self._make_mock_spinner()
+        mock_http = AsyncMock()
+
+        vm_mock = MagicMock()
+        vm_mock.connect = MagicMock(side_effect=OSError("Permission denied"))
+        vm_mock.close = MagicMock()
+        vm_mock.probe_embedding_model = AsyncMock(return_value=(True, "ok"))
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+            patch("httpx.AsyncClient", return_value=mock_http),
+        ):
+            result = await _step_vector_memory(dedicated_ctx)
+
+        mock_http.aclose.assert_awaited_once()
+        assert dedicated_ctx.vector_memory is None
+        assert result is not None
+        assert "DEGRADED" in result
+
+    async def test_dedicated_embed_http_closed_on_probe_exception(
+        self, dedicated_ctx: BuilderContext
+    ):
+        """When probe_embedding_model() raises (not returns False), embed_http must close.
+
+        The probe can raise an exception (e.g. httpx.ConnectError, TimeoutException)
+        instead of returning (False, msg). This follows a different code path —
+        the inner `if not probe_ok` block is skipped, and the exception propagates
+        directly to the outer except, but the finally block must still close embed_http.
+        """
+        spinner = self._make_mock_spinner()
+        mock_http = AsyncMock()
+
+        vm_mock = MagicMock()
+        vm_mock.connect = MagicMock()
+        vm_mock.close = MagicMock()
+        vm_mock.probe_embedding_model = AsyncMock(
+            side_effect=RuntimeError("Connection refused")
+        )
+
+        with (
+            patch("src.vector_memory.VectorMemory", return_value=vm_mock),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+            patch("httpx.AsyncClient", return_value=mock_http),
+        ):
+            result = await _step_vector_memory(dedicated_ctx)
+
+        mock_http.aclose.assert_awaited_once()
+        assert dedicated_ctx.vector_memory is None
+        assert result is not None
+        assert "DEGRADED" in result
+
+    async def test_dedicated_embed_http_closed_on_vm_constructor_failure(
+        self, dedicated_ctx: BuilderContext
+    ):
+        """When VectorMemory constructor raises, dedicated embed_http must still close.
+
+        If the VectorMemory constructor itself fails (e.g. invalid db_path, missing
+        dependencies), the embed_http client was already created for the AsyncOpenAI
+        client but never passed to anything. The finally block is the only cleanup
+        mechanism — vm.close() is NOT called because vm was never assigned.
+        """
+        spinner = self._make_mock_spinner()
+        mock_http = AsyncMock()
+
+        with (
+            patch(
+                "src.vector_memory.VectorMemory",
+                side_effect=ValueError("Invalid db_path"),
+            ),
+            patch("src.builder.maybe_spinner_async", return_value=spinner),
+            patch("httpx.AsyncClient", return_value=mock_http),
+        ):
+            result = await _step_vector_memory(dedicated_ctx)
+
+        mock_http.aclose.assert_awaited_once()
+        assert dedicated_ctx.vector_memory is None
+        assert result is not None
+        assert "DEGRADED" in result
