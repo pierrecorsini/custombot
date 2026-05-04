@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Protocol, Sequence
 
-from src.config import Config
 from src.constants import WORKSPACE_DIR
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.core.orchestrator import StepOrchestrator
@@ -35,12 +34,13 @@ from src.progress import ProgressBar, maybe_spinner_async
 from src.security.url_sanitizer import sanitize_url_for_logging
 
 if TYPE_CHECKING:
+    from src.config import Config
     from src.bot import Bot
     from src.core.dedup import DeduplicationService
     from src.core.instruction_loader import InstructionLoader
     from src.core.project_context import ProjectContextLoader
     from src.db import Database
-    from src.llm_provider import LLMProvider, TokenUsage
+    from src.llm import LLMProvider, TokenUsage
     from src.memory import Memory
     from src.message_queue import MessageQueue
     from src.monitoring.performance import SessionMetrics
@@ -67,6 +67,7 @@ class BotComponents:
     message_queue: MessageQueue
     llm: LLMProvider
     dedup: DeduplicationService
+    routing_engine: Optional[RoutingEngine] = None
     component_durations: dict[str, float] = field(default_factory=dict)
 
 
@@ -120,6 +121,7 @@ class BuilderContext:
             message_queue=self.message_queue,
             llm=self.llm,
             dedup=self.dedup,
+            routing_engine=self.routing,
             component_durations=self.component_durations,
         )
 
@@ -140,8 +142,7 @@ class BuilderContext:
         ]
         if missing:
             raise RuntimeError(
-                f"BuilderContext incomplete — step(s) did not populate: "
-                f"{', '.join(missing)}"
+                f"BuilderContext incomplete — step(s) did not populate: {', '.join(missing)}"
             )
 
 
@@ -227,7 +228,7 @@ async def _step_database(ctx: BuilderContext) -> str | None:
 async def _step_llm_client(ctx: BuilderContext) -> str | None:
     """Create the LLM client and token-usage tracker."""
     from src.llm import LLMClient
-    from src.llm_provider import TokenUsage
+    from src.llm import TokenUsage
 
     token_usage = TokenUsage()
     llm = LLMClient(ctx.config.llm, log_llm=ctx.config.log_llm, token_usage=token_usage)
@@ -350,7 +351,7 @@ async def _step_routing(ctx: BuilderContext) -> str | None:
     instructions_dir = ctx.workspace / "instructions"
     routing = RoutingEngine(instructions_dir)
     async with maybe_spinner_async("Loading routing rules..."):
-        routing.load_rules()
+        await routing.load_rules()
     ctx.routing = routing
     # Create shared ProjectContextLoader and InstructionLoader
     ctx.project_ctx = ProjectContextLoader(ctx.project_store)  # type: ignore[arg-type]
@@ -551,7 +552,9 @@ class BuilderOrchestrator(StepOrchestrator[BuilderContext, BuilderComponentSpec]
 # ── Public entry point ──────────────────────────────────────────────────
 
 
-async def build_bot(config: Config, session_metrics: "SessionMetrics | None" = None) -> BotComponents:
+async def build_bot(
+    config: Config, session_metrics: "SessionMetrics | None" = None
+) -> BotComponents:
     """Instantiate and wire all components with progress indicators."""
     workspace = Path(WORKSPACE_DIR)
     workspace.mkdir(parents=True, exist_ok=True)

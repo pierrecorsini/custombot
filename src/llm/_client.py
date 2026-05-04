@@ -1,5 +1,5 @@
 """
-llm.py — OpenAI-compatible async LLM client.
+llm._client — OpenAI-compatible async LLM client.
 
 Supports any provider that speaks the OpenAI Chat Completions API:
   OpenAI, Anthropic (via proxy), Ollama, LM Studio, OpenRouter, Groq, etc.
@@ -19,14 +19,6 @@ from urllib.parse import urlparse
 
 import httpx
 from openai import AsyncOpenAI
-from openai.types.chat import (
-    ChatCompletion,
-    ChatCompletionAssistantMessageParam,
-    ChatCompletionMessage,
-    ChatCompletionMessageParam,
-    ChatCompletionToolParam,
-)
-from src.config import LLMConfig
 from src.constants import (
     CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     CIRCUIT_BREAKER_FAILURE_THRESHOLD,
@@ -40,8 +32,8 @@ from src.constants import (
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.core.stream_accumulator import StreamAccumulator
 from src.exceptions import ConfigurationError, ErrorCode, LLMError
-from src.llm_error_classifier import classify_llm_error
-from src.llm_provider import TokenUsage
+from src.llm._error_classifier import classify_llm_error
+from src.llm._provider import TokenUsage
 from src.logging import get_correlation_id
 from src.security.url_sanitizer import sanitize_url_for_logging
 from src.utils.circuit_breaker import CircuitBreaker, CircuitState
@@ -49,11 +41,19 @@ from src.utils.retry import retry_with_backoff
 from src.utils.type_guards import is_llm_config
 
 if TYPE_CHECKING:
+    from src.config import LLMConfig
+    from openai.types.chat import (
+        ChatCompletion,
+        ChatCompletionAssistantMessageParam,
+        ChatCompletionMessage,
+        ChatCompletionMessageParam,
+        ChatCompletionToolParam,
+    )
     from src.logging.llm_logging import LLMLogger
 
 log = logging.getLogger(__name__)
 
-# Backward-compatible alias — prefer importing from src.llm_error_classifier directly.
+# Backward-compatible alias — prefer importing from src.llm._error_classifier directly.
 _classify_llm_error = classify_llm_error
 
 
@@ -237,7 +237,8 @@ class LLMClient:
         # Adjust httpx timeout to reflect the new config value
         timeout_seconds = new_cfg.timeout if new_cfg.timeout else 120.0
         self._http_client.timeout = httpx.Timeout(
-            timeout=timeout_seconds, connect=10.0,
+            timeout=timeout_seconds,
+            connect=10.0,
         )
         log.debug(
             "LLM config updated: temperature=%.2f → %.2f, timeout=%.1f → %.1f",
@@ -362,9 +363,7 @@ class LLMClient:
                 )
 
         if not response.choices:
-            raise LLMError(
-                "LLM API returned empty choices (content may have been filtered)"
-            )
+            raise LLMError("LLM API returned empty choices (content may have been filtered)")
 
         log.debug(
             "LLM response: finish_reason=%s, tokens=%s",

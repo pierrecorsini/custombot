@@ -28,12 +28,21 @@ import logging
 import os
 import time
 from dataclasses import asdict, fields
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol, Set, Tuple, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Set,
+    Tuple,
+    runtime_checkable,
+)
 
 from src.config.config import (
     Config,
-    LLMConfig,
     _from_dict,
     _load_and_validate_file,
     _log_effective_config,
@@ -44,9 +53,13 @@ from src.utils.background_service import BaseBackgroundService
 from src.utils.type_guards import is_valid_config
 
 if TYPE_CHECKING:
+    from src.config.config import (
+        LLMConfig,
+    )
+    from pathlib import Path
     from src.bot import Bot, BotConfig
     from src.channels.base import BaseChannel
-    from src.llm_provider import LLMProvider
+    from src.llm import LLMProvider
     from src.shutdown import GracefulShutdown
 
 log = logging.getLogger(__name__)
@@ -249,6 +262,7 @@ class ConfigChangeApplier:
             "llm.max_tool_iterations",
             "llm.system_prompt_prefix",
             "memory_max_history",
+            "per_chat_timeout",
         }
         if not bot_fields & changed:
             return
@@ -258,6 +272,7 @@ class ConfigChangeApplier:
             memory_max_history=new_config.memory_max_history,
             system_prompt_prefix=new_config.llm.system_prompt_prefix,
             stream_response=self._bot._cfg.stream_response,  # destructive — keep old
+            per_chat_timeout=new_config.per_chat_timeout,
         )
         self._bot.update_config(new_bot_cfg)
 
@@ -295,9 +310,7 @@ class ConfigChangeApplier:
         )
         self._llm.update_config(safe_cfg)
 
-    def _apply_shutdown_config(
-        self, new_config: Config, changed: Set[str]
-    ) -> None:
+    def _apply_shutdown_config(self, new_config: Config, changed: Set[str]) -> None:
         """Update shutdown timeout."""
         if "shutdown_timeout" not in changed:
             return
@@ -447,8 +460,7 @@ class ConfigWatcher(BaseBackgroundService):
             return config
         except Exception as exc:
             log.error(
-                "Config hot-reload failed: invalid config in %s — %s: %s. "
-                "Keeping current config.",
+                "Config hot-reload failed: invalid config in %s — %s: %s. Keeping current config.",
                 self._config_path,
                 type(exc).__name__,
                 exc,

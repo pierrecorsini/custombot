@@ -10,27 +10,27 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from src.config import Config
-from src.constants import CLEANUP_STEP_TIMEOUT
+from src.constants import CLEANUP_STEP_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT, WORKSPACE_DIR
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.security.url_sanitizer import sanitize_url_for_logging
 
 if TYPE_CHECKING:
+    from src.config import Config
+    from concurrent.futures import ThreadPoolExecutor
     from src.bot import Bot
     from src.channels.base import BaseChannel
     from src.db import Database
     from src.health import HealthServer
-    from src.llm_provider import LLMProvider
+    from src.llm import LLMProvider
     from src.message_queue import MessageQueue
     from src.project.store import ProjectStore
+    from src.routing import RoutingEngine
     from src.scheduler import TaskScheduler
     from src.shutdown import GracefulShutdown
     from src.vector_memory import VectorMemory
-    from src.constants import DEFAULT_SHUTDOWN_TIMEOUT, WORKSPACE_DIR
 
 log = logging.getLogger("lifecycle")
 
@@ -255,6 +255,7 @@ class ShutdownContext:
     vector_memory: VectorMemory | None = None
     bot: Bot | None = None
     executor: ThreadPoolExecutor | None = None
+    routing_engine: RoutingEngine | None = None
     verbose: bool = False
 
 
@@ -264,7 +265,9 @@ async def perform_shutdown(ctx: ShutdownContext) -> None:
 
     shutdown_begin_time = time.time()
     if "uptime" not in ctx.session_metrics:
-        ctx.session_metrics["uptime"] = time.time() - ctx.session_metrics.get("start_time", time.time())
+        ctx.session_metrics["uptime"] = time.time() - ctx.session_metrics.get(
+            "start_time", time.time()
+        )
 
     _log_shutdown_begin(ctx.session_metrics)
     cli_output.warning("Initiating graceful shutdown...")
@@ -314,7 +317,11 @@ async def perform_shutdown(ctx: ShutdownContext) -> None:
         ctx.log.warning("Error closing channel: %s", exc)
 
     # 5. Close project store, vector memory, message queue, and LLM client in parallel
-    _log_cleanup_step(5, total_cleanup_steps, "Closing project store, vector memory, message queue, and LLM")
+    _log_cleanup_step(
+        5,
+        total_cleanup_steps,
+        "Closing project store, vector memory, message queue, routing engine, and LLM",
+    )
     cli_output.dim("  Closing storage backends and LLM client...")
 
     def _close_project_store():
@@ -330,6 +337,14 @@ async def perform_shutdown(ctx: ShutdownContext) -> None:
             ctx.vector_memory.close()
         except Exception as exc:
             ctx.log.warning("Error closing vector memory: %s", exc)
+
+    def _close_routing_engine():
+        if ctx.routing_engine is None:
+            return
+        try:
+            ctx.routing_engine.close()
+        except Exception as exc:
+            ctx.log.warning("Error closing routing engine: %s", exc)
 
     async def _close_message_queue():
         try:
@@ -362,6 +377,7 @@ async def perform_shutdown(ctx: ShutdownContext) -> None:
     await asyncio.gather(
         asyncio.to_thread(_close_project_store),
         asyncio.to_thread(_close_vector_memory),
+        asyncio.to_thread(_close_routing_engine),
         _close_message_queue(),
         _close_llm(),
         _stop_memory_monitoring(),
@@ -400,7 +416,11 @@ async def perform_shutdown(ctx: ShutdownContext) -> None:
 
     leaked = SqliteHelper.close_all_connections()
     if leaked:
-        ctx.log.info("SQLite pool safety net closed %d leaked connection(s): %s", len(leaked), ", ".join(leaked))
+        ctx.log.info(
+            "SQLite pool safety net closed %d leaked connection(s): %s",
+            len(leaked),
+            ", ".join(leaked),
+        )
 
     _log_shutdown_complete(shutdown_begin_time)
     cli_output.success("Shutdown complete.")

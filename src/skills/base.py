@@ -21,14 +21,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from functools import cached_property, wraps
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar, cast
 
 from src.constants import DEFAULT_SKILL_TIMEOUT
 from src.exceptions import SkillError
 
 if TYPE_CHECKING:
-    from src.llm_provider import LLMProvider
+    from pathlib import Path
+    from src.llm import LLMProvider
     from src.utils.protocols import Skill
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -157,7 +157,7 @@ def validate_input(func: F) -> F:
 
         return await func(self, workspace_dir, **kwargs)
 
-    return cast(F, wrapper)
+    return cast("F", wrapper)
 
 
 class BaseSkill(ABC):

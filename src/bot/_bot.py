@@ -101,7 +101,7 @@ if TYPE_CHECKING:
         ProjectStore,
     )
     from src.channels.base import BaseChannel, SendMediaCallback
-    from src.llm_provider import LLMProvider
+    from src.llm import LLMProvider
 
 
 log = logging.getLogger(__name__)
@@ -140,6 +140,19 @@ class TurnContext:
     rule_id: str
     skill_exec_verbose: str
     show_errors: bool
+
+
+@dataclass(slots=True, frozen=True)
+class _PreparedTurn:
+    """Immutable result of turn-preparation (persist + workspace + routing).
+
+    Built by ``Bot._prepare_turn()`` so that the preparation stage
+    (user-message persistence, workspace seeding, context assembly) can be
+    tested independently of the ReAct loop.
+    """
+
+    ctx: TurnContext
+    workspace_dir: Path
 
 
 @dataclass(slots=True, frozen=True)
@@ -939,24 +952,28 @@ class Bot:
             show_errors=matched_rule.showErrors,
         )
 
-    async def _process(
+    async def _prepare_turn(
         self,
         msg: IncomingMessage,
         channel: "BaseChannel | None" = None,
-        stream_callback: StreamCallback | None = None,
-        generation: int = 0,
-    ) -> str | None:
-        log.debug(
-            "Starting _process for chat %s",
-            msg.chat_id,
-            extra={"chat_id": msg.chat_id},
-        )
+    ) -> _PreparedTurn | None:
+        """Persist user message, seed workspace, and build routing context.
 
+        Performs the turn-preparation steps that run before the ReAct loop:
+
+        1. Emit ``message_received`` event
+        2. Upsert chat metadata
+        3. Persist user message to DB
+        4. Ensure workspace directory exists
+        5. Build turn context (routing match + context assembly)
+
+        Returns ``None`` when routing produces no match (message dropped).
+        """
         await get_event_bus().emit(
             Event(
                 name="message_received",
                 data={"chat_id": msg.chat_id, "sender": msg.sender_name},
-                source="Bot._process",
+                source="Bot._prepare_turn",
                 correlation_id=get_correlation_id(),
             )
         )
@@ -985,6 +1002,21 @@ class Bot:
         if not ctx:
             return None
 
+        return _PreparedTurn(ctx=ctx, workspace_dir=workspace_dir)
+
+    async def _process(
+        self,
+        msg: IncomingMessage,
+        channel: "BaseChannel | None" = None,
+        stream_callback: StreamCallback | None = None,
+        generation: int = 0,
+    ) -> str | None:
+        """Orchestrate a single message turn: prepare → react → deliver."""
+        prepared = await self._prepare_turn(msg, channel)
+        if not prepared:
+            return None
+
+        ctx = prepared.ctx
         tools = self._skills.tool_definitions
         verbose = ctx.skill_exec_verbose
         stream_cb = stream_callback if verbose == "full" else None
@@ -992,7 +1024,7 @@ class Bot:
             chat_id=msg.chat_id,
             messages=[m.to_api_dict() for m in ctx.messages],
             tools=tools if tools else None,
-            workspace_dir=workspace_dir,
+            workspace_dir=prepared.workspace_dir,
             stream_callback=stream_cb,
             channel=channel,
         )

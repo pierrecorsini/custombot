@@ -1,8 +1,8 @@
 """
-llm_provider.py — Protocol interface for LLM providers.
+llm._provider — Protocol interface for LLM providers.
 
 Defines the :class:`LLMProvider` protocol that decouples consumers (bot, skills,
-lifecycle) from the concrete :class:`~src.llm.LLMClient` implementation.
+lifecycle) from the concrete :class:`~src.llm._client.LLMClient` implementation.
 
 Any class satisfying this interface can serve as the LLM backend — the
 OpenAI-based ``LLMClient``, a lightweight test stub, or a future
@@ -13,15 +13,25 @@ interface contract, not an implementation detail of the OpenAI client.
 
 Usage::
 
-    from src.llm_provider import LLMProvider, TokenUsage   # Protocol + value type
-    from src.llm import LLMClient                          # concrete implementation
+    from src.llm import LLMProvider, TokenUsage   # Protocol + value type
+    from src.llm import LLMClient                 # concrete implementation
 """
 
 from __future__ import annotations
 
 import bisect
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    runtime_checkable,
+)
 
 if TYPE_CHECKING:
     from src.config import LLMConfig
@@ -93,7 +103,10 @@ class TokenUsage:
                 # Remove stale leaderboard entry before updating total.
                 old_total = self._per_chat[chat_id]["total"]
                 _remove_leaderboard_entry(
-                    self._leaderboard, self._leaderboard_idx, old_total, chat_id,
+                    self._leaderboard,
+                    self._leaderboard_idx,
+                    old_total,
+                    chat_id,
                 )
                 entry = self._per_chat[chat_id]
                 entry["prompt"] += prompt
@@ -104,7 +117,9 @@ class TokenUsage:
             else:
                 # Evict any stale leaderboard entries left by LRU eviction.
                 _purge_chat_from_leaderboard(
-                    self._leaderboard, self._leaderboard_idx, chat_id,
+                    self._leaderboard,
+                    self._leaderboard_idx,
+                    chat_id,
                 )
                 self._per_chat[chat_id] = {
                     "prompt": prompt,
@@ -142,14 +157,17 @@ def _make_per_chat_map() -> dict[str, dict[str, int]]:
     """
     try:
         from src.utils import BoundedOrderedDict
+
         return BoundedOrderedDict(max_size=1000, eviction="half")  # type: ignore[arg-type]
     except ImportError:
         return {}
 
 
 def _remove_leaderboard_entry(
-    board: list[tuple[int, str]], ridx: dict[str, set[int]],
-    total: int, chat_id: str,
+    board: list[tuple[int, str]],
+    ridx: dict[str, set[int]],
+    total: int,
+    chat_id: str,
 ) -> None:
     """Remove ``(total, chat_id)`` from *board* via bisect lookup.
 
@@ -166,7 +184,9 @@ def _remove_leaderboard_entry(
 
 
 def _purge_chat_from_leaderboard(
-    board: list[tuple[int, str]], ridx: dict[str, set[int]], chat_id: str,
+    board: list[tuple[int, str]],
+    ridx: dict[str, set[int]],
+    chat_id: str,
 ) -> None:
     """Remove **all** entries for *chat_id* from *board*.
 
@@ -190,7 +210,7 @@ class LLMProvider(Protocol):
     """Interface that any LLM backend must satisfy.
 
     Consumers should depend on this Protocol rather than the concrete
-    :class:`~src.llm.LLMClient` to allow testing with lightweight stubs
+    :class:`~src.llm._client.LLMClient` to allow testing with lightweight stubs
     and to make it straightforward to add non-OpenAI-compatible providers.
 
     The Protocol is self-contained: all type dependencies (``TokenUsage``,

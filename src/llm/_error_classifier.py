@@ -1,5 +1,5 @@
 """
-llm_error_classifier.py — Map OpenAI SDK exceptions to domain LLMError instances.
+llm._error_classifier — Map OpenAI SDK exceptions to domain LLMError instances.
 
 Extracted from llm.py so that:
   1. llm.py stays focused on the client.

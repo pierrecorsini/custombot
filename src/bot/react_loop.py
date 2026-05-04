@@ -17,29 +17,16 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from openai.types.chat import (
-    ChatCompletion,
-    ChatCompletionMessageParam,
-    ChatCompletionToolMessageParam,
-    ChatCompletionToolParam,
-)
-from openai.types.chat.chat_completion import Choice
-from openai.types.chat.chat_completion_message_function_tool_call import (
-    ChatCompletionMessageFunctionToolCall,
-)
 
-from src.channels.base import SendMediaCallback
 from src.constants import MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_PERSIST_LENGTH, WORKSPACE_DIR
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.core.event_bus import Event, get_event_bus
 from src.core.serialization import serialize_tool_call_message
-from src.core.tool_executor import ToolExecutor
 from src.core.tool_formatter import ToolLogEntry, format_single_tool_execution
 from src.exceptions import ErrorCode, LLMError
 from src.logging import get_correlation_id
-from src.monitoring import PerformanceMetrics
 from src.monitoring.tracing import (
     llm_call_span,
     react_loop_span,
@@ -51,8 +38,21 @@ from src.monitoring.tracing import (
 from src.utils import JSONDecodeError
 
 if TYPE_CHECKING:
+    from openai.types.chat.chat_completion import Choice
+    from src.core.tool_executor import ToolExecutor
+    from openai.types.chat.chat_completion_message_function_tool_call import (
+        ChatCompletionMessageFunctionToolCall,
+    )
+    from src.channels.base import SendMediaCallback
+    from openai.types.chat import (
+        ChatCompletion,
+        ChatCompletionMessageParam,
+        ChatCompletionToolMessageParam,
+        ChatCompletionToolParam,
+    )
+    from src.monitoring import PerformanceMetrics
     from src.channels.base import BaseChannel
-    from src.llm_provider import LLMProvider
+    from src.llm import LLMProvider
     from src.monitoring.tracing import Span
 
 log = logging.getLogger(__name__)
@@ -182,7 +182,7 @@ async def react_loop(
     retryable_codes: frozenset[ErrorCode],
     stream_callback: StreamCallback | None = None,
     channel: BaseChannel | None = None,
-) -> tuple[str, list[ToolLogEntry], list[dict]]:
+) -> tuple[str, list[ToolLogEntry], list[dict[str, Any]]]:
     """Run the ReAct loop and return response text, tool log, and buffered messages.
 
     Args:
@@ -205,7 +205,7 @@ async def react_loop(
         Tuple of (response_text, tool_log, buffered_persist).
     """
     tool_log: list[ToolLogEntry] = []
-    buffered_persist: list[dict] = []
+    buffered_persist: list[dict[str, Any]] = []
 
     ctx = ReactIterationContext(
         llm=llm,
@@ -226,7 +226,12 @@ async def react_loop(
     for iteration in range(max_tool_iterations):
         with react_loop_span(chat_id, iteration + 1, max_tool_iterations) as span:
             result = await _react_iteration(
-                ctx, iteration, messages, tool_log, buffered_persist, span,
+                ctx,
+                iteration,
+                messages,
+                tool_log,
+                buffered_persist,
+                span,
             )
             if result is not None:
                 return result
@@ -251,9 +256,9 @@ async def _react_iteration(
     iteration: int,
     messages: list[ChatCompletionMessageParam],
     tool_log: list[ToolLogEntry],
-    buffered_persist: list[dict],
+    buffered_persist: list[dict[str, Any]],
     span: Span,
-) -> tuple[str, list[ToolLogEntry], list[dict]] | None:
+) -> tuple[str, list[ToolLogEntry], list[dict[str, Any]]] | None:
     """Execute a single ReAct loop iteration.
 
     Calls the LLM, then either:
@@ -299,10 +304,7 @@ async def _react_iteration(
     choice = response.choices[0]
     finish_reason = choice.finish_reason
     content = choice.message.content
-    has_tool_calls = (
-        choice.message.tool_calls is not None
-        and len(choice.message.tool_calls) > 0
-    )
+    has_tool_calls = choice.message.tool_calls is not None and len(choice.message.tool_calls) > 0
 
     # Record LLM latency and response metadata on the iteration span
     llm_latency = time.perf_counter() - start_time
@@ -336,8 +338,7 @@ async def _react_iteration(
         if finish_reason == "length":
             span.set_attribute("custombot.react.truncated", True)
             return (
-                content
-                + "\n\n⚠️ Response truncated due to length limit. "
+                content + "\n\n⚠️ Response truncated due to length limit. "
                 "Try asking a more specific question.",
                 tool_log,
                 buffered_persist,
@@ -348,8 +349,7 @@ async def _react_iteration(
     if finish_reason == "length":
         span.set_attribute("custombot.react.truncated", True)
         return (
-            "⚠️ Response truncated due to length limit. "
-            "Try asking a more specific question.",
+            "⚠️ Response truncated due to length limit. Try asking a more specific question.",
             tool_log,
             buffered_persist,
         )
@@ -357,8 +357,7 @@ async def _react_iteration(
     # Empty / whitespace-only response
     span.set_attribute("custombot.react.empty_response", True)
     return (
-        "(The assistant generated an empty response. "
-        "Please try rephrasing your message.)",
+        "(The assistant generated an empty response. Please try rephrasing your message.)",
         tool_log,
         buffered_persist,
     )
@@ -370,9 +369,7 @@ def format_max_iterations_message(iterations: int, tool_log: list[ToolLogEntry])
     if tool_log:
         tool_names = [entry.name for entry in tool_log]
         unique_tools = dict.fromkeys(tool_names)
-        tool_summary = (
-            f"\n\n🔧 Tools used ({len(tool_log)} calls): {', '.join(unique_tools)}"
-        )
+        tool_summary = f"\n\n🔧 Tools used ({len(tool_log)} calls): {', '.join(unique_tools)}"
     return (
         f"⚠️ Reached maximum tool iterations ({iterations}). "
         f"The task may be too complex for a single request. "
@@ -388,7 +385,7 @@ async def process_tool_calls(
     workspace_dir: Path,
     stream_callback: StreamCallback | None = None,
     channel: BaseChannel | None = None,
-) -> tuple[list[ToolLogEntry], list[dict]]:
+) -> tuple[list[ToolLogEntry], list[dict[str, Any]]]:
     """Process tool calls from an LLM response and append results to messages.
 
     Executes all requested tool calls in parallel via ``asyncio.TaskGroup``,
@@ -398,16 +395,15 @@ async def process_tool_calls(
         Tuple of (tool_log, buffered_persist).
     """
     tool_log: list[ToolLogEntry] = []
-    buffered_persist: list[dict] = []
+    buffered_persist: list[dict[str, Any]] = []
 
     assistant_msg = serialize_tool_call_message(choice.message)
     messages.append(assistant_msg)
-    buffered_persist.append(
-        {"role": "assistant", "content": assistant_msg.get("content") or ""}
-    )
+    buffered_persist.append({"role": "assistant", "content": assistant_msg.get("content") or ""})
 
     send_media = None
     if channel is not None:
+
         async def _send_media(kind: str, path: Path, caption: str = "") -> None:
             """Route media to the appropriate channel send method."""
             try:
@@ -433,13 +429,12 @@ async def process_tool_calls(
     function_calls = [tc for tc in tool_calls if tc.type == "function"]
 
     with tool_calls_span(chat_id=chat_id, call_count=len(function_calls)):
-        rejected_calls: list = []
+        rejected_calls: list[ChatCompletionMessageFunctionToolCall] = []
         if len(function_calls) > MAX_TOOL_CALLS_PER_TURN:
             rejected_calls = function_calls[MAX_TOOL_CALLS_PER_TURN:]
             function_calls = function_calls[:MAX_TOOL_CALLS_PER_TURN]
             log.warning(
-                "Tool-call limit reached in chat %s: %d requested, %d max — "
-                "%d calls rejected",
+                "Tool-call limit reached in chat %s: %d requested, %d max — %d calls rejected",
                 chat_id,
                 len(function_calls) + len(rejected_calls),
                 MAX_TOOL_CALLS_PER_TURN,
@@ -502,15 +497,13 @@ async def process_tool_calls(
                 f"{MAX_TOOL_CALLS_PER_TURN} reached. "
                 f"Prioritise remaining tasks and retry in the next turn."
             )
-            tool_msg: ChatCompletionToolMessageParam = {
+            rejection_tool_msg: ChatCompletionToolMessageParam = {
                 "role": "tool",
                 "tool_call_id": tc_id,
                 "content": rejection_msg,
             }
-            messages.append(tool_msg)
-            buffered_persist.append(
-                {"role": "tool", "content": rejection_msg, "name": tool_name}
-            )
+            messages.append(rejection_tool_msg)
+            buffered_persist.append({"role": "tool", "content": rejection_msg, "name": tool_name})
 
     return tool_log, buffered_persist
 
@@ -553,18 +546,20 @@ async def execute_tool_call(
                     chat_id,
                     extra={"chat_id": chat_id},
                 )
-                await get_event_bus().emit(Event(
-                    name="error_occurred",
-                    data={
-                        "error_type": "path_traversal",
-                        "chat_id": chat_id,
-                        "workspace_dir": str(ws_resolved),
-                        "root_dir": str(root_resolved),
-                        "tool_name": tool_call.function.name,
-                    },
-                    source="react_loop.execute_tool_call",
-                    correlation_id=get_correlation_id(),
-                ))
+                await get_event_bus().emit(
+                    Event(
+                        name="error_occurred",
+                        data={
+                            "error_type": "path_traversal",
+                            "chat_id": chat_id,
+                            "workspace_dir": str(ws_resolved),
+                            "root_dir": str(root_resolved),
+                            "tool_name": tool_call.function.name,
+                        },
+                        source="react_loop.execute_tool_call",
+                        correlation_id=get_correlation_id(),
+                    )
+                )
                 return (
                     tc_id,
                     "⚠️ Workspace path validation failed. This incident has been logged.",

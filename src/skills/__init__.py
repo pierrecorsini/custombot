@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from src.core.instruction_loader import InstructionLoader
     from src.core.project_context import ProjectContextLoader
     from src.db import Database
-    from src.llm_provider import LLMProvider
+    from src.llm import LLMProvider
     from src.project.store import ProjectStore
     from src.routing import RoutingEngine
     from src.vector_memory import VectorMemory

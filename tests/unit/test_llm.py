@@ -27,7 +27,7 @@ from src.llm import (
     LLMClient,
     TokenUsage,
 )
-from src.llm_error_classifier import classify_llm_error
+from src.llm import classify_llm_error
 
 # OpenAI SDK exception types — used by parametrized classifier tests
 from openai import (
@@ -994,9 +994,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     @patch("src.llm.AsyncOpenAI")
     @patch("src.llm.get_correlation_id", return_value="edge-3")
-    async def test_shared_token_usage_across_clients(
-        self, mock_corr, mock_openai, valid_cfg
-    ):
+    async def test_shared_token_usage_across_clients(self, mock_corr, mock_openai, valid_cfg):
         """Two clients sharing a TokenUsage instance accumulate together."""
         shared = TokenUsage()
         mock_response = _make_mock_chat_completion(usage=_make_mock_usage(10, 20, 30))
@@ -1582,9 +1580,7 @@ class TestChatStreamEarlyException:
 
         assert cb.failure_count == 1
 
-    async def test_finally_block_does_not_call_on_chunk_with_empty_buffer(
-        self, valid_cfg
-    ):
+    async def test_finally_block_does_not_call_on_chunk_with_empty_buffer(self, valid_cfg):
         """When create() fails immediately, on_chunk should NOT be called (buffer is empty)."""
         from openai import APIConnectionError
 
@@ -1772,15 +1768,11 @@ class TestTokenUsageLRUEviction:
 
         # First 500 entries should be gone.
         for i in range(500):
-            assert f"chat_{i:04d}" not in usage._per_chat, (
-                f"chat_{i:04d} should have been evicted"
-            )
+            assert f"chat_{i:04d}" not in usage._per_chat, f"chat_{i:04d} should have been evicted"
 
         # Entries 500–1000 should survive.
         for i in range(500, self._MAX_SIZE + 1):
-            assert f"chat_{i:04d}" in usage._per_chat, (
-                f"chat_{i:04d} should have been preserved"
-            )
+            assert f"chat_{i:04d}" in usage._per_chat, f"chat_{i:04d} should have been preserved"
 
     def test_recent_entries_preserved(self):
         """Entries inserted most recently should survive eviction."""
@@ -1875,7 +1867,9 @@ class TestTokenUsageDoubleCountingRegression:
         )
 
         tu = client.token_usage
-        assert tu.prompt_tokens == 50, f"Expected 50, got {tu.prompt_tokens} (possible double-count)"
+        assert tu.prompt_tokens == 50, (
+            f"Expected 50, got {tu.prompt_tokens} (possible double-count)"
+        )
         assert tu.completion_tokens == 100, f"Expected 100, got {tu.completion_tokens}"
         assert tu.total_tokens == 150, f"Expected 150, got {tu.total_tokens}"
         assert tu.request_count == 1, f"Expected 1, got {tu.request_count}"
@@ -2269,7 +2263,9 @@ class TestTokenUsageConcurrentAccess:
         total_calls = num_workers * calls_per_worker
 
         expected_prompt = add_workers * calls_per_worker * 2 + chat_workers * calls_per_worker * 4
-        expected_completion = add_workers * calls_per_worker * 3 + chat_workers * calls_per_worker * 6
+        expected_completion = (
+            add_workers * calls_per_worker * 3 + chat_workers * calls_per_worker * 6
+        )
 
         assert usage.request_count == total_calls
         assert usage.prompt_tokens == expected_prompt
@@ -2360,9 +2356,10 @@ class TestHealthProbe:
             await client._circuit_breaker.record_failure()
         assert client._circuit_breaker.state.value == "open"
 
-        with patch.object(
-            client._client.models, "list", AsyncMock(return_value=MagicMock())
-        ), patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01):
+        with (
+            patch.object(client._client.models, "list", AsyncMock(return_value=MagicMock())),
+            patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01),
+        ):
             client._ensure_health_probe()
             # Wait for the probe loop to run at least one iteration
             await asyncio.sleep(0.05)
@@ -2384,9 +2381,10 @@ class TestHealthProbe:
             call_count += 1
             raise Exception("provider still down")
 
-        with patch.object(
-            client._client.models, "list", side_effect=_failing_probe
-        ), patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01):
+        with (
+            patch.object(client._client.models, "list", side_effect=_failing_probe),
+            patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01),
+        ):
             client._ensure_health_probe()
             await asyncio.sleep(0.05)
 
@@ -2432,9 +2430,10 @@ class TestHealthProbe:
         for _ in range(client._circuit_breaker._failure_threshold):
             await client._circuit_breaker.record_failure()
 
-        with patch.object(
-            client._client.models, "list", AsyncMock(side_effect=Exception("down"))
-        ), patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01):
+        with (
+            patch.object(client._client.models, "list", AsyncMock(side_effect=Exception("down"))),
+            patch("src.llm.LLM_HEALTH_PROBE_INTERVAL_SECONDS", 0.01),
+        ):
             client._ensure_health_probe()
             probe_task = client._health_probe_task
             assert probe_task is not None
