@@ -371,7 +371,35 @@ class TaskScheduler(BaseBackgroundService):
                             chat_id,
                         )
                         return
-                self._tasks[chat_id] = json_loads(raw)
+                loaded = json_loads(raw)
+                if not isinstance(loaded, list):
+                    log.error(
+                        "Scheduler tasks file for %s is not a JSON array (got %s) — skipping",
+                        chat_id,
+                        type(loaded).__name__,
+                    )
+                    return
+                valid: list[dict[str, Any]] = []
+                for i, entry in enumerate(loaded):
+                    if not isinstance(entry, dict):
+                        log.warning(
+                            "Skipping non-dict task entry #%d for %s",
+                            i,
+                            chat_id,
+                        )
+                        continue
+                    try:
+                        self._validate_task(entry)
+                    except (ValueError, TypeError) as val_exc:
+                        log.warning(
+                            "Skipping invalid task entry #%d for %s: %s",
+                            i,
+                            chat_id,
+                            val_exc,
+                        )
+                        continue
+                    valid.append(entry)
+                self._tasks[chat_id] = valid
                 self._tasks_dirty = True
         except (JSONDecodeError, OSError) as exc:
             log.error("Failed to load scheduler tasks for %s: %s", chat_id, exc)

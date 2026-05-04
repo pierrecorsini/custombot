@@ -2547,3 +2547,210 @@ class TestValidateTask:
         path = _tasks_file(workspace, "chat1")
         data = json.loads(path.read_text())
         assert len(data) == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — _load post-deserialization validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestLoadValidation:
+    """Tests for _load() validating tasks after deserialization."""
+
+    @pytest.mark.asyncio
+    async def test_skip_invalid_schedule_type(self, workspace: Path):
+        """Tasks with an invalid schedule type are skipped during load."""
+        path = _tasks_file(workspace, "chat1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "task_id": "task_001",
+                        "prompt": "valid",
+                        "schedule": {"type": "yearly"},
+                    }
+                ]
+            )
+        )
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        await s._load("chat1")
+        assert s.list_tasks("chat1") == []
+
+    @pytest.mark.asyncio
+    async def test_skip_oversized_prompt(self, workspace: Path):
+        """Tasks with a prompt exceeding max length are skipped."""
+        path = _tasks_file(workspace, "chat1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "task_id": "task_001",
+                        "prompt": "x" * 10_001,
+                        "schedule": {"type": "interval", "seconds": 60},
+                    }
+                ]
+            )
+        )
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        await s._load("chat1")
+        assert s.list_tasks("chat1") == []
+
+    @pytest.mark.asyncio
+    async def test_skip_invalid_weekdays(self, workspace: Path):
+        """Cron tasks with weekdays outside 0-6 are skipped."""
+        path = _tasks_file(workspace, "chat1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "task_id": "task_001",
+                        "prompt": "test",
+                        "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [7, 8]},
+                    }
+                ]
+            )
+        )
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        await s._load("chat1")
+        assert s.list_tasks("chat1") == []
+
+    @pytest.mark.asyncio
+    async def test_skip_missing_prompt(self, workspace: Path):
+        """Tasks with missing prompt are skipped."""
+        path = _tasks_file(workspace, "chat1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "task_id": "task_001",
+                        "schedule": {"type": "interval", "seconds": 60},
+                    }
+                ]
+            )
+        )
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        await s._load("chat1")
+        assert s.list_tasks("chat1") == []
+
+    @pytest.mark.asyncio
+    async def test_keeps_valid_skips_invalid(self, workspace: Path):
+        """Valid tasks are loaded; invalid ones are skipped."""
+        path = _tasks_file(workspace, "chat1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "task_id": "task_001",
+                        "prompt": "valid task",
+                        "schedule": {"type": "interval", "seconds": 60},
+                    },
+                    {
+                        "task_id": "task_002",
+                        "prompt": "bad",
+                        "schedule": {"type": "bogus"},
+                    },
+                    {
+                        "task_id": "task_003",
+                        "prompt": "another valid",
+                        "schedule": {"type": "daily", "hour": 9, "minute": 0},
+                    },
+                ]
+            )
+        )
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        await s._load("chat1")
+        tasks = s.list_tasks("chat1")
+        assert len(tasks) == 2
+        ids = {t["task_id"] for t in tasks}
+        assert ids == {"task_001", "task_003"}
+
+    @pytest.mark.asyncio
+    async def test_non_list_json_skipped(self, workspace: Path):
+        """A JSON object (not array) at top level is rejected."""
+        path = _tasks_file(workspace, "chat1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"not": "a list"}))
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        await s._load("chat1")
+        assert s.list_tasks("chat1") == []
+
+    @pytest.mark.asyncio
+    async def test_skip_non_dict_entries(self, workspace: Path):
+        """Non-dict entries in the array are skipped."""
+        path = _tasks_file(workspace, "chat1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                [
+                    "a string",
+                    42,
+                    {
+                        "task_id": "task_001",
+                        "prompt": "valid",
+                        "schedule": {"type": "interval", "seconds": 60},
+                    },
+                ]
+            )
+        )
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        await s._load("chat1")
+        tasks = s.list_tasks("chat1")
+        assert len(tasks) == 1
+        assert tasks[0]["task_id"] == "task_001"
+
+    @pytest.mark.asyncio
+    async def test_all_invalid_yields_empty(self, workspace: Path):
+        """When all tasks are invalid, the chat ends up with an empty list."""
+        path = _tasks_file(workspace, "chat1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                [
+                    {"prompt": "", "schedule": {"type": "interval", "seconds": 60}},
+                    {"prompt": "x", "schedule": {"type": "bad"}},
+                ]
+            )
+        )
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        await s._load("chat1")
+        assert s.list_tasks("chat1") == []
+
+    @pytest.mark.asyncio
+    async def test_valid_tasks_load_normally(self, workspace: Path):
+        """Fully valid tasks load without issues."""
+        path = _tasks_file(workspace, "chat1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "task_id": "task_001",
+                        "prompt": "hello",
+                        "schedule": {"type": "interval", "seconds": 60},
+                    },
+                    {
+                        "task_id": "task_002",
+                        "prompt": "world",
+                        "schedule": {"type": "daily", "hour": 8, "minute": 30},
+                    },
+                ]
+            )
+        )
+        s = TaskScheduler()
+        s.configure(workspace=workspace, on_trigger=AsyncMock())
+        await s._load("chat1")
+        tasks = s.list_tasks("chat1")
+        assert len(tasks) == 2
