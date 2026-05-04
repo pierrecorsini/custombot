@@ -22,7 +22,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from src.channels.base import IncomingMessage
 from src.constants import (
@@ -40,18 +40,16 @@ from src.constants import (
 )
 from src.core.context_assembler import ContextAssembler
 from src.core.context_builder import ChatMessage
-from src.core.dedup import DedupStats, DeduplicationService
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.core.event_bus import Event, EventBus, get_event_bus
 from src.core.instruction_loader import InstructionLoader
 from src.core.project_context import ProjectContextLoader as _ProjectContextLoaderImpl
 from src.core.tool_executor import ToolExecutor
-from src.core.tool_formatter import ToolLogEntry, format_response_with_tool_log
-from src.db import Database, _validate_chat_id
+from src.core.tool_formatter import format_response_with_tool_log
+from src.db import _validate_chat_id
 from src.exceptions import ErrorCode, LLMError
 from src.logging import clear_correlation_id, get_correlation_id, set_correlation_id
-from src.message_queue import MessageQueue
-from src.monitoring import PerformanceMetrics, SessionMetrics, get_metrics_collector
+from src.monitoring import get_metrics_collector
 from src.monitoring.tracing import (
     context_assembly_span,
     get_tracer,
@@ -59,7 +57,7 @@ from src.monitoring.tracing import (
     set_correlation_id_on_span,
 )
 from src.rate_limiter import RateLimiter
-from src.routing import MatchingContext, RoutingEngine
+from src.routing import MatchingContext
 from src.security.prompt_injection import (
     detect_injection,
     filter_response_content,
@@ -70,21 +68,11 @@ from src.security.signing import (
     verify_payload,
 )
 from src.security.audit import audit_log
-from src.skills import SkillRegistry
 from src.utils import LRULockCache
-from src.utils.circuit_breaker import CircuitBreaker
-from src.utils.protocols import (
-    LockProvider,
-    MemoryMonitor,
-    MemoryProtocol,
-    ProjectContextLoader,
-    ProjectStore,
-)
 
 from src.bot.crash_recovery import recover_pending_messages as _recover_pending_messages
-from src.bot.preflight import PreflightResult, preflight_check as _preflight_check
+from src.bot.preflight import preflight_check as _preflight_check
 from src.bot.react_loop import (
-    StreamCallback,
     call_llm_with_retry as _call_llm_with_retry,
     execute_tool_call as _execute_tool_call,
     format_max_iterations_message as _format_max_iterations_message,
@@ -93,6 +81,25 @@ from src.bot.react_loop import (
 )
 
 if TYPE_CHECKING:
+    from src.bot.react_loop import (
+        StreamCallback,
+    )
+    from src.routing import RoutingEngine
+    from src.core.tool_formatter import ToolLogEntry
+    from src.bot.preflight import PreflightResult
+    from src.db import Database
+    from src.monitoring import PerformanceMetrics, SessionMetrics
+    from src.utils.circuit_breaker import CircuitBreaker
+    from src.core.dedup import DedupStats, DeduplicationService
+    from src.message_queue import MessageQueue
+    from src.skills import SkillRegistry
+    from src.utils.protocols import (
+        LockProvider,
+        MemoryMonitor,
+        MemoryProtocol,
+        ProjectContextLoader,
+        ProjectStore,
+    )
     from src.channels.base import BaseChannel, SendMediaCallback
     from src.llm_provider import LLMProvider
 
@@ -104,11 +111,13 @@ lifecycle_log = logging.getLogger("lifecycle.bot")
 __all__ = ["Bot", "BotConfig", "BotDeps", "TurnContext"]
 
 # LLM error codes that are transient and worth retrying.
-_RETRYABLE_LLM_ERROR_CODES: frozenset[ErrorCode] = frozenset({
-    ErrorCode.LLM_RATE_LIMITED,
-    ErrorCode.LLM_TIMEOUT,
-    ErrorCode.LLM_CONNECTION_FAILED,
-})
+_RETRYABLE_LLM_ERROR_CODES: frozenset[ErrorCode] = frozenset(
+    {
+        ErrorCode.LLM_RATE_LIMITED,
+        ErrorCode.LLM_TIMEOUT,
+        ErrorCode.LLM_CONNECTION_FAILED,
+    }
+)
 
 # Per-request routing flag — contextvar prevents cross-request state leaks
 # when multiple messages are processed concurrently on the event loop.
@@ -195,7 +204,9 @@ class Bot:
         self._project_store = deps.project_store
         # Semaphore: only one active LLM call per chat at a time (bounded LRU cache)
         self._chat_locks: LockProvider = (
-            deps.chat_locks if deps.chat_locks is not None else LRULockCache(max_size=DEFAULT_CHAT_LOCK_CACHE_SIZE)
+            deps.chat_locks
+            if deps.chat_locks is not None
+            else LRULockCache(max_size=DEFAULT_CHAT_LOCK_CACHE_SIZE)
         )
         # Unified dedup service — wraps both inbound (message-id) and outbound
         # (content-hash) strategies.  Falls back to direct DB check when not
@@ -213,11 +224,15 @@ class Bot:
             skills_registry=deps.skills,
             rate_limiter=self._rate_limiter,
             metrics=self._metrics,
-            on_skill_executed=deps.session_metrics.increment_skills if deps.session_metrics else None,
+            on_skill_executed=deps.session_metrics.increment_skills
+            if deps.session_metrics
+            else None,
             audit_log_dir=Path(WORKSPACE_DIR) / "logs",
         )
         # Instruction file loader (mtime-cached) — prefer injected shared instance
-        self._instruction_loader = deps.instruction_loader or InstructionLoader(self._instructions_dir)
+        self._instruction_loader = deps.instruction_loader or InstructionLoader(
+            self._instructions_dir
+        )
         # Project context loader — prefer injected shared instance
         self._project_ctx = deps.project_ctx or _ProjectContextLoaderImpl(deps.project_store)
         # Context assembler (stateless service — owns topic cache lifecycle)
@@ -321,7 +336,7 @@ class Bot:
         self,
         timeout_seconds: int | None = None,
         channel: "BaseChannel | None" = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Recover and process stale pending messages from previous crash.
 
         Delegates to :func:`src.bot.crash_recovery.recover_pending_messages`.
@@ -344,6 +359,8 @@ class Bot:
 
         Delegates to :func:`src.bot.preflight.preflight_check`.
         """
+        if self._dedup is None:
+            return PreflightResult(passed=False, reason="no_dedup")
         return await _preflight_check(
             msg=msg,
             dedup=self._dedup,
@@ -403,17 +420,19 @@ class Bot:
                 MAX_MESSAGE_LENGTH,
                 extra={"chat_id": msg.chat_id, "message_length": len(msg.text)},
             )
-            await get_event_bus().emit(Event(
-                name="message_dropped",
-                data={
-                    "chat_id": msg.chat_id,
-                    "sender_id": msg.sender_id,
-                    "reason": "message_too_long",
-                    "message_length": len(msg.text),
-                },
-                source="Bot.handle_message",
-                correlation_id=get_correlation_id(),
-            ))
+            await get_event_bus().emit(
+                Event(
+                    name="message_dropped",
+                    data={
+                        "chat_id": msg.chat_id,
+                        "sender_id": msg.sender_id,
+                        "reason": "message_too_long",
+                        "message_length": len(msg.text),
+                    },
+                    source="Bot.handle_message",
+                    correlation_id=get_correlation_id(),
+                )
+            )
             clear_correlation_id()
             return None
 
@@ -426,7 +445,7 @@ class Bot:
         )
 
         try:
-            if await self._dedup.is_inbound_duplicate(msg.message_id):
+            if self._dedup is not None and await self._dedup.is_inbound_duplicate(msg.message_id):
                 log.debug(
                     "Duplicate message %s from chat %s, skipping",
                     msg.message_id,
@@ -444,7 +463,7 @@ class Bot:
         rate_result = self._rate_limiter.check_message_rate(
             msg.chat_id,
             limit=DEFAULT_CHAT_RATE_LIMIT,
-            window_seconds=RATE_LIMIT_WINDOW_SECONDS,
+            window_seconds=int(RATE_LIMIT_WINDOW_SECONDS),
         )
         if not rate_result.allowed:
             log.warning(
@@ -461,7 +480,9 @@ class Bot:
             clear_correlation_id()
             return None
 
-        return await self._handle_message_inner(msg, channel=channel, stream_callback=stream_callback, correlation_id=correlation_id)
+        return await self._handle_message_inner(
+            msg, channel=channel, stream_callback=stream_callback, correlation_id=correlation_id
+        )
 
     async def _handle_message_inner(
         self,
@@ -555,6 +576,18 @@ class Bot:
                             "timeout_seconds": timeout,
                         },
                     )
+                    # Best-effort: mark the queue message as completed so it
+                    # doesn't remain PENDING and trigger duplicate reprocessing
+                    # on crash recovery.
+                    if self._message_queue:
+                        try:
+                            await self._message_queue.complete(msg.message_id)
+                        except Exception:
+                            log.warning(
+                                "Failed to complete queue entry for timed-out message %s",
+                                msg.message_id,
+                                extra={"chat_id": msg.chat_id},
+                            )
                     return None
                 except asyncio.CancelledError:
                     log.info(
@@ -641,17 +674,18 @@ class Bot:
         )
 
         try:
-            await get_event_bus().emit(Event(
-                name="scheduled_task_started",
-                data={"chat_id": chat_id, "prompt_length": len(prompt)},
-                source="Bot.process_scheduled",
-                correlation_id=get_correlation_id(),
-            ))
+            await get_event_bus().emit(
+                Event(
+                    name="scheduled_task_started",
+                    data={"chat_id": chat_id, "prompt_length": len(prompt)},
+                    source="Bot.process_scheduled",
+                    correlation_id=get_correlation_id(),
+                )
+            )
         except Exception:
             log_noncritical(
                 NonCriticalCategory.EVENT_EMISSION,
-                "Failed to emit scheduled_task_started event for chat %s",
-                chat_id,
+                f"Failed to emit scheduled_task_started event for chat {chat_id}",
                 logger=log,
             )
 
@@ -720,8 +754,7 @@ class Bot:
                 )
 
                 if response_text and any(
-                    response_text.startswith(prefix)
-                    for prefix in SCHEDULED_ERROR_PREFIXES
+                    response_text.startswith(prefix) for prefix in SCHEDULED_ERROR_PREFIXES
                 ):
                     log.warning(
                         "Scheduled task for chat %s produced an error response, "
@@ -734,8 +767,7 @@ class Bot:
 
                 if response_text is None:
                     log.warning(
-                        "Scheduled task for chat %s produced None response, "
-                        "skipping persistence",
+                        "Scheduled task for chat %s produced None response, skipping persistence",
                         chat_id,
                         extra={"chat_id": chat_id, "correlation_id": correlation_id},
                     )
@@ -776,20 +808,21 @@ class Bot:
                 )
 
                 try:
-                    await get_event_bus().emit(Event(
-                        name="scheduled_task_completed",
-                        data={
-                            "chat_id": chat_id,
-                            "response_length": len(response_text) if response_text else 0,
-                        },
-                        source="Bot.process_scheduled",
-                        correlation_id=get_correlation_id(),
-                    ))
+                    await get_event_bus().emit(
+                        Event(
+                            name="scheduled_task_completed",
+                            data={
+                                "chat_id": chat_id,
+                                "response_length": len(response_text) if response_text else 0,
+                            },
+                            source="Bot.process_scheduled",
+                            correlation_id=get_correlation_id(),
+                        )
+                    )
                 except Exception:
                     log_noncritical(
                         NonCriticalCategory.EVENT_EMISSION,
-                        "Failed to emit scheduled_task_completed event for chat %s",
-                        chat_id,
+                        f"Failed to emit scheduled_task_completed event for chat {chat_id}",
                         logger=log,
                     )
 
@@ -817,12 +850,18 @@ class Bot:
         """Match routing rule, load instruction, and assemble LLM messages."""
         if not self._routing:
             log.warning("No routing engine configured, skipping message")
-            await get_event_bus().emit(Event(
-                name="message_dropped",
-                data={"chat_id": msg.chat_id, "sender_id": msg.sender_id, "reason": "no_routing"},
-                source="Bot._build_turn_context",
-                correlation_id=get_correlation_id(),
-            ))
+            await get_event_bus().emit(
+                Event(
+                    name="message_dropped",
+                    data={
+                        "chat_id": msg.chat_id,
+                        "sender_id": msg.sender_id,
+                        "reason": "no_routing",
+                    },
+                    source="Bot._build_turn_context",
+                    correlation_id=get_correlation_id(),
+                )
+            )
             return None
 
         if not self._routing.has_rules:
@@ -833,16 +872,18 @@ class Bot:
                 msg.sender_id,
                 msg.chat_id,
             )
-            await get_event_bus().emit(Event(
-                name="message_dropped",
-                data={"chat_id": msg.chat_id, "sender_id": msg.sender_id, "reason": "no_rules"},
-                source="Bot._build_turn_context",
-                correlation_id=get_correlation_id(),
-            ))
+            await get_event_bus().emit(
+                Event(
+                    name="message_dropped",
+                    data={"chat_id": msg.chat_id, "sender_id": msg.sender_id, "reason": "no_rules"},
+                    source="Bot._build_turn_context",
+                    correlation_id=get_correlation_id(),
+                )
+            )
             return None
 
         match_ctx = MatchingContext.from_message(msg)
-        matched_rule, instruction_filename = self._routing.match_with_rule(msg, ctx=match_ctx)
+        matched_rule, instruction_filename = await self._routing.match_with_rule(msg, ctx=match_ctx)
         if not matched_rule:
             log.info(
                 "No routing rule matched for message from %s (fromMe=%s, toMe=%s), ignoring",
@@ -850,12 +891,14 @@ class Bot:
                 msg.fromMe,
                 msg.toMe,
             )
-            await get_event_bus().emit(Event(
-                name="message_dropped",
-                data={"chat_id": msg.chat_id, "sender_id": msg.sender_id, "reason": "no_match"},
-                source="Bot._build_turn_context",
-                correlation_id=get_correlation_id(),
-            ))
+            await get_event_bus().emit(
+                Event(
+                    name="message_dropped",
+                    data={"chat_id": msg.chat_id, "sender_id": msg.sender_id, "reason": "no_match"},
+                    source="Bot._build_turn_context",
+                    correlation_id=get_correlation_id(),
+                )
+            )
             return None
 
         _routing_show_errors_var.set(matched_rule.showErrors)
@@ -867,7 +910,7 @@ class Bot:
             msg.sender_id,
         )
 
-        instruction_content = self._load_instruction(instruction_filename)
+        instruction_content = self._load_instruction(instruction_filename or "default.md")
         channel_prompt = channel.get_channel_prompt() if channel else None
 
         with context_assembly_span(chat_id=msg.chat_id, rule_id=matched_rule.id) as span:
@@ -879,9 +922,7 @@ class Bot:
                 rule_id=matched_rule.id,
             )
             if result is not None:
-                span.set_attribute(
-                    "custombot.context.message_count", len(result.messages)
-                )
+                span.set_attribute("custombot.context.message_count", len(result.messages))
 
         if result is None:
             log.warning(
@@ -893,7 +934,7 @@ class Bot:
 
         return TurnContext(
             messages=result.messages,
-            rule_id=result.rule_id,
+            rule_id=result.rule_id or matched_rule.id,
             skill_exec_verbose=matched_rule.skillExecVerbose,
             show_errors=matched_rule.showErrors,
         )
@@ -911,12 +952,14 @@ class Bot:
             extra={"chat_id": msg.chat_id},
         )
 
-        await get_event_bus().emit(Event(
-            name="message_received",
-            data={"chat_id": msg.chat_id, "sender": msg.sender_name},
-            source="Bot._process",
-            correlation_id=get_correlation_id(),
-        ))
+        await get_event_bus().emit(
+            Event(
+                name="message_received",
+                data={"chat_id": msg.chat_id, "sender": msg.sender_name},
+                source="Bot._process",
+                correlation_id=get_correlation_id(),
+            )
+        )
 
         await self._db.upsert_chat(msg.chat_id, msg.sender_name)
         try:
@@ -968,7 +1011,7 @@ class Bot:
         chat_id: str,
         raw_response: str,
         tool_log: list[ToolLogEntry],
-        buffered_persist: list[dict],
+        buffered_persist: list[dict[str, Any]],
         generation: int,
         verbose: str,
     ) -> str | None:
@@ -1040,20 +1083,20 @@ class Bot:
     async def _react_loop(
         self,
         chat_id: str,
-        messages: list,
-        tools: list | None,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
         workspace_dir: Path,
         stream_callback: StreamCallback | None = None,
         channel: "BaseChannel | None" = None,
-    ) -> tuple[str, list[ToolLogEntry], list[dict]]:
+    ) -> tuple[str, list[ToolLogEntry], list[dict[str, Any]]]:
         """Delegate to :func:`src.bot.react_loop.react_loop`."""
         return await _react_loop(
             llm=self._llm,
             metrics=self._metrics,
             tool_executor=self._tool_executor,
             chat_id=chat_id,
-            messages=messages,
-            tools=tools,
+            messages=messages,  # type: ignore[arg-type]
+            tools=tools,  # type: ignore[arg-type]
             workspace_dir=workspace_dir,
             max_tool_iterations=self._cfg.max_tool_iterations,
             stream_response=self._cfg.stream_response,
@@ -1092,8 +1135,7 @@ class Bot:
         # Propagate to ContextAssembler so context assembly uses updated values
         self._context_assembler.update_config(new_cfg)
         log.info(
-            "Bot config updated: max_tool_iterations=%d → %d, "
-            "memory_max_history=%d → %d",
+            "Bot config updated: max_tool_iterations=%d → %d, memory_max_history=%d → %d",
             old_cfg.max_tool_iterations,
             new_cfg.max_tool_iterations,
             old_cfg.memory_max_history,
@@ -1123,17 +1165,18 @@ class Bot:
             self._dedup.record_outbound(chat_id, text)
 
         try:
-            await get_event_bus().emit(Event(
-                name="response_sent",
-                data={"chat_id": chat_id, "response_length": len(text)},
-                source="Bot._send_to_chat",
-                correlation_id=get_correlation_id(),
-            ))
+            await get_event_bus().emit(
+                Event(
+                    name="response_sent",
+                    data={"chat_id": chat_id, "response_length": len(text)},
+                    source="Bot._send_to_chat",
+                    correlation_id=get_correlation_id(),
+                )
+            )
         except Exception:
             log_noncritical(
                 NonCriticalCategory.EVENT_EMISSION,
-                "Failed to emit response_sent event for chat %s",
-                chat_id,
+                f"Failed to emit response_sent event for chat {chat_id}",
                 logger=log,
             )
 
