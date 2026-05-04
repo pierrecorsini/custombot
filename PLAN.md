@@ -250,7 +250,7 @@ _Round 9 — Senior technical review (2026-05-04). 20 items across 6 categories.
 
 ## Security
 
-- [ ] Cap cumulative retry sleep in `RoutingEngine.load_rules()` — each instruction file that fails to parse triggers a 100ms `time.sleep(0.1)` retry. With 20 corrupted files, this blocks the event loop for 2+ seconds. Add a cumulative retry budget (e.g. 1 second total across all files) and skip remaining retries once exhausted. This prevents a denial-of-service attack via crafted instruction files that exploit the retry logic.
+- [x] Cap cumulative retry sleep in `RoutingEngine.load_rules()` — each instruction file that fails to parse triggers a 100ms `time.sleep(0.1)` retry. With 20 corrupted files, this blocks the event loop for 2+ seconds. Add a cumulative retry budget (e.g. 1 second total across all files) and skip remaining retries once exhausted. This prevents a denial-of-service attack via crafted instruction files that exploit the retry logic.
 - [ ] Validate loaded tasks in `TaskScheduler._load()` post-deserialization — `_load()` parses `tasks.json` via `json.loads(raw)` and stores the result directly in `self._tasks` without re-running `_validate_task()`. A corrupted or tampered file with an oversized `prompt`, an invalid `schedule.type`, or `weekdays` outside 0–6 would cause runtime errors later. Run `_validate_task()` on each loaded entry and skip invalid tasks with a warning, similar to how `RoutingEngine.load_rules()` skips malformed rules.
 
 ## DevOps & CI

@@ -20,7 +20,7 @@ import time
 from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -608,25 +608,25 @@ class TestRoutingEngineLoadRules:
 
     def test_empty_directory_loads_no_rules(self, tmp_path: Path):
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert engine.rules == []
 
     def test_nonexistent_directory_loads_no_rules(self, tmp_path: Path):
         missing = tmp_path / "no_such_dir"
         engine = RoutingEngine(missing)
-        engine.load_rules()
+        await engine.load_rules()
         assert engine.rules == []
 
     def test_directory_with_no_md_files(self, tmp_path: Path):
         (tmp_path / "notes.txt").write_text("not a markdown file")
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert engine.rules == []
 
     def test_md_file_without_frontmatter_skipped(self, tmp_path: Path):
         (tmp_path / "plain.md").write_text("# No frontmatter here\nJust content.")
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert engine.rules == []
 
     def test_md_file_with_routing_loads_rule(self, tmp_path: Path):
@@ -643,7 +643,7 @@ class TestRoutingEngineLoadRules:
             """)
         )
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert len(engine.rules) == 1
         assert engine.rules[0].id == "chat-rule"
         assert engine.rules[0].priority == 10
@@ -661,7 +661,7 @@ class TestRoutingEngineLoadRules:
                 """)
             )
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert len(engine.rules) == 3
         # Rules should be sorted by priority
         assert engine.rules[0].priority == 1
@@ -679,7 +679,7 @@ class TestRoutingEngineLoadRules:
                 f"---\nrouting:\n  id: p-{pri}\n  priority: {pri}\n---\n\n# P{pri}\n"
             )
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         priorities = [r.priority for r in engine.rules]
         assert priorities == [1, 10, 25, 50, 100]
 
@@ -697,14 +697,14 @@ class TestRoutingEngineLoadRules:
     def test_refresh_rules_reloads(self, tmp_path: Path):
         """refresh_rules() should reload from disk."""
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert engine.rules == []
 
         # Add a new file and refresh
         (tmp_path / "new.md").write_text(
             "---\nrouting:\n  id: new-rule\n  priority: 1\n---\n\n# New\n"
         )
-        engine.refresh_rules()
+        await engine.refresh_rules()
         assert len(engine.rules) == 1
         assert engine.rules[0].id == "new-rule"
 
@@ -724,7 +724,7 @@ class TestRoutingEngineLoadRules:
             """)
         )
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert len(engine.rules) == 2
         ids = {r.id for r in engine.rules}
         assert ids == {"rule-a", "rule-b"}
@@ -746,7 +746,7 @@ class TestRoutingEngineLoadRules:
         bad.write_text("---\n[[invalid yaml\n---\n# Broken\n")
 
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         # Only the good file should be loaded
         assert len(engine.rules) == 1
         assert engine.rules[0].id == "good-rule"
@@ -777,8 +777,8 @@ class TestRoutingEngineLoadRules:
             return original_parse(path)
 
         with patch("src.routing.parse_file", side_effect=_flaky_parse):
-            with patch("src.routing.time.sleep") as mock_sleep:
-                engine.load_rules()
+            with patch("src.routing.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                await engine.load_rules()
 
         # parse_file called twice (initial + retry)
         assert call_count == 2
@@ -807,10 +807,45 @@ class TestRoutingEngineLoadRules:
         )
         engine = RoutingEngine(tmp_path)
 
-        with patch("src.routing.time.sleep"):
-            engine.load_rules()
+        with patch("src.routing.asyncio.sleep", new_callable=AsyncMock):
+            await engine.load_rules()
 
         # Only the good file loaded; the bad file was retried then skipped
+        assert len(engine.rules) == 1
+        assert engine.rules[0].id == "good-rule"
+
+    def test_retry_budget_caps_cumulative_sleep(self, tmp_path: Path):
+        """When many files fail to parse, cumulative retry sleep is capped.
+
+        Creates more corrupted files than the budget allows retries for
+        (budget = 1.0s, each retry = 0.1s → max 10 retries). Verifies
+        that files beyond the budget are skipped without retrying.
+        """
+        # Create 15 corrupted .md files — more than the budget allows
+        for i in range(15):
+            bad = tmp_path / f"bad_{i:02d}.md"
+            bad.write_text("---\n[[invalid yaml\n---\n# Broken\n")
+
+        # Also create a good file to verify it still loads
+        good = tmp_path / "good.md"
+        good.write_text(
+            textwrap.dedent("""\
+                ---
+                routing:
+                  id: good-rule
+                  priority: 1
+                ---
+                # Good
+            """)
+        )
+        engine = RoutingEngine(tmp_path)
+
+        with patch("src.routing.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await engine.load_rules()
+
+        # asyncio.sleep should be called at most 10 times (1.0s budget / 0.1s each)
+        assert mock_sleep.call_count <= 10
+        # The good file should still load
         assert len(engine.rules) == 1
         assert engine.rules[0].id == "good-rule"
 
@@ -834,7 +869,7 @@ class TestRoutingEngineLoadRules:
             """)
         )
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert len(engine.rules) == 1
         assert engine.rules[0].id == "chat-rule"
         captured_mtimes = dict(engine._file_mtimes)
@@ -842,7 +877,7 @@ class TestRoutingEngineLoadRules:
         # Simulate editor truncating the file to empty
         md.write_text("")
         with patch("src.routing.log") as mock_log:
-            engine.load_rules()
+            await engine.load_rules()
 
         # Old rules retained — not replaced with empty list
         assert len(engine.rules) == 1
@@ -873,12 +908,12 @@ class TestRoutingEngineLoadRules:
             """)
         )
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert len(engine.rules) == 1
 
         # Truncate → graceful degradation
         md.write_text("")
-        engine.load_rules()
+        await engine.load_rules()
         assert len(engine.rules) == 1  # old rules retained
 
         # Restore with updated content
@@ -893,7 +928,7 @@ class TestRoutingEngineLoadRules:
                 # Updated instruction
             """)
         )
-        engine.load_rules()
+        await engine.load_rules()
         assert len(engine.rules) == 1
         assert engine.rules[0].id == "new-rule"
         assert engine.rules[0].priority == 5
@@ -901,7 +936,7 @@ class TestRoutingEngineLoadRules:
     def test_initial_empty_load_does_not_retain(self, tmp_path: Path):
         """First load with no rules should NOT retain (no previous rules exist)."""
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert engine.rules == []
 
     @pytest.mark.skipif(
@@ -942,7 +977,7 @@ class TestRoutingEngineLoadRules:
 
         engine = RoutingEngine(instructions)
         with patch("src.routing.log") as mock_log:
-            engine.load_rules()
+            await engine.load_rules()
 
         # Only the real file's rule loaded; symlink skipped
         assert len(engine.rules) == 1
@@ -990,13 +1025,13 @@ class TestRoutingEngineMatch:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule()]
         msg = make_msg(text="anything at all")
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_no_rules_returns_none(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = []
         msg = make_msg()
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_match_with_rule_returns_tuple(self):
         engine = RoutingEngine(Path("/dummy"))
@@ -1004,7 +1039,7 @@ class TestRoutingEngineMatch:
         engine._rules = [rule]
         msg = make_msg()
 
-        matched_rule, instruction = engine.match_with_rule(msg)
+        matched_rule, instruction = await engine.match_with_rule(msg)
         assert matched_rule is rule
         assert instruction == "chat.agent.md"
 
@@ -1013,7 +1048,7 @@ class TestRoutingEngineMatch:
         engine._rules = []
         msg = make_msg()
 
-        matched_rule, instruction = engine.match_with_rule(msg)
+        matched_rule, instruction = await engine.match_with_rule(msg)
         assert matched_rule is None
         assert instruction is None
 
@@ -1023,7 +1058,7 @@ class TestRoutingEngineMatch:
         engine._rules = [rule]
         msg = make_msg()
 
-        assert engine.match(msg) == "special.md"
+        assert await engine.match(msg) == "special.md"
 
     # ── Sender matching ────────────────────────────────────────────────
 
@@ -1031,25 +1066,25 @@ class TestRoutingEngineMatch:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(sender="5511999990000")]
         msg = make_msg(sender_id="5511999990000")
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_specific_sender_no_match(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(sender="5511999990000")]
         msg = make_msg(sender_id="5511999991111")
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_sender_regex_pattern(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(sender=r"55\d{10}")]
         msg = make_msg(sender_id="5511999990000")
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_sender_regex_no_match(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(sender=r"55\d{10}")]
         msg = make_msg(sender_id="4411999990000")
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     # ── Channel matching ───────────────────────────────────────────────
 
@@ -1057,19 +1092,19 @@ class TestRoutingEngineMatch:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(channel="whatsapp")]
         msg = make_msg(channel_type=ChannelType.WHATSAPP)
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_specific_channel_no_match(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(channel="telegram")]
         msg = make_msg(channel_type=ChannelType.WHATSAPP)
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_channel_regex_pattern(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(channel=r"tele.*")]
         msg = make_msg(channel_type="telegram")
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     # ── Recipient matching ─────────────────────────────────────────────
 
@@ -1077,13 +1112,13 @@ class TestRoutingEngineMatch:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(recipient="group-001")]
         msg = make_msg(chat_id="group-001")
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_specific_recipient_no_match(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(recipient="group-001")]
         msg = make_msg(chat_id="group-999")
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     # ── content_regex matching ─────────────────────────────────────────
 
@@ -1091,31 +1126,31 @@ class TestRoutingEngineMatch:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(content_regex=r"^hello")]
         msg = make_msg(text="hello world")
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_content_regex_no_match(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(content_regex=r"^hello")]
         msg = make_msg(text="goodbye world")
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_content_regex_complex_pattern(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(content_regex=r"^\d{4}-\d{2}-\d{2}$")]
         msg = make_msg(text="2024-01-15")
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_content_regex_case_sensitive_by_default(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(content_regex=r"^Hello")]
         msg = make_msg(text="hello")
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_wildcard_content_matches_anything(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(content_regex="*")]
         msg = make_msg(text="literally anything")
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     # ── Priority ordering ──────────────────────────────────────────────
 
@@ -1127,7 +1162,7 @@ class TestRoutingEngineMatch:
         engine._rules = sorted([high_pri, low_pri], key=lambda r: r.priority)
 
         msg = make_msg()
-        assert engine.match(msg) == "low.md"
+        assert await engine.match(msg) == "low.md"
 
     def test_first_matching_rule_wins(self):
         engine = RoutingEngine(Path("/dummy"))
@@ -1146,7 +1181,7 @@ class TestRoutingEngineMatch:
         engine._rules = [rule_a, rule_b]
         msg = make_msg(sender_id="5511999990000")
         # Both match, but rule_a has lower priority
-        assert engine.match(msg) == "a.md"
+        assert await engine.match(msg) == "a.md"
 
     def test_first_rule_skipped_if_no_match_second_wins(self):
         engine = RoutingEngine(Path("/dummy"))
@@ -1165,7 +1200,7 @@ class TestRoutingEngineMatch:
         engine._rules = [rule_a, rule_b]
         msg = make_msg(sender_id="5511999991111")
         # rule_a doesn't match sender, rule_b (wildcard) does
-        assert engine.match(msg) == "b.md"
+        assert await engine.match(msg) == "b.md"
 
     # ── enabled / disabled ─────────────────────────────────────────────
 
@@ -1174,7 +1209,7 @@ class TestRoutingEngineMatch:
         disabled = make_rule(id="disabled", enabled=False, instruction="disabled.md")
         engine._rules = [disabled]
         msg = make_msg()
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_disabled_rule_skipped_falls_through_to_next(self):
         engine = RoutingEngine(Path("/dummy"))
@@ -1182,7 +1217,7 @@ class TestRoutingEngineMatch:
         fallback = make_rule(id="on", priority=5, enabled=True, instruction="on.md")
         engine._rules = [disabled, fallback]
         msg = make_msg()
-        assert engine.match(msg) == "on.md"
+        assert await engine.match(msg) == "on.md"
 
     def test_enabled_field_defaults_to_true(self):
         rule = make_rule()  # enabled not explicitly set
@@ -1194,32 +1229,32 @@ class TestRoutingEngineMatch:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(fromMe=True)]
         msg = make_msg(fromMe=True)
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_fromMe_true_rejects_non_bot_message(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(fromMe=True)]
         msg = make_msg(fromMe=False)
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_fromMe_false_rejects_bot_message(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(fromMe=False)]
         msg = make_msg(fromMe=True)
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_fromMe_false_matches_non_bot_message(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(fromMe=False)]
         msg = make_msg(fromMe=False)
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_fromMe_none_matches_all(self):
         """When fromMe is None (default), the filter is not applied."""
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(fromMe=None)]
-        assert engine.match(make_msg(fromMe=True)) == "chat.agent.md"
-        assert engine.match(make_msg(fromMe=False)) == "chat.agent.md"
+        assert await engine.match(make_msg(fromMe=True)) == "chat.agent.md"
+        assert await engine.match(make_msg(fromMe=False)) == "chat.agent.md"
 
     # ── toMe filtering ─────────────────────────────────────────────────
 
@@ -1227,32 +1262,32 @@ class TestRoutingEngineMatch:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(toMe=True)]
         msg = make_msg(toMe=True)
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_toMe_true_rejects_group_message(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(toMe=True)]
         msg = make_msg(toMe=False)
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_toMe_false_rejects_direct_message(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(toMe=False)]
         msg = make_msg(toMe=True)
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_toMe_false_matches_group_message(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(toMe=False)]
         msg = make_msg(toMe=False)
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_toMe_none_matches_all(self):
         """When toMe is None (default), the filter is not applied."""
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(toMe=None)]
-        assert engine.match(make_msg(toMe=True)) == "chat.agent.md"
-        assert engine.match(make_msg(toMe=False)) == "chat.agent.md"
+        assert await engine.match(make_msg(toMe=True)) == "chat.agent.md"
+        assert await engine.match(make_msg(toMe=False)) == "chat.agent.md"
 
     # ── Combined filters ────────────────────────────────────────────────
 
@@ -1272,7 +1307,7 @@ class TestRoutingEngineMatch:
 
         # Perfect match
         assert (
-            engine.match(
+            await engine.match(
                 make_msg(
                     sender_id="5511999990000",
                     channel_type="whatsapp",
@@ -1286,7 +1321,7 @@ class TestRoutingEngineMatch:
 
         # Wrong sender
         assert (
-            engine.match(
+            await engine.match(
                 make_msg(
                     sender_id="wrong",
                     channel_type="whatsapp",
@@ -1300,7 +1335,7 @@ class TestRoutingEngineMatch:
 
         # Wrong channel
         assert (
-            engine.match(
+            await engine.match(
                 make_msg(
                     sender_id="5511999990000",
                     channel_type="telegram",
@@ -1314,7 +1349,7 @@ class TestRoutingEngineMatch:
 
         # Wrong content
         assert (
-            engine.match(
+            await engine.match(
                 make_msg(
                     sender_id="5511999990000",
                     channel_type="whatsapp",
@@ -1328,7 +1363,7 @@ class TestRoutingEngineMatch:
 
         # Wrong fromMe
         assert (
-            engine.match(
+            await engine.match(
                 make_msg(
                     sender_id="5511999990000",
                     channel_type="whatsapp",
@@ -1342,7 +1377,7 @@ class TestRoutingEngineMatch:
 
         # Wrong toMe
         assert (
-            engine.match(
+            await engine.match(
                 make_msg(
                     sender_id="5511999990000",
                     channel_type="whatsapp",
@@ -1367,31 +1402,31 @@ class TestEdgeCases:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(content_regex="*")]
         msg = make_msg(text="")
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_empty_text_matches_empty_pattern(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(content_regex="")]
         msg = make_msg(text="")
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_empty_text_does_not_match_nonempty_pattern(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(content_regex=r"^hello")]
         msg = make_msg(text="")
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_unicode_text_matches_regex(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(content_regex=r"^こんにちは")]
         msg = make_msg(text="こんにちは世界")
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_very_long_text(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(content_regex="*")]
         msg = make_msg(text="A" * 100_000)
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_special_regex_chars_in_exact_match(self):
         """Patterns like 'group.1' should fall back to exact match if
@@ -1401,7 +1436,7 @@ class TestEdgeCases:
         engine._rules = [make_rule(recipient="group.1")]
         msg = make_msg(chat_id="groupX1")
         # "group.1" as regex matches "groupX1" via '.' wildcard
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     def test_invalid_regex_in_sender_falls_back_to_exact(self):
         """If sender pattern is invalid regex, _compile_pattern returns None,
@@ -1412,7 +1447,7 @@ class TestEdgeCases:
         msg = make_msg(sender_id="invalid-regex")
         # The pattern "[invalid-regex" won't compile → falls back to exact
         # match. "invalid-regex" != "[invalid-regex" → no match
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     def test_invalid_regex_in_sender_exact_match_works(self):
         """Invalid regex pattern matches via exact string fallback.
@@ -1436,7 +1471,7 @@ class TestEdgeCases:
         assert compiled is None  # doesn't compile
         assert _match_compiled(compiled, "(unclosed", "(unclosed") is True
         # Verify the full pipeline works
-        rule, instruction = engine.match_with_rule(
+        rule, instruction = await engine.match_with_rule(
             make_msg(sender_id="unclosed")  # won't match "(unclosed"
         )
         assert rule is None  # "unclosed" != "(unclosed"
@@ -1449,8 +1484,8 @@ class TestEdgeCases:
             make_rule(id="third", priority=3, instruction="third.md"),
         ]
         msg = make_msg()
-        assert engine.match(msg) == "first.md"
-        matched_rule, _ = engine.match_with_rule(msg)
+        assert await engine.match(msg) == "first.md"
+        matched_rule, _ = await engine.match_with_rule(msg)
         assert matched_rule is not None
         assert matched_rule.id == "first"
 
@@ -1461,7 +1496,7 @@ class TestEdgeCases:
                 f"---\nrouting:\n  id: {name}\n  priority: {pri}\n---\n\n# {name}\n"
             )
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         priorities = [r.priority for r in engine.rules]
         assert priorities == sorted(priorities)
 
@@ -1472,7 +1507,7 @@ class TestEdgeCases:
                 f"---\nrouting:\n  id: {name}\n  priority: 1\n---\n\n# {name}\n"
             )
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         # With equal priorities, sorted() is stable, so order follows
         # the sorted filename order (a.md, b.md, c.md)
         ids = [r.id for r in engine.rules]
@@ -1488,7 +1523,7 @@ class TestEdgeCases:
         engine._rules = [rule_a, rule_b]
 
         msg = make_msg()
-        matched, instruction = engine.match_with_rule(msg)
+        matched, instruction = await engine.match_with_rule(msg)
         assert matched is rule_a
         assert instruction == "a.md"
 
@@ -1497,7 +1532,7 @@ class TestEdgeCases:
             make_rule(id="a", priority=1, sender="nonexistent", instruction="a.md"),
             rule_b,
         ]
-        matched, instruction = engine.match_with_rule(msg)
+        matched, instruction = await engine.match_with_rule(msg)
         assert matched is rule_b
         assert instruction == "b.md"
 
@@ -1512,7 +1547,7 @@ class TestEdgeCases:
     def test_match_with_empty_rules_list(self):
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = []
-        assert engine.match(make_msg()) is None
+        assert await engine.match(make_msg()) is None
 
     def test_all_rules_disabled_returns_none(self):
         engine = RoutingEngine(Path("/dummy"))
@@ -1520,7 +1555,7 @@ class TestEdgeCases:
             make_rule(id="r1", enabled=False),
             make_rule(id="r2", enabled=False),
         ]
-        assert engine.match(make_msg()) is None
+        assert await engine.match(make_msg()) is None
 
     def test_fromMe_and_toMe_combined_filters(self):
         """fromMe=True and toMe=True → only direct bot messages match."""
@@ -1528,13 +1563,13 @@ class TestEdgeCases:
         engine._rules = [make_rule(fromMe=True, toMe=True)]
 
         # fromMe=True, toMe=True → match
-        assert engine.match(make_msg(fromMe=True, toMe=True)) == "chat.agent.md"
+        assert await engine.match(make_msg(fromMe=True, toMe=True)) == "chat.agent.md"
         # fromMe=True, toMe=False → no match
-        assert engine.match(make_msg(fromMe=True, toMe=False)) is None
+        assert await engine.match(make_msg(fromMe=True, toMe=False)) is None
         # fromMe=False, toMe=True → no match
-        assert engine.match(make_msg(fromMe=False, toMe=True)) is None
+        assert await engine.match(make_msg(fromMe=False, toMe=True)) is None
         # fromMe=False, toMe=False → no match
-        assert engine.match(make_msg(fromMe=False, toMe=False)) is None
+        assert await engine.match(make_msg(fromMe=False, toMe=False)) is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1602,8 +1637,8 @@ class TestRoutingMatchCache:
         engine._rules = [make_rule(instruction="cached.md")]
         msg = make_msg(text="hello")
 
-        result1 = engine.match(msg)
-        result2 = engine.match(msg)
+        result1 = await engine.match(msg)
+        result2 = await engine.match(msg)
         assert result1 == "cached.md"
         assert result2 == "cached.md"
         assert len(engine._match_cache) == 1
@@ -1615,8 +1650,8 @@ class TestRoutingMatchCache:
         msg_a = make_msg(sender_id="alice", text="hi")
         msg_b = make_msg(sender_id="bob", text="hi")
 
-        engine.match(msg_a)
-        engine.match(msg_b)
+        await engine.match(msg_a)
+        await engine.match(msg_b)
         assert len(engine._match_cache) == 2
 
     def test_cache_expired_entry_not_returned(self):
@@ -1627,7 +1662,7 @@ class TestRoutingMatchCache:
         engine._rules = [make_rule(instruction="exp.md")]
         msg = make_msg(text="test")
 
-        engine.match(msg)
+        await engine.match(msg)
         assert len(engine._match_cache) == 1
 
         # Manually age the cache entry to simulate TTL expiry
@@ -1636,7 +1671,7 @@ class TestRoutingMatchCache:
         engine._match_cache._cache[key] = (value, time.monotonic() - 100.0)
 
         # Next match should re-evaluate (cache miss)
-        result = engine.match(msg)
+        result = await engine.match(msg)
         assert result == "exp.md"
         # The expired entry was removed and a fresh one inserted
         assert len(engine._match_cache) == 1
@@ -1647,20 +1682,20 @@ class TestRoutingMatchCache:
         """load_rules() clears the match cache."""
         engine = RoutingEngine(tmp_path)
         engine._rules = [make_rule(instruction="tmp.md")]
-        engine.match(make_msg())
+        await engine.match(make_msg())
         assert len(engine._match_cache) == 1
 
-        engine.load_rules()
+        await engine.load_rules()
         assert len(engine._match_cache) == 0
 
     def test_cache_cleared_on_refresh_rules(self, tmp_path: Path):
         """refresh_rules() clears the match cache."""
         engine = RoutingEngine(tmp_path)
         engine._rules = [make_rule()]
-        engine.match(make_msg())
+        await engine.match(make_msg())
         assert len(engine._match_cache) == 1
 
-        engine.refresh_rules()
+        await engine.refresh_rules()
         assert len(engine._match_cache) == 0
 
     def test_cache_key_uses_full_text_hash(self):
@@ -1673,8 +1708,8 @@ class TestRoutingMatchCache:
         msg_a = make_msg(text=short_text)
         msg_b = make_msg(text=short_text + "B" * 100)
 
-        engine.match(msg_a)
-        engine.match(msg_b)
+        await engine.match(msg_a)
+        await engine.match(msg_b)
         # Different cache keys since full text differs (xxhash produces unique hashes)
         assert len(engine._match_cache) == 2
 
@@ -1693,7 +1728,7 @@ class TestRoutingMatchCache:
             make_msg(fromMe=False, toMe=False, sender_id="a", chat_id="c2", channel_type="wa", **base),
         ]
         for m in msgs:
-            engine.match(m)
+            await engine.match(m)
         assert len(engine._match_cache) == 6
 
     def test_cache_no_match_result_still_cached(self):
@@ -1702,12 +1737,12 @@ class TestRoutingMatchCache:
         engine._rules = [make_rule(sender="nonexistent")]
         msg = make_msg(sender_id="other")
 
-        result = engine.match(msg)
+        result = await engine.match(msg)
         assert result is None
         assert len(engine._match_cache) == 1
 
         # Second call returns cached None
-        result2 = engine.match(msg)
+        result2 = await engine.match(msg)
         assert result2 is None
 
     def test_cache_lru_eviction_at_max_size(self):
@@ -1719,7 +1754,7 @@ class TestRoutingMatchCache:
         from src.constants import ROUTING_MATCH_CACHE_MAX_SIZE
 
         for i in range(ROUTING_MATCH_CACHE_MAX_SIZE + 10):
-            engine.match(make_msg(sender_id=f"sender-{i}", text=f"msg-{i}"))
+            await engine.match(make_msg(sender_id=f"sender-{i}", text=f"msg-{i}"))
 
         assert len(engine._match_cache) <= ROUTING_MATCH_CACHE_MAX_SIZE
 
@@ -1730,8 +1765,8 @@ class TestRoutingMatchCache:
         engine._rules = [rule]
         msg = make_msg()
 
-        rule1, inst1 = engine.match_with_rule(msg)
-        rule2, inst2 = engine.match_with_rule(msg)
+        rule1, inst1 = await engine.match_with_rule(msg)
+        rule2, inst2 = await engine.match_with_rule(msg)
         assert rule1 is rule
         assert rule2 is rule
         assert inst1 == "cached.md"
@@ -1749,7 +1784,7 @@ class TestRoutingEngineAutoReload:
     def test_auto_reload_on_file_change(self, tmp_path: Path):
         """match() picks up new rules when an instruction file changes."""
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert engine.rules == []
 
         # Add a new instruction file
@@ -1761,7 +1796,7 @@ class TestRoutingEngineAutoReload:
         engine._last_stale_check = 0.0
 
         msg = make_msg()
-        assert engine.match(msg) == "new.md"
+        assert await engine.match(msg) == "new.md"
         assert len(engine.rules) == 1
         assert engine.rules[0].id == "new-rule"
 
@@ -1772,7 +1807,7 @@ class TestRoutingEngineAutoReload:
             "---\nrouting:\n  id: temp-rule\n  priority: 1\n---\n\n# Temp\n"
         )
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert len(engine.rules) == 1
 
         # Delete the instruction file
@@ -1782,7 +1817,7 @@ class TestRoutingEngineAutoReload:
         engine._last_stale_check = 0.0
 
         msg = make_msg()
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
         assert engine.rules == []
 
     def test_auto_reload_on_file_content_change(self, tmp_path: Path):
@@ -1792,7 +1827,7 @@ class TestRoutingEngineAutoReload:
             "---\nrouting:\n  id: original\n  priority: 1\n---\n\n# Original\n"
         )
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert engine.rules[0].id == "original"
 
         # Overwrite the file with new content
@@ -1804,7 +1839,7 @@ class TestRoutingEngineAutoReload:
         engine._last_stale_check = 0.0
 
         msg = make_msg()
-        assert engine.match(msg) == "change.md"
+        assert await engine.match(msg) == "change.md"
         assert engine.rules[0].id == "updated"
 
     def test_no_reload_when_files_unchanged(self, tmp_path: Path):
@@ -1813,7 +1848,7 @@ class TestRoutingEngineAutoReload:
             "---\nrouting:\n  id: stable\n  priority: 1\n---\n\n# Stable\n"
         )
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         # Access internal state before match
         rules_before = engine.rules
@@ -1822,7 +1857,7 @@ class TestRoutingEngineAutoReload:
         # match() should not trigger a reload
         msg = make_msg()
         engine._last_stale_check = 0.0  # Allow stale check
-        result = engine.match(msg)
+        result = await engine.match(msg)
         assert result == "stable.md"
 
         # Rules list should be the same object (no reload)
@@ -1835,15 +1870,15 @@ class TestRoutingEngineAutoReload:
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         # First match triggers stale check
         engine._last_stale_check = 0.0
-        engine.match(make_msg())
+        await engine.match(make_msg())
         first_check_time = engine._last_stale_check
 
         # Second match within debounce window should NOT update stale check time
-        engine.match(make_msg())
+        await engine.match(make_msg())
         assert engine._last_stale_check == first_check_time
 
     def test_scan_file_mtimes_returns_current_mtimes(self, tmp_path: Path):
@@ -1872,7 +1907,7 @@ class TestRoutingEngineAutoReload:
     def test_is_stale_detects_new_file(self, tmp_path: Path):
         """_is_stale returns True when a new .md file appears."""
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         (tmp_path / "new.md").write_text(
             "---\nrouting:\n  id: new\n  priority: 1\n---\n\n# New\n"
@@ -1885,7 +1920,7 @@ class TestRoutingEngineAutoReload:
         """_is_stale returns False when files have not changed."""
         (tmp_path / "same.md").write_text("# Same")
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         engine._last_stale_check = 0.0
         assert engine._is_stale() is False
@@ -1898,7 +1933,7 @@ class TestRoutingEngineAutoReload:
         engine = RoutingEngine(tmp_path)
         assert engine._file_mtimes == {}
 
-        engine.load_rules()
+        await engine.load_rules()
         assert "x.md" in engine._file_mtimes
         assert engine._file_mtimes["x.md"] > 0
 
@@ -2096,7 +2131,7 @@ class TestPropertyEngineMatching:
             text=text, sender_id=sender_id, chat_id=chat_id,
             channel_type=channel_type, fromMe=fromMe, toMe=toMe,
         )
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     @given(
         text=printable_text,
@@ -2118,7 +2153,7 @@ class TestPropertyEngineMatching:
             text=text, sender_id=sender_id, chat_id=chat_id,
             channel_type=channel_type, fromMe=fromMe, toMe=toMe,
         )
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     @given(
         rules=st.lists(
@@ -2139,7 +2174,7 @@ class TestPropertyEngineMatching:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = rules
         msg = make_msg(fromMe=fromMe, toMe=toMe)
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     @given(fromMe_val=st.booleans(), toMe_val=st.booleans())
     @settings(max_examples=50)
@@ -2148,7 +2183,7 @@ class TestPropertyEngineMatching:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(fromMe=None, toMe=None)]
         msg = make_msg(fromMe=fromMe_val, toMe=toMe_val)
-        assert engine.match(msg) == "chat.agent.md"
+        assert await engine.match(msg) == "chat.agent.md"
 
     @given(fromMe_val=st.booleans())
     @settings(max_examples=50)
@@ -2157,7 +2192,7 @@ class TestPropertyEngineMatching:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(fromMe=True)]
         msg = make_msg(fromMe=fromMe_val)
-        result = engine.match(msg)
+        result = await engine.match(msg)
         if fromMe_val:
             assert result == "chat.agent.md"
         else:
@@ -2170,7 +2205,7 @@ class TestPropertyEngineMatching:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(fromMe=False)]
         msg = make_msg(fromMe=fromMe_val)
-        result = engine.match(msg)
+        result = await engine.match(msg)
         if not fromMe_val:
             assert result == "chat.agent.md"
         else:
@@ -2183,7 +2218,7 @@ class TestPropertyEngineMatching:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(toMe=True)]
         msg = make_msg(toMe=toMe_val)
-        result = engine.match(msg)
+        result = await engine.match(msg)
         if toMe_val:
             assert result == "chat.agent.md"
         else:
@@ -2196,7 +2231,7 @@ class TestPropertyEngineMatching:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(toMe=False)]
         msg = make_msg(toMe=toMe_val)
-        result = engine.match(msg)
+        result = await engine.match(msg)
         if not toMe_val:
             assert result == "chat.agent.md"
         else:
@@ -2222,8 +2257,8 @@ class TestPropertyEngineMatching:
             text=text, sender_id=sender_id, chat_id=chat_id,
             channel_type=channel_type, fromMe=fromMe, toMe=toMe,
         )
-        result1 = engine.match(msg)
-        result2 = engine.match(msg)
+        result1 = await engine.match(msg)
+        result2 = await engine.match(msg)
         assert result1 == result2
 
     @given(
@@ -2243,7 +2278,7 @@ class TestPropertyEngineMatching:
         ]
         engine._rules = sorted(rules, key=lambda r: r.priority)
         msg = make_msg()
-        result = engine.match(msg)
+        result = await engine.match(msg)
         assert result is not None
         # The winning instruction should correspond to the minimum priority
         min_pri = min(priorities)
@@ -2266,7 +2301,7 @@ class TestPropertyEngineMatching:
             make_rule(id="enabled", priority=10, enabled=True, instruction="enabled.md"),
         ]
         msg = make_msg(text=text, sender_id=sender_id, fromMe=fromMe, toMe=toMe)
-        assert engine.match(msg) == "enabled.md"
+        assert await engine.match(msg) == "enabled.md"
 
     @given(
         text=printable_text,
@@ -2288,7 +2323,7 @@ class TestPropertyEngineMatching:
             text=text, sender_id=sender_id, chat_id=chat_id,
             channel_type=channel_type, fromMe=fromMe, toMe=toMe,
         )
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
     @given(
         specific_sender=simple_text,
@@ -2308,8 +2343,8 @@ class TestPropertyEngineMatching:
         engine._rules = [make_rule(sender=specific_sender)]
         matching_msg = make_msg(sender_id=specific_sender, fromMe=fromMe, toMe=toMe)
         non_matching_msg = make_msg(sender_id=other_sender, fromMe=fromMe, toMe=toMe)
-        assert engine.match(matching_msg) == "chat.agent.md"
-        assert engine.match(non_matching_msg) is None
+        assert await engine.match(matching_msg) == "chat.agent.md"
+        assert await engine.match(non_matching_msg) is None
 
     @given(
         specific_channel=channel_text,
@@ -2324,8 +2359,8 @@ class TestPropertyEngineMatching:
         assume(not re.match(specific_channel, other_channel))
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(channel=specific_channel)]
-        assert engine.match(make_msg(channel_type=specific_channel)) == "chat.agent.md"
-        assert engine.match(make_msg(channel_type=other_channel)) is None
+        assert await engine.match(make_msg(channel_type=specific_channel)) == "chat.agent.md"
+        assert await engine.match(make_msg(channel_type=other_channel)) is None
 
     @given(
         specific_recipient=simple_text,
@@ -2340,8 +2375,8 @@ class TestPropertyEngineMatching:
         assume(not re.match(specific_recipient, other_recipient))
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(recipient=specific_recipient)]
-        assert engine.match(make_msg(chat_id=specific_recipient)) == "chat.agent.md"
-        assert engine.match(make_msg(chat_id=other_recipient)) is None
+        assert await engine.match(make_msg(chat_id=specific_recipient)) == "chat.agent.md"
+        assert await engine.match(make_msg(chat_id=other_recipient)) is None
 
     @given(
         fromMe_filter=bool_or_none,
@@ -2357,7 +2392,7 @@ class TestPropertyEngineMatching:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = [make_rule(fromMe=fromMe_filter, toMe=toMe_filter)]
         msg = make_msg(fromMe=msg_fromMe, toMe=msg_toMe)
-        result = engine.match(msg)
+        result = await engine.match(msg)
 
         # Compute expected: None = pass-through, True/False = must match exactly
         fromMe_pass = fromMe_filter is None or fromMe_filter == msg_fromMe
@@ -2408,7 +2443,7 @@ class TestPropertyMatchWithRule:
             text=text, sender_id=sender_id, chat_id=chat_id,
             channel_type=channel_type, fromMe=fromMe, toMe=toMe,
         )
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
         assert rule is None or isinstance(rule, RoutingRule)
         assert instruction is None or isinstance(instruction, str)
         # Both None or both non-None (instruction is always a str from a rule)
@@ -2449,7 +2484,7 @@ class TestPropertyMatchWithRule:
             text=text, sender_id=sender_id, chat_id=chat_id,
             fromMe=fromMe, toMe=toMe,
         )
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
         if rule is not None:
             assert rule in sorted_rules
             assert instruction == rule.instruction
@@ -2487,8 +2522,8 @@ class TestPropertyMatchWithRule:
             text=text, sender_id=sender_id, chat_id=chat_id,
             fromMe=fromMe, toMe=toMe,
         )
-        instruction_only = engine.match(msg)
-        _, instruction_from_tuple = engine.match_with_rule(msg)
+        instruction_only = await engine.match(msg)
+        _, instruction_from_tuple = await engine.match_with_rule(msg)
         assert instruction_only == instruction_from_tuple
 
     # -- Cache coherence: repeated calls return same tuple --
@@ -2524,8 +2559,8 @@ class TestPropertyMatchWithRule:
             text=text, sender_id=sender_id, chat_id=chat_id,
             fromMe=fromMe, toMe=toMe,
         )
-        result1 = engine.match_with_rule(msg)
-        result2 = engine.match_with_rule(msg)
+        result1 = await engine.match_with_rule(msg)
+        result2 = await engine.match_with_rule(msg)
         assert result1 == result2
 
     # -- Cache coherence: object identity preserved --
@@ -2545,8 +2580,8 @@ class TestPropertyMatchWithRule:
         catch_all = make_rule(id="catch-all", instruction="catch.md")
         engine._rules = [catch_all]
         msg = make_msg(text=text, sender_id=sender_id, fromMe=fromMe, toMe=toMe)
-        rule1, _ = engine.match_with_rule(msg)
-        rule2, _ = engine.match_with_rule(msg)
+        rule1, _ = await engine.match_with_rule(msg)
+        rule2, _ = await engine.match_with_rule(msg)
         # Same object identity (from cache)
         assert rule1 is rule2
         assert rule1 is catch_all
@@ -2574,7 +2609,7 @@ class TestPropertyMatchWithRule:
         ]
         engine._rules = sorted(rules, key=lambda r: r.priority)
         msg = make_msg()
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
         assert rule is not None
         assert rule.priority == min(priorities)
         assert instruction == f"rule-{min(priorities)}.md"
@@ -2605,7 +2640,7 @@ class TestPropertyMatchWithRule:
         )
         engine._rules = sorted([disabled, enabled], key=lambda r: r.priority)
         msg = make_msg(text=text, fromMe=fromMe, toMe=toMe)
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
         assert rule is enabled
         assert instruction == "enabled.md"
 
@@ -2629,7 +2664,7 @@ class TestPropertyMatchWithRule:
             text=text, sender_id=sender_id, chat_id=chat_id,
             fromMe=fromMe, toMe=toMe,
         )
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
         assert rule is None
         assert instruction is None
 
@@ -2655,7 +2690,7 @@ class TestPropertyMatchWithRule:
             text=text, sender_id=sender_id, chat_id=chat_id,
             channel_type=channel_type, fromMe=fromMe, toMe=toMe,
         )
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
         assert rule is catch_all
         assert instruction == "catch.md"
 
@@ -2686,7 +2721,7 @@ class TestPropertyMatchWithRule:
         )
         engine._rules = [specific, wildcard]
         msg = make_msg(sender_id=other_sender, fromMe=fromMe, toMe=toMe)
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
         assert rule is wildcard
         assert instruction == "wildcard.md"
 
@@ -2703,7 +2738,7 @@ class TestPropertyMatchWithRule:
         rule_a = make_rule(id="a", priority=1, instruction="a.md")
         engine._rules = [rule_a]
         msg = make_msg(text=text, sender_id=sender_id)
-        rule1, inst1 = engine.match_with_rule(msg)
+        rule1, inst1 = await engine.match_with_rule(msg)
         assert rule1 is rule_a
         assert len(engine._match_cache) == 1
 
@@ -2713,7 +2748,7 @@ class TestPropertyMatchWithRule:
         assert len(engine._match_cache) == 0
 
         # New match populates with new rule
-        rule2, inst2 = engine.match_with_rule(msg)
+        rule2, inst2 = await engine.match_with_rule(msg)
         assert rule2 is rule_b
         assert inst2 == "b.md"
         assert len(engine._match_cache) == 1
@@ -2746,8 +2781,8 @@ class TestPropertyMatchWithRule:
         msg_a = make_msg(sender_id=sender_a)
         msg_b = make_msg(sender_id=sender_b)
 
-        rule_ra, inst_ra = engine.match_with_rule(msg_a)
-        rule_rb, inst_rb = engine.match_with_rule(msg_b)
+        rule_ra, inst_ra = await engine.match_with_rule(msg_a)
+        rule_rb, inst_rb = await engine.match_with_rule(msg_b)
 
         assert rule_ra is rule_a
         assert inst_ra == "a.md"
@@ -2786,8 +2821,8 @@ class TestPropertyMatchWithRule:
         msg_a = make_msg(text=prefix + suffix_a)
         msg_b = make_msg(text=prefix + suffix_b)
 
-        rule_a, _ = engine.match_with_rule(msg_a)
-        rule_b, _ = engine.match_with_rule(msg_b)
+        rule_a, _ = await engine.match_with_rule(msg_a)
+        rule_b, _ = await engine.match_with_rule(msg_b)
 
         # Both should match (wildcard rule), but the second call should be a
         # cache hit returning the same cached rule object from msg_a's call.
@@ -2813,7 +2848,7 @@ class TestPropertyMatchWithRule:
         )
         engine._rules = [target]
         msg = make_msg(fromMe=msg_fromMe, toMe=msg_toMe)
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
 
         fromMe_pass = fromMe_filter is None or fromMe_filter == msg_fromMe
         toMe_pass = toMe_filter is None or toMe_filter == msg_toMe
@@ -2852,13 +2887,13 @@ class TestPropertyMatchWithRule:
 
         # Matching text → regex rule wins
         msg_match = make_msg(text=matching_text, fromMe=fromMe, toMe=toMe)
-        rule, inst = engine.match_with_rule(msg_match)
+        rule, inst = await engine.match_with_rule(msg_match)
         assert rule is regex_rule
         assert inst == "regex.md"
 
         # Non-matching text → wildcard fallback wins
         msg_no = make_msg(text=non_matching_text, fromMe=fromMe, toMe=toMe)
-        rule, inst = engine.match_with_rule(msg_no)
+        rule, inst = await engine.match_with_rule(msg_no)
         assert rule is fallback
         assert inst == "fallback.md"
 
@@ -2891,14 +2926,14 @@ class TestPropertyMatchWithRule:
         msg_target = make_msg(
             channel_type=target_channel, fromMe=fromMe, toMe=toMe,
         )
-        rule, inst = engine.match_with_rule(msg_target)
+        rule, inst = await engine.match_with_rule(msg_target)
         assert rule is channel_rule
         assert inst == "chan.md"
 
         msg_other = make_msg(
             channel_type=other_channel, fromMe=fromMe, toMe=toMe,
         )
-        rule, inst = engine.match_with_rule(msg_other)
+        rule, inst = await engine.match_with_rule(msg_other)
         assert rule is fallback
         assert inst == "fallback.md"
 
@@ -2932,14 +2967,14 @@ class TestPropertyMatchWithRule:
         msg_target = make_msg(
             chat_id=target_recipient, fromMe=fromMe, toMe=toMe,
         )
-        rule, inst = engine.match_with_rule(msg_target)
+        rule, inst = await engine.match_with_rule(msg_target)
         assert rule is recipient_rule
         assert inst == "recip.md"
 
         msg_other = make_msg(
             chat_id=other_recipient, fromMe=fromMe, toMe=toMe,
         )
-        rule, inst = engine.match_with_rule(msg_other)
+        rule, inst = await engine.match_with_rule(msg_other)
         assert rule is fallback
         assert inst == "fallback.md"
 
@@ -2985,7 +3020,7 @@ class TestPropertyMatchWithRule:
             sender_id=sender_a, channel_type=channel_a,
             fromMe=fromMe, toMe=toMe,
         )
-        rule, inst = engine.match_with_rule(msg_sender)
+        rule, inst = await engine.match_with_rule(msg_sender)
         assert rule is sender_rule
         assert inst == "sender.md"
 
@@ -2994,7 +3029,7 @@ class TestPropertyMatchWithRule:
             sender_id=sender_b, channel_type=channel_a,
             fromMe=fromMe, toMe=toMe,
         )
-        rule, inst = engine.match_with_rule(msg_channel)
+        rule, inst = await engine.match_with_rule(msg_channel)
         assert rule is channel_rule
         assert inst == "channel.md"
 
@@ -3002,7 +3037,7 @@ class TestPropertyMatchWithRule:
         msg_fallback = make_msg(
             sender_id=sender_b, fromMe=fromMe, toMe=toMe,
         )
-        rule, inst = engine.match_with_rule(msg_fallback)
+        rule, inst = await engine.match_with_rule(msg_fallback)
         assert rule is fallback
         assert inst == "fallback.md"
 
@@ -3022,7 +3057,7 @@ class TestPropertyMatchWithRule:
         # Both have same priority; stable sort preserves insertion order
         engine._rules = [rule_a, rule_b]
         msg = make_msg(text=text, sender_id=sender_id)
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert rule is rule_a
         assert inst == "a.md"
 
@@ -3047,7 +3082,7 @@ class TestPropertyMatchWithRule:
         )
         engine._rules = [rule]
         msg = make_msg()
-        returned_rule, inst = engine.match_with_rule(msg)
+        returned_rule, inst = await engine.match_with_rule(msg)
         assert returned_rule is rule
         assert returned_rule.skillExecVerbose == skill_exec_verbose
         assert returned_rule.showErrors == show_errors
@@ -3082,12 +3117,12 @@ class TestPropertyMatchWithRule:
 
         # Match from sender_a
         msg_a = make_msg(sender_id=sender_a)
-        rule_ra, _ = engine.match_with_rule(msg_a)
+        rule_ra, _ = await engine.match_with_rule(msg_a)
         assert rule_ra is rule_a
 
         # Match from sender_b — different cache key, independent result
         msg_b = make_msg(sender_id=sender_b)
-        rule_rb, _ = engine.match_with_rule(msg_b)
+        rule_rb, _ = await engine.match_with_rule(msg_b)
         assert rule_rb is rule_b
 
         assert len(engine._match_cache) == 2
@@ -3116,8 +3151,8 @@ class TestPropertyMatchWithRule:
         )
         engine._rules = [rule_a, rule_b, fallback]
 
-        rule_ra, _ = engine.match_with_rule(make_msg(chat_id=chat_a))
-        rule_rb, _ = engine.match_with_rule(make_msg(chat_id=chat_b))
+        rule_ra, _ = await engine.match_with_rule(make_msg(chat_id=chat_a))
+        rule_rb, _ = await engine.match_with_rule(make_msg(chat_id=chat_b))
 
         assert rule_ra is rule_a
         assert rule_rb is rule_b
@@ -3147,8 +3182,8 @@ class TestPropertyMatchWithRule:
         )
         engine._rules = [rule_a, rule_b, fallback]
 
-        rule_ra, _ = engine.match_with_rule(make_msg(channel_type=channel_a))
-        rule_rb, _ = engine.match_with_rule(make_msg(channel_type=channel_b))
+        rule_ra, _ = await engine.match_with_rule(make_msg(channel_type=channel_a))
+        rule_rb, _ = await engine.match_with_rule(make_msg(channel_type=channel_b))
 
         assert rule_ra is rule_a
         assert rule_rb is rule_b
@@ -3176,7 +3211,7 @@ class TestPropertyMatchWithRule:
         engine._rules = [empty_rule, fallback]
 
         msg = make_msg(text=text, fromMe=fromMe, toMe=toMe)
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
 
         if text == "":
             assert rule is empty_rule
@@ -3217,7 +3252,7 @@ class TestPropertyMatchWithRule:
             sender_id=specific_sender, channel_type=channel,
             fromMe=fromMe, toMe=toMe,
         )
-        r, inst = engine.match_with_rule(msg_match)
+        r, inst = await engine.match_with_rule(msg_match)
         assert r is rule
         assert inst == "chan.md"
 
@@ -3226,7 +3261,7 @@ class TestPropertyMatchWithRule:
             sender_id=other_sender, channel_type="telegram",
             fromMe=fromMe, toMe=toMe,
         )
-        r, inst = engine.match_with_rule(msg_no)
+        r, inst = await engine.match_with_rule(msg_no)
         assert r is fallback
         assert inst == "fallback.md"
 
@@ -3261,7 +3296,7 @@ class TestPropertyMatchWithRule:
         msg_match = make_msg(
             sender_id=target_sender, fromMe=True, toMe=msg_toMe,
         )
-        r, inst = engine.match_with_rule(msg_match)
+        r, inst = await engine.match_with_rule(msg_match)
         assert r is sender_fromMe_rule
         assert inst == "sender-fromMe.md"
 
@@ -3269,7 +3304,7 @@ class TestPropertyMatchWithRule:
         msg_wrong_fromMe = make_msg(
             sender_id=target_sender, fromMe=False, toMe=msg_toMe,
         )
-        r, inst = engine.match_with_rule(msg_wrong_fromMe)
+        r, inst = await engine.match_with_rule(msg_wrong_fromMe)
         assert r is fallback
         assert inst == "fallback.md"
 
@@ -3277,7 +3312,7 @@ class TestPropertyMatchWithRule:
         msg_wrong_sender = make_msg(
             sender_id=other_sender, fromMe=True, toMe=msg_toMe,
         )
-        r, inst = engine.match_with_rule(msg_wrong_sender)
+        r, inst = await engine.match_with_rule(msg_wrong_sender)
         assert r is fallback
         assert inst == "fallback.md"
 
@@ -3309,7 +3344,7 @@ class TestPropertyMatchWithRule:
         msg_match = make_msg(
             chat_id=target_recipient, fromMe=msg_fromMe, toMe=False,
         )
-        r, inst = engine.match_with_rule(msg_match)
+        r, inst = await engine.match_with_rule(msg_match)
         assert r is recipient_toMe_rule
         assert inst == "recip-group.md"
 
@@ -3317,7 +3352,7 @@ class TestPropertyMatchWithRule:
         msg_wrong_toMe = make_msg(
             chat_id=target_recipient, fromMe=msg_fromMe, toMe=True,
         )
-        r, inst = engine.match_with_rule(msg_wrong_toMe)
+        r, inst = await engine.match_with_rule(msg_wrong_toMe)
         assert r is fallback
         assert inst == "fallback.md"
 
@@ -3356,7 +3391,7 @@ class TestPropertyMatchWithRule:
             sender_id=target_sender, text=matching_text,
             fromMe=fromMe, toMe=toMe,
         )
-        r, inst = engine.match_with_rule(msg_both)
+        r, inst = await engine.match_with_rule(msg_both)
         assert r is conj_rule
         assert inst == "conj.md"
 
@@ -3365,7 +3400,7 @@ class TestPropertyMatchWithRule:
             sender_id=target_sender, text=non_matching_text,
             fromMe=fromMe, toMe=toMe,
         )
-        r, inst = engine.match_with_rule(msg_sender_only)
+        r, inst = await engine.match_with_rule(msg_sender_only)
         assert r is fallback
         assert inst == "fallback.md"
 
@@ -3374,7 +3409,7 @@ class TestPropertyMatchWithRule:
             sender_id=other_sender, text=matching_text,
             fromMe=fromMe, toMe=toMe,
         )
-        r, inst = engine.match_with_rule(msg_text_only)
+        r, inst = await engine.match_with_rule(msg_text_only)
         assert r is fallback
         assert inst == "fallback.md"
 
@@ -3411,7 +3446,7 @@ class TestPropertyMatchWithRule:
             sender_id=target_sender, chat_id=target_recipient,
             channel_type=target_channel,
         )
-        r, inst = engine.match_with_rule(msg_all)
+        r, inst = await engine.match_with_rule(msg_all)
         assert r is triple_rule
         assert inst == "triple.md"
 
@@ -3420,7 +3455,7 @@ class TestPropertyMatchWithRule:
             sender_id=other_sender, chat_id=target_recipient,
             channel_type=target_channel,
         )
-        r, inst = engine.match_with_rule(msg_wrong_sender)
+        r, inst = await engine.match_with_rule(msg_wrong_sender)
         assert r is fallback
         assert inst == "fallback.md"
 
@@ -3453,7 +3488,7 @@ class TestPropertyMatchWithRule:
         msg_numeric = make_msg(
             sender_id=numeric_suffix, fromMe=fromMe, toMe=toMe,
         )
-        r, inst = engine.match_with_rule(msg_numeric)
+        r, inst = await engine.match_with_rule(msg_numeric)
         assert r is regex_sender_rule
         assert inst == "numeric.md"
 
@@ -3461,7 +3496,7 @@ class TestPropertyMatchWithRule:
         msg_alpha = make_msg(
             sender_id=alpha_text, fromMe=fromMe, toMe=toMe,
         )
-        r, inst = engine.match_with_rule(msg_alpha)
+        r, inst = await engine.match_with_rule(msg_alpha)
         assert r is fallback
         assert inst == "fallback.md"
 
@@ -3480,7 +3515,7 @@ class TestPropertyMatchWithRule:
         engine._rules = [rule_a]
 
         msg = make_msg(text=text, sender_id=sender_id)
-        rule1, inst1 = engine.match_with_rule(msg)
+        rule1, inst1 = await engine.match_with_rule(msg)
         assert rule1 is rule_a
         assert len(engine._match_cache) == 1
 
@@ -3496,7 +3531,7 @@ class TestPropertyMatchWithRule:
         # Re-match with new rules should produce new result
         rule_b = make_rule(id="b", priority=1, instruction="b.md")
         engine._rules = [rule_b]
-        rule2, inst2 = engine.match_with_rule(msg)
+        rule2, inst2 = await engine.match_with_rule(msg)
         assert rule2 is rule_b
         assert inst2 == "b.md"
 
@@ -3524,7 +3559,7 @@ class TestPropertyMatchWithRule:
                 text=f"{base_text}-{i}",
                 sender_id=f"sender-{i}",
             )
-            engine.match_with_rule(msg)
+            await engine.match_with_rule(msg)
 
         # Cache should not exceed max_size (eviction="half" keeps it bounded)
         assert len(engine._match_cache) <= ROUTING_MATCH_CACHE_MAX_SIZE
@@ -3548,12 +3583,12 @@ class TestPropertyMatchWithRule:
         assert len(engine._match_cache) == 0
 
         msg = make_msg(text=text, sender_id=sender_id)
-        r1, inst1 = engine.match_with_rule(msg)
+        r1, inst1 = await engine.match_with_rule(msg)
 
         assert len(engine._match_cache) == 1
         assert r1 is rule
 
-        r2, inst2 = engine.match_with_rule(msg)
+        r2, inst2 = await engine.match_with_rule(msg)
         assert r2 is r1  # same object from cache
         assert inst2 == inst1
         assert len(engine._match_cache) == 1  # no new entry
@@ -3589,13 +3624,13 @@ class TestPropertyMatchWithRule:
         engine._rules = sorted([specific, wildcard], key=lambda r: r.priority)
 
         msg = make_msg(sender_id=specific_sender, fromMe=fromMe, toMe=toMe)
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert rule is specific
         assert inst == "specific.md"
 
         # Same rules, non-matching sender → wildcard wins
         msg_other = make_msg(fromMe=fromMe, toMe=toMe)
-        rule, inst = engine.match_with_rule(msg_other)
+        rule, inst = await engine.match_with_rule(msg_other)
         assert rule is wildcard
         assert inst == "wildcard.md"
 
@@ -3621,7 +3656,7 @@ class TestPropertyMatchWithRule:
             text=text, sender_id=sender_id, chat_id=chat_id,
             channel_type=channel_type, fromMe=fromMe, toMe=toMe,
         )
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
         assert rule is None
         assert instruction is None
 
@@ -3672,13 +3707,13 @@ class TestPropertyMatchWithRule:
 
         # sender_a matches both specific rules → highest priority (lowest number) wins
         msg_a = make_msg(sender_id=sender_a, fromMe=fromMe, toMe=toMe)
-        rule, inst = engine.match_with_rule(msg_a)
+        rule, inst = await engine.match_with_rule(msg_a)
         assert rule is rule_high_pri
         assert inst == "high.md"
 
         # sender_b matches its own rule
         msg_b = make_msg(sender_id=sender_b, fromMe=fromMe, toMe=toMe)
-        rule, inst = engine.match_with_rule(msg_b)
+        rule, inst = await engine.match_with_rule(msg_b)
         assert rule is rule_b
         assert inst == "b.md"
 
@@ -3769,7 +3804,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = rules
         msg = _ctx_to_msg(ctx)
-        result = engine.match_with_rule(msg)
+        result = await engine.match_with_rule(msg)
         assert isinstance(result, tuple)
         assert len(result) == 2
 
@@ -3783,7 +3818,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         engine = RoutingEngine(Path("/dummy"))
         engine._rules = rules
         msg = _ctx_to_msg(ctx)
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
         assert rule is None or isinstance(rule, RoutingRule)
         assert instruction is None or isinstance(instruction, str)
         if rule is None:
@@ -3805,7 +3840,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         engine._rules = rules
         msg = _ctx_to_msg(ctx)
 
-        rule_orig, inst_orig = engine.match_with_rule(msg)
+        rule_orig, inst_orig = await engine.match_with_rule(msg)
         if rule_orig is None:
             return  # No match to disable
 
@@ -3837,7 +3872,7 @@ class TestPropertyMatchWithRuleCombinatorial:
             for r in rules
         ]
         engine._rules = sorted(new_rules, key=lambda r: r.priority)
-        rule_new, inst_new = engine.match_with_rule(msg)
+        rule_new, inst_new = await engine.match_with_rule(msg)
 
         # Result must differ from the original winning instruction
         assert inst_new != inst_orig
@@ -3853,7 +3888,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         catch_all = make_rule(id="catch", instruction="catch.md")
         engine._rules = [catch_all]
         msg = _ctx_to_msg(ctx)
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
         assert rule is catch_all
         assert instruction == "catch.md"
 
@@ -3871,7 +3906,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         engine._rules = rules
         msg = _ctx_to_msg(ctx)
 
-        rule_orig, _ = engine.match_with_rule(msg)
+        rule_orig, _ = await engine.match_with_rule(msg)
         if rule_orig is None:
             return  # no existing match; skip
 
@@ -3883,7 +3918,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         combined = sorted([catch_all, *rules], key=lambda r: r.priority)
         engine._rules = combined
 
-        rule_new, inst_new = engine.match_with_rule(msg)
+        rule_new, inst_new = await engine.match_with_rule(msg)
         assert rule_new is catch_all
         assert inst_new == "new-catch.md"
 
@@ -3908,13 +3943,13 @@ class TestPropertyMatchWithRuleCombinatorial:
         engine._rules = sorted_base
         msg = _ctx_to_msg(ctx)
 
-        rule_before, inst_before = engine.match_with_rule(msg)
+        rule_before, inst_before = await engine.match_with_rule(msg)
         assert rule_before is not None  # catch-all guarantees this
 
         # Grow the rule list
         grown = sorted([*sorted_base, *extra_rules], key=lambda r: r.priority)
         engine._rules = grown
-        rule_after, inst_after = engine.match_with_rule(msg)
+        rule_after, inst_after = await engine.match_with_rule(msg)
 
         assert rule_after is not None  # match must still exist
 
@@ -3930,7 +3965,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         engine._rules = rules
         msg = _ctx_to_msg(ctx)
 
-        results = [engine.match_with_rule(msg) for _ in range(n)]
+        results = [await engine.match_with_rule(msg) for _ in range(n)]
         first = results[0]
         for result in results[1:]:
             assert result == first
@@ -3957,7 +3992,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         engine._rules = sorted([rule_a, rule_b], key=lambda r: r.priority)
 
         msg_a = make_msg(sender_id=sender_a)
-        rule_winner_a, _ = engine.match_with_rule(msg_a)
+        rule_winner_a, _ = await engine.match_with_rule(msg_a)
         assert rule_winner_a is rule_a
 
         # Swap priorities
@@ -3970,7 +4005,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         engine._rules = sorted([rule_a_swapped, rule_b_swapped], key=lambda r: r.priority)
 
         msg_b = make_msg(sender_id=sender_b)
-        rule_winner_b, _ = engine.match_with_rule(msg_b)
+        rule_winner_b, _ = await engine.match_with_rule(msg_b)
         assert rule_winner_b is rule_b_swapped
 
     # ── 9. Cache key collision: same key always yields same result ────────
@@ -4011,8 +4046,8 @@ class TestPropertyMatchWithRuleCombinatorial:
             text=long_prefix + "BBB", fromMe=fromMe, toMe=toMe,
         )
 
-        result_a = engine.match_with_rule(msg_a)
-        result_b = engine.match_with_rule(msg_b)
+        result_a = await engine.match_with_rule(msg_a)
+        result_b = await engine.match_with_rule(msg_b)
 
         # Both share the same cache key (text[:100] is identical)
         assert result_a == result_b
@@ -4029,8 +4064,8 @@ class TestPropertyMatchWithRuleCombinatorial:
         engine._rules = rules
         msg = _ctx_to_msg(ctx)
 
-        instruction_only = engine.match(msg)
-        _, instruction_from_tuple = engine.match_with_rule(msg)
+        instruction_only = await engine.match(msg)
+        _, instruction_from_tuple = await engine.match_with_rule(msg)
         assert instruction_only == instruction_from_tuple
 
     # ── 11. Returned rule always belongs to the active rule set ───────────
@@ -4045,7 +4080,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         engine._rules = rules
         msg = _ctx_to_msg(ctx)
 
-        rule, instruction = engine.match_with_rule(msg)
+        rule, instruction = await engine.match_with_rule(msg)
         if rule is not None:
             assert rule in rules
             assert instruction == rule.instruction
@@ -4067,7 +4102,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         # Original match with all rules enabled
         engine_orig = RoutingEngine(Path("/dummy"))
         engine_orig._rules = sorted_rules
-        orig_rule, orig_inst = engine_orig.match_with_rule(msg)
+        orig_rule, orig_inst = await engine_orig.match_with_rule(msg)
 
         # Disable all rules
         disabled = [
@@ -4082,7 +4117,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         ]
         engine_off = RoutingEngine(Path("/dummy"))
         engine_off._rules = sorted(disabled, key=lambda r: r.priority)
-        off_rule, off_inst = engine_off.match_with_rule(msg)
+        off_rule, off_inst = await engine_off.match_with_rule(msg)
         assert off_rule is None
         assert off_inst is None
 
@@ -4099,7 +4134,7 @@ class TestPropertyMatchWithRuleCombinatorial:
         ]
         engine_on = RoutingEngine(Path("/dummy"))
         engine_on._rules = sorted(reenabled, key=lambda r: r.priority)
-        on_rule, on_inst = engine_on.match_with_rule(msg)
+        on_rule, on_inst = await engine_on.match_with_rule(msg)
 
         # Re-enabled result should match original
         assert on_inst == orig_inst
@@ -4129,12 +4164,12 @@ class TestCacheInvalidationOnFileModification:
         )
 
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         msg = make_msg(text="hello")
 
         # First match — populates cache
-        rule1, inst1 = engine.match_with_rule(msg)
+        rule1, inst1 = await engine.match_with_rule(msg)
         assert inst1 == "route.md"
         assert rule1 is not None
         assert rule1.id == "original"
@@ -4149,7 +4184,7 @@ class TestCacheInvalidationOnFileModification:
         engine._last_stale_check = 0.0
 
         # Second match — cache should be cleared, fresh result returned
-        rule2, inst2 = engine.match_with_rule(msg)
+        rule2, inst2 = await engine.match_with_rule(msg)
         assert inst2 == "route.md"
         assert rule2 is not None
         assert rule2.id == "modified"
@@ -4163,12 +4198,12 @@ class TestCacheInvalidationOnFileModification:
     def test_new_rule_appears_after_file_creation(self, tmp_path: Path):
         """(b) Creating a new .md file causes new rules to appear in match results."""
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         msg = make_msg(text="hello")
 
         # Initially no rules
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
         assert len(engine._match_cache) == 1  # (None, None) cached
 
         # Create a new instruction file
@@ -4180,7 +4215,7 @@ class TestCacheInvalidationOnFileModification:
         engine._last_stale_check = 0.0
 
         # New rule should now match
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert inst == "new_rule.md"
         assert rule is not None
         assert rule.id == "new-rule"
@@ -4198,12 +4233,12 @@ class TestCacheInvalidationOnFileModification:
         )
 
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         msg = make_msg(text="hello")
 
         # Rule matches
-        rule1, inst1 = engine.match_with_rule(msg)
+        rule1, inst1 = await engine.match_with_rule(msg)
         assert inst1 == "gone.md"
         assert rule1 is not None
         assert rule1.id == "temporary"
@@ -4216,7 +4251,7 @@ class TestCacheInvalidationOnFileModification:
         engine._last_stale_check = 0.0
 
         # No rules should match now
-        rule2, inst2 = engine.match_with_rule(msg)
+        rule2, inst2 = await engine.match_with_rule(msg)
         assert rule2 is None
         assert inst2 is None
 
@@ -4234,13 +4269,13 @@ class TestCacheInvalidationOnFileModification:
         )
 
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         msg = make_msg(text="hello")
 
         # First match — triggers stale check, populates cache
         engine._last_stale_check = 0.0
-        rule1, inst1 = engine.match_with_rule(msg)
+        rule1, inst1 = await engine.match_with_rule(msg)
         assert rule1 is not None
         assert rule1.id == "v1"
         assert len(engine._match_cache) == 1
@@ -4253,7 +4288,7 @@ class TestCacheInvalidationOnFileModification:
 
         # Second match — within debounce window, should NOT detect stale
         # and should return cached v1 result
-        rule2, inst2 = engine.match_with_rule(msg)
+        rule2, inst2 = await engine.match_with_rule(msg)
         assert engine._last_stale_check == first_check_time  # debounce blocked re-check
         assert rule2 is not None
         assert rule2.id == "v1"  # Still returns cached result
@@ -4268,12 +4303,12 @@ class TestCacheInvalidationOnFileModification:
         )
 
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         msg = make_msg(text="hello")
 
         # Step 2: First match — cache populated
-        rule, _ = engine.match_with_rule(msg)
+        rule, _ = await engine.match_with_rule(msg)
         assert rule is not None
         assert rule.id == "step1"
         assert len(engine._match_cache) == 1
@@ -4284,7 +4319,7 @@ class TestCacheInvalidationOnFileModification:
         )
         engine._last_stale_check = 0.0
 
-        rule, _ = engine.match_with_rule(msg)
+        rule, _ = await engine.match_with_rule(msg)
         assert rule is not None
         assert rule.id == "step2"
         assert len(engine._match_cache) == 1
@@ -4293,7 +4328,7 @@ class TestCacheInvalidationOnFileModification:
         md.unlink()
         engine._last_stale_check = 0.0
 
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert rule is None
         assert inst is None
         assert len(engine._match_cache) == 1
@@ -4306,7 +4341,7 @@ class TestCacheInvalidationOnFileModification:
         )
         engine._last_stale_check = 0.0
 
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert rule is not None
         assert rule.id == "step5"
         assert inst == "lifecycle.md"
@@ -4318,13 +4353,13 @@ class TestCacheInvalidationOnFileModification:
         md.write_text(content)
 
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         msg = make_msg(text="hello")
 
         # First match
         engine._last_stale_check = 0.0
-        rule1, _ = engine.match_with_rule(msg)
+        rule1, _ = await engine.match_with_rule(msg)
         assert rule1 is not None
         assert rule1.id == "same-rule"
         rules_obj_before = engine._rules  # identity check
@@ -4335,7 +4370,7 @@ class TestCacheInvalidationOnFileModification:
 
         # Even though mtime changed, load_rules will re-scan and set _rules
         # which clears cache. The new rule should be functionally identical.
-        rule2, _ = engine.match_with_rule(msg)
+        rule2, _ = await engine.match_with_rule(msg)
         assert rule2 is not None
         assert rule2.id == "same-rule"
 
@@ -4349,15 +4384,15 @@ class TestCacheInvalidationOnFileModification:
         )
 
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         msg_low = make_msg(text="hello")
         msg_high = make_msg(sender_id="special-sender")
 
         # Populate cache with two entries
         engine._last_stale_check = 0.0
-        engine.match_with_rule(msg_low)
-        engine.match_with_rule(msg_high)
+        await engine.match_with_rule(msg_low)
+        await engine.match_with_rule(msg_high)
         assert len(engine._match_cache) == 2
 
         # Modify the first file (higher priority) to change its rule
@@ -4367,11 +4402,11 @@ class TestCacheInvalidationOnFileModification:
         engine._last_stale_check = 0.0
 
         # One match should clear the ENTIRE cache (both entries)
-        engine.match_with_rule(msg_low)
+        await engine.match_with_rule(msg_low)
         assert len(engine._match_cache) == 1  # Only msg_low's new result
 
         # The other message must be re-evaluated (not stale cached)
-        rule, inst = engine.match_with_rule(msg_high)
+        rule, inst = await engine.match_with_rule(msg_high)
         assert rule is not None
         assert rule.id == "first-updated"  # Still matches the catch-all first rule
         assert len(engine._match_cache) == 2  # Now both are cached again
@@ -4403,7 +4438,7 @@ class TestIsStaleDebounce:
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         # Force the first call to pass the debounce gate.
         engine._last_stale_check = 0.0
@@ -4423,7 +4458,7 @@ class TestIsStaleDebounce:
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         # First call — passes debounce gate.
         engine._last_stale_check = 0.0
@@ -4445,7 +4480,7 @@ class TestIsStaleDebounce:
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         base_time = 1000.0
 
@@ -4479,7 +4514,7 @@ class TestIsStaleDebounce:
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         original_mtimes = dict(engine._file_mtimes)
 
         # First check — no changes.
@@ -4502,7 +4537,7 @@ class TestIsStaleDebounce:
             "---\nrouting:\n  id: existing\n  priority: 1\n---\n\n# Existing\n"
         )
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         # First check — no changes.
         engine._last_stale_check = 0.0
@@ -4527,7 +4562,7 @@ class TestIsStaleDebounce:
             "---\nrouting:\n  id: b-rule\n  priority: 2\n---\n\n# B\n"
         )
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
         assert len(engine._file_mtimes) == 2
 
         # First check — no changes.
@@ -4550,7 +4585,7 @@ class TestIsStaleDebounce:
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         base_time = 500.0
         engine._last_stale_check = base_time
@@ -4572,7 +4607,7 @@ class TestIsStaleDebounce:
             "---\nrouting:\n  id: a-rule\n  priority: 1\n---\n\n# A\n"
         )
         engine = _polling_engine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         assert engine._last_stale_check == 0.0
 
@@ -4597,7 +4632,7 @@ class TestScanFileMtimesOSError:
         md.write_text("---\nrouting:\n  id: ok\n  priority: 1\n---\n\n# OK\n")
 
         engine = RoutingEngine(tmp_path)
-        engine.load_rules()
+        await engine.load_rules()
 
         # Simulate OSError on the stat call by patching the DirEntry
         import os
@@ -4663,7 +4698,7 @@ class TestWatchdogAutoReload:
         """
         engine = RoutingEngine(path, use_watchdog=True)
         with patch.object(engine, "_start_watcher"):
-            engine.load_rules()
+            await engine.load_rules()
         engine._use_watchdog = True
         return engine
 
@@ -4715,7 +4750,7 @@ class TestWatchdogAutoReload:
         engine = self._make_engine(tmp_path)
 
         msg = make_msg(text="hello")
-        rule1, inst1 = engine.match_with_rule(msg)
+        rule1, inst1 = await engine.match_with_rule(msg)
         assert inst1 == "route.md"
         assert rule1 is not None
         assert rule1.id == "v1"
@@ -4729,7 +4764,7 @@ class TestWatchdogAutoReload:
         engine._mark_dirty()
 
         # match_with_rule() should auto-reload and return the updated rule
-        rule2, inst2 = engine.match_with_rule(msg)
+        rule2, inst2 = await engine.match_with_rule(msg)
         assert inst2 == "route.md"
         assert rule2 is not None
         assert rule2.id == "v2"
@@ -4741,7 +4776,7 @@ class TestWatchdogAutoReload:
         engine = self._make_engine(tmp_path)
 
         msg = make_msg(text="hello")
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
         # Create a new instruction file
         (tmp_path / "new_rule.md").write_text(
@@ -4750,7 +4785,7 @@ class TestWatchdogAutoReload:
 
         engine._mark_dirty()
 
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert inst == "new_rule.md"
         assert rule is not None
         assert rule.id == "new-rule"
@@ -4767,13 +4802,13 @@ class TestWatchdogAutoReload:
         engine = self._make_engine(tmp_path)
 
         msg = make_msg(text="hello")
-        assert engine.match(msg) == "gone.md"
+        assert await engine.match(msg) == "gone.md"
 
         # Delete the file
         md.unlink()
         engine._mark_dirty()
 
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert rule is None
         assert inst is None
 
@@ -4791,7 +4826,7 @@ class TestWatchdogAutoReload:
         msg = make_msg(text="hello")
 
         # Populate cache
-        engine.match_with_rule(msg)
+        await engine.match_with_rule(msg)
         assert len(engine._match_cache) == 1
 
         # Modify file and trigger watchdog reload
@@ -4801,7 +4836,7 @@ class TestWatchdogAutoReload:
         engine._mark_dirty()
 
         # Cache is cleared during load_rules, then repopulated
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert len(engine._match_cache) == 1
         assert rule.id == "updated"
 
@@ -4838,7 +4873,7 @@ class TestWatchdogAutoReload:
         msg = make_msg(text="hello")
 
         # Phase 1: No rules
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
         # Phase 2: Create file
         md = tmp_path / "lifecycle.md"
@@ -4847,7 +4882,7 @@ class TestWatchdogAutoReload:
         )
         engine._mark_dirty()
 
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert rule is not None
         assert rule.id == "step1"
         assert inst == "lifecycle.md"
@@ -4858,7 +4893,7 @@ class TestWatchdogAutoReload:
         )
         engine._mark_dirty()
 
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert rule is not None
         assert rule.id == "step2"
         assert inst == "lifecycle.md"
@@ -4867,7 +4902,7 @@ class TestWatchdogAutoReload:
         md.unlink()
         engine._mark_dirty()
 
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert rule is None
         assert inst is None
 
@@ -4877,7 +4912,7 @@ class TestWatchdogAutoReload:
         )
         engine._mark_dirty()
 
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert rule is not None
         assert rule.id == "step5"
         assert inst == "lifecycle.md"
@@ -4925,7 +4960,7 @@ class TestWatchdogAutoReload:
         )
 
         engine = RoutingEngine(tmp_path, use_watchdog=True)
-        engine.load_rules()
+        await engine.load_rules()
 
         observer = engine._observer
         assert observer is not None, "Observer should be created with use_watchdog=True"
@@ -4958,13 +4993,13 @@ class TestWatchdogAutoReload:
         )
 
         engine = RoutingEngine(tmp_path, use_watchdog=True)
-        engine.load_rules()
+        await engine.load_rules()
         assert engine._observer is not None, "Watchdog observer should be running"
 
         msg = make_msg(text="hello")
 
         # Initial match
-        rule1, _ = engine.match_with_rule(msg)
+        rule1, _ = await engine.match_with_rule(msg)
         assert rule1 is not None
         assert rule1.id == "v1"
 
@@ -4991,7 +5026,7 @@ class TestWatchdogAutoReload:
         )
 
         # match_with_rule() should now auto-reload
-        rule2, _ = engine.match_with_rule(msg)
+        rule2, _ = await engine.match_with_rule(msg)
         assert rule2 is not None
         assert rule2.id == "v2"
 
@@ -5008,11 +5043,11 @@ class TestWatchdogAutoReload:
     def test_real_watchdog_detects_new_file(self, tmp_path: Path):
         """Real watchdog observer detects a new .md file and triggers reload."""
         engine = RoutingEngine(tmp_path, use_watchdog=True)
-        engine.load_rules()
+        await engine.load_rules()
         assert engine._observer is not None, "Watchdog observer should be running"
 
         msg = make_msg(text="hello")
-        assert engine.match(msg) is None
+        assert await engine.match(msg) is None
 
         # Create a new instruction file
         (tmp_path / "new.md").write_text(
@@ -5035,7 +5070,7 @@ class TestWatchdogAutoReload:
             "Watchdog observer did not detect new file within 10s"
         )
 
-        rule, inst = engine.match_with_rule(msg)
+        rule, inst = await engine.match_with_rule(msg)
         assert rule is not None
         assert rule.id == "new-rule"
         assert inst == "new.md"
@@ -5056,7 +5091,7 @@ class TestWatchdogAutoReload:
         # Patch Observer to raise during start
         if _HAS_WATCHDOG:
             with patch("src.routing.Observer", side_effect=OSError("no inotify")):
-                engine.load_rules()
+                await engine.load_rules()
 
             # Should have fallen back to polling
             assert engine._observer is None
@@ -5083,7 +5118,7 @@ class TestWatchdogAutoReload:
         engine._mark_dirty()
         assert engine._dirty is True
 
-        engine.load_rules()
+        await engine.load_rules()
         assert engine._dirty is False
 
 
@@ -5120,7 +5155,7 @@ class TestLoadRulesInvalidRuleConstruction:
             return original_post_init(self)
 
         with patch.object(RoutingRule, "__post_init__", _flaky_post_init):
-            engine.load_rules()
+            await engine.load_rules()
 
         # Only the first rule should load; the second was skipped
         assert len(engine.rules) == 1
@@ -5154,7 +5189,7 @@ class TestLoadRulesInvalidRuleConstruction:
             return original_init(self, *args, **kwargs)
 
         with patch.object(RoutingRule, "__init__", _flaky_init):
-            engine.load_rules()
+            await engine.load_rules()
 
         # Rule should be skipped, not crash the whole load
         # (first attempt fails, but the engine should continue)

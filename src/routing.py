@@ -15,24 +15,28 @@ debounced mtime polling.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import xxhash
 
-from src.channels.base import ChannelType, IncomingMessage
 from src.constants import (
     ROUTING_MATCH_CACHE_MAX_SIZE,
     ROUTING_MATCH_CACHE_TTL_SECONDS,
+    ROUTING_RETRY_SLEEP_BUDGET_SECONDS,
     ROUTING_WATCH_DEBOUNCE_SECONDS,
 )
 from src.utils import BoundedOrderedDict
 from src.utils.frontmatter import extract_routing_rules, parse_file
+
+if TYPE_CHECKING:
+    from src.channels.base import ChannelType, IncomingMessage
 
 # Optional watchdog import — graceful degradation when not installed.
 _HAS_WATCHDOG = False
@@ -243,7 +247,8 @@ def _rule_from_dict(rule_dict: Dict[str, Any], filename: str) -> RoutingRule:
 
 
 def _merge_priority_sorted(
-    a: list[RoutingRule], b: list[RoutingRule],
+    a: list[RoutingRule],
+    b: list[RoutingRule],
 ) -> list[RoutingRule]:
     """Merge two pre-sorted rule lists preserving priority order.
 
@@ -488,7 +493,7 @@ class RoutingEngine:
         self._last_stale_check = now
         return self._scan_file_mtimes() != self._file_mtimes
 
-    def load_rules(self) -> None:
+    async def load_rules(self) -> None:
         """
         Scan .md instruction files and extract routing rules from frontmatter.
 
@@ -497,6 +502,11 @@ class RoutingEngine:
         Rules are sorted by priority (ascending) after loading.
 
         Call this at startup and whenever instruction files are updated.
+
+        File I/O (``parse_file``) is offloaded to a thread pool via
+        ``asyncio.to_thread()`` so the event loop is not blocked during
+        reloads.  The retry delay uses ``asyncio.sleep()`` instead of
+        ``time.sleep()`` to remain non-blocking.
 
         Graceful degradation: if a reload produces zero rules but rules
         previously existed, the old rule set is retained and a warning is
@@ -512,6 +522,8 @@ class RoutingEngine:
             self._rules = rules
             return
 
+        retry_sleep_spent: float = 0.0
+
         for md_file in sorted(self._instructions_dir.glob("*.md"), key=lambda p: p.name):
             if os.path.islink(md_file):
                 log.warning(
@@ -520,14 +532,25 @@ class RoutingEngine:
                 )
                 continue
             try:
-                parsed = parse_file(md_file)
+                parsed = await asyncio.to_thread(parse_file, md_file)
                 rule_dicts = extract_routing_rules(parsed.metadata)
             except Exception as exc:
-                # Retry once for transient parse failures (e.g. concurrent writes)
+                # Retry once for transient parse failures (e.g. concurrent writes),
+                # but only if the cumulative retry budget has not been exhausted.
+                budget_remaining = ROUTING_RETRY_SLEEP_BUDGET_SECONDS - retry_sleep_spent
+                if budget_remaining < 0.1:
+                    log.warning(
+                        "Retry budget exhausted (%.1fs spent), skipping %s: %s",
+                        retry_sleep_spent,
+                        md_file.name,
+                        exc,
+                    )
+                    continue
                 log.debug("Transient parse failure for %s, retrying: %s", md_file.name, exc)
-                time.sleep(0.1)
+                await asyncio.sleep(0.1)
+                retry_sleep_spent += 0.1
                 try:
-                    parsed = parse_file(md_file)
+                    parsed = await asyncio.to_thread(parse_file, md_file)
                     rule_dicts = extract_routing_rules(parsed.metadata)
                 except Exception as retry_exc:
                     log.warning("Failed to parse %s after retry: %s", md_file.name, retry_exc)
@@ -585,16 +608,16 @@ class RoutingEngine:
                 self._instructions_dir,
             )
 
-    def refresh_rules(self) -> None:
+    async def refresh_rules(self) -> None:
         """
         Reload routing rules by re-scanning instruction files.
 
         Convenience method that calls load_rules(). Use this when
         instruction files are modified at runtime.
         """
-        self.load_rules()
+        await self.load_rules()
 
-    def match(
+    async def match(
         self,
         msg: IncomingMessage,
         ctx: MatchingContext | None = None,
@@ -613,7 +636,7 @@ class RoutingEngine:
             Instruction filename (e.g., 'chat.agent.md') if a rule matches,
             otherwise None.
         """
-        _, instruction = self.match_with_rule(msg, ctx)
+        _, instruction = await self.match_with_rule(msg, ctx)
         return instruction
 
     def _cache_key(self, ctx: MatchingContext) -> Tuple:
@@ -626,36 +649,16 @@ class RoutingEngine:
         text_hash = xxhash.xxh64(ctx.text.encode("utf-8")).hexdigest()
         return (ctx.fromMe, ctx.toMe, ctx.sender_id, ctx.chat_id, ctx.channel_type, text_hash)
 
-    def match_with_rule(
+    def _match_impl(
         self,
-        msg: IncomingMessage,
-        ctx: MatchingContext | None = None,
+        ctx: MatchingContext,
     ) -> tuple[Optional["RoutingRule"], Optional[str]]:
+        """Core matching logic — pure CPU evaluation against cached rules.
+
+        Separated from the async ``match_with_rule()`` so that benchmarks
+        can call the hot-path matching directly without async overhead.
+        Stale-check and reload must be performed *before* calling this.
         """
-        Match an incoming message and return both the rule and instruction.
-
-        Same as match() but returns the full rule object for logging/debugging.
-        Auto-reloads rules if instruction files have changed on disk.
-        Results are cached for identical message signatures within a short TTL.
-
-        Args:
-            msg: The incoming message to match.
-            ctx: Optional pre-built MatchingContext. When provided, the internal
-                ``MatchingContext.from_message()`` call is skipped, avoiding
-                redundant object allocation when the caller already has a context
-                (e.g. from a prior preflight check).
-
-        Returns:
-            Tuple of (rule, instruction_filename). Both are None if no match.
-        """
-        if self._is_stale():
-            self.load_rules()
-
-        if not self.has_rules:
-            return (None, None)
-
-        if ctx is None:
-            ctx = MatchingContext.from_message(msg)
         cache_key = self._cache_key(ctx)
 
         # Check cache first
@@ -704,6 +707,38 @@ class RoutingEngine:
         result = (None, None)
         self._match_cache[cache_key] = result
         return result
+
+    async def match_with_rule(
+        self,
+        msg: IncomingMessage,
+        ctx: MatchingContext | None = None,
+    ) -> tuple[Optional["RoutingRule"], Optional[str]]:
+        """
+        Match an incoming message and return both the rule and instruction.
+
+        Same as match() but returns the full rule object for logging/debugging.
+        Auto-reloads rules if instruction files have changed on disk.
+        Results are cached for identical message signatures within a short TTL.
+
+        Args:
+            msg: The incoming message to match.
+            ctx: Optional pre-built MatchingContext. When provided, the internal
+                ``MatchingContext.from_message()`` call is skipped, avoiding
+                redundant object allocation when the caller already has a context
+                (e.g. from a prior preflight check).
+
+        Returns:
+            Tuple of (rule, instruction_filename). Both are None if no match.
+        """
+        if self._is_stale():
+            await self.load_rules()
+
+        if not self.has_rules:
+            return (None, None)
+
+        if ctx is None:
+            ctx = MatchingContext.from_message(msg)
+        return self._match_impl(ctx)
 
 
 # ── Watchdog event handler ─────────────────────────────────────────────────

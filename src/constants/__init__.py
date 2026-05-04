@@ -119,6 +119,7 @@ __all__ = [
     # routing
     "ROUTING_MATCH_CACHE_MAX_SIZE",
     "ROUTING_MATCH_CACHE_TTL_SECONDS",
+    "ROUTING_RETRY_SLEEP_BUDGET_SECONDS",
     "ROUTING_WATCH_DEBOUNCE_SECONDS",
     # workspace
     "AUDIT_LOG_MAX_AGE_DAYS",
@@ -260,6 +261,7 @@ from src.constants.health import (  # noqa: F401
 from src.constants.routing import (  # noqa: F401
     ROUTING_MATCH_CACHE_MAX_SIZE,
     ROUTING_MATCH_CACHE_TTL_SECONDS,
+    ROUTING_RETRY_SLEEP_BUDGET_SECONDS,
     ROUTING_WATCH_DEBOUNCE_SECONDS,
 )
 

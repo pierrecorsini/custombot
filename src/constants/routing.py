@@ -20,3 +20,14 @@ ROUTING_MATCH_CACHE_TTL_SECONDS: float = 5.0
 # Maximum number of cached routing match results. Bounded to prevent unbounded
 # memory growth; evicts least-recently-used entries when full.
 ROUTING_MATCH_CACHE_MAX_SIZE: int = 500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routing Engine — Retry Budget
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Cumulative time budget (seconds) for retry sleeps across all instruction
+# files during a single load_rules() call. Each transient parse failure
+# triggers a 100ms asyncio.sleep retry. Without a cap, N corrupted files
+# would block the event loop for N×100ms. Once this budget is exhausted,
+# subsequent parse failures are skipped without retrying.
+ROUTING_RETRY_SLEEP_BUDGET_SECONDS: float = 1.0
