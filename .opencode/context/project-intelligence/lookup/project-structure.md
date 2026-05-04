@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/project-structure | Priority: high | Version: 4.2 | Updated: 2026-05-03 -->
+<!-- Context: project-intelligence/lookup/project-structure | Priority: high | Version: 4.3 | Updated: 2026-05-03 -->
 
 # Project Structure
 
@@ -167,9 +167,9 @@ custombot/
 │
 ├── tests/                   # Test suite (3 tiers)
 │   ├── conftest.py           # Shared fixtures (fully-wired Bot mock)
-│   ├── unit/                 # 57 unit tests
-│   ├── integration/          # 12 integration tests
-│   └── e2e/                  # 10 end-to-end tests
+│   ├── unit/                 # Unit tests
+│   ├── integration/          # Integration tests
+│   └── e2e/                  # End-to-end tests (76 total)
 │
 ├── workspace/               # Runtime workspace (configurable)
 │   ├── config.json           # Active configuration

@@ -1,8 +1,48 @@
-<!-- Context: project-intelligence/lookup/completed-sessions | Priority: medium | Version: 5.0 | Updated: 2026-05-02 -->
+<!-- Context: project-intelligence/lookup/completed-sessions | Priority: medium | Version: 6.0 | Updated: 2026-05-04 -->
 
 # Completed Sessions
 
 > History of completed development sessions and their deliverables.
+
+## 2026-05-04: WhatsApp Voice Note Fix
+
+**Status**: Completed
+
+**Bug**: MP3 files sent to WhatsApp instead of OGG/Opus format — voice notes not playable as push-to-talk.
+
+**Deliverables**:
+- `_convert_to_ogg(mp3_path)` wired into media skill call chain
+- New `_send_voice_note()` method in `neonize_backend.py` with PTT fields (streamingSidecar, waveform, opus codecs mimetype)
+
+**Files affected**: `src/skills/builtin/media.py` (3 additions, 2 deletions), `src/channels/neonize_backend.py` (80 additions)
+
+**Commits**: c685781a, f3978506
+
+## 2026-05-04: WhatsApp Timestamp Fix
+
+**Status**: Completed
+
+**Bug**: WhatsApp backends return timestamps in milliseconds but `_validate_timestamp` expects seconds — valid timestamps rejected.
+
+**Deliverables**:
+- Timestamp normalization at WhatsApp channel boundary (divide by 1000 if > 1e12)
+
+**Files affected**: `src/channels/whatsapp.py` (1 addition)
+
+**Commit**: d18b4279
+
+## 2026-05-04: WhatsApp Zombie Connection Detection
+
+**Status**: Completed
+
+**Issue**: WhatsApp connection alive (status pings work) but message stream dead — zero messages for 30+ minutes.
+
+**Deliverables**:
+- Message starvation detection (track last message received, auto-reconnect on timeout)
+- WhatsApp session diagnostic check
+- Channel health exposure via health endpoint
+
+**Files affected**: `src/channels/neonize_backend.py`, `src/channels/whatsapp.py`, `src/diagnose.py`, `src/health/`
 
 ## 2026-03-21: CLI Channel
 
@@ -84,8 +124,12 @@
 
 ---
 
+## Harvested From
+
+- Session snapshots (3 files in `.opencode/sessionSnapshots/`) — 2026-05-04
+
 ## Related Files
 
-- `errors/bug-fixes.md` — Bug fixes applied during sessions
+- `errors/bug-fixes.md` — Bug fixes applied during sessions (Fixes 8-10)
 - `concepts/architecture.md` — How delivered modules fit the architecture
 - `lookup/tech-stack.md` — Full technology reference

@@ -1,8 +1,34 @@
-<!-- Context: project-intelligence/errors/bug-fixes | Priority: high | Version: 4.0 | Updated: 2026-05-02 -->
+<!-- Context: project-intelligence/errors/bug-fixes | Priority: high | Version: 5.0 | Updated: 2026-05-04 -->
 
 # Bug Fixes Applied
 
 > Record of bugs fixed in the codebase — patterns to watch for in future.
+
+## 2026-05-04 Fixes
+
+### Fix 8: WhatsApp voice note sent as MP3 instead of OGG/Opus
+
+- **File**: `src/skills/builtin/media.py`
+- **Error**: Voice notes sent as MP3 files to WhatsApp — not playable as push-to-talk
+- **Root cause**: `_convert_to_ogg()` function existed but was never called before `send_media()`
+- **Fix**: Added `_convert_to_ogg(mp3_path)` call before `send_media()` in the media skill
+- **Pattern to watch**: Format-conversion helpers must be verified in the call chain, not just exist
+
+### Fix 9: neonize library missing PTT fields for voice notes
+
+- **File**: `src/channels/neonize_backend.py`
+- **Error**: WhatsApp voice notes missing streamingSidecar, waveform, and mimetype with codecs
+- **Root cause**: neonize library doesn't populate PTT-specific AudioMessage fields
+- **Fix**: New `_send_voice_note()` method that manually constructs AudioMessage with correct fields (streamingSidecar, waveform, mimetype with opus codecs)
+- **Pattern to watch**: WhatsApp library abstractions may omit protocol-required fields — verify with actual client behavior
+
+### Fix 10: WhatsApp timestamp milliseconds vs seconds mismatch
+
+- **File**: `src/channels/whatsapp.py`
+- **Error**: `_validate_timestamp` rejects valid timestamps (e.g. 1777630140000 exceeds max 4102444800.0)
+- **Root cause**: WhatsApp backends return timestamps in milliseconds; validator expects seconds
+- **Fix**: Normalize at WhatsApp channel boundary — if timestamp > 1e12, divide by 1000
+- **Pattern to watch**: External APIs may use different epoch units — always normalize at the boundary layer
 
 ## 2026-05-02 Fixes
 
@@ -68,14 +94,22 @@ When similar issues appear:
 | `AttributeError` on API response | Response format varies (dict vs object) | Use `.get()` or `getattr()` with fallback |
 | `RuntimeWarning: coroutine was never awaited` | Missing `await` on async call | Add `await` keyword |
 | `'dict' object has no attribute 'X'` | API response shape mismatch | Handle both access patterns |
+| Media sent in wrong format | Conversion helper not wired into call chain | Verify helper is called, not just defined |
+| Timestamp validation rejects valid values | Epoch unit mismatch (ms vs s) | Normalize at integration boundary |
 
 ## Codebase References
 
 - `src/llm.py` — LLM client (Fix 1)
 - `src/bot.py` — Bot orchestrator (Fix 2)
+- `src/skills/builtin/media.py` — Media skill with OGG conversion (Fix 8)
+- `src/channels/neonize_backend.py` — WhatsApp backend with PTT fields (Fix 9)
+- `src/channels/whatsapp.py` — WhatsApp channel with timestamp normalization (Fix 10)
+
+## Harvested From
+
+- Session snapshots: `ses_212de4615ffemFIxfxagng93na.json`, `ses_212e5748effesxiUVNf2tTCFkL.json` (2026-05-04)
 
 ## Related Files
 
 - `errors/known-issues.md` — Current open issues
-- `guides/log-diagnostics.md` — How to find bugs via logs
-- `lookup/completed-sessions.md` — Session where fixes were applied
+- `lookup/completed-sessions.md` — Sessions where fixes were applied

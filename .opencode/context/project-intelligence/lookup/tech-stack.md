@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/tech-stack | Priority: high | Version: 3.2 | Updated: 2026-05-03 -->
+<!-- Context: project-intelligence/lookup/tech-stack | Priority: high | Version: 3.3 | Updated: 2026-05-03 -->
 
 # Tech Stack
 
@@ -10,9 +10,9 @@
 |-------|-----------|---------|-----------|
 | Language | Python | 3.11+ | Async/await, performance, type hints |
 | Framework | asyncio + Click | stdlib/8.3+ | Async-first architecture with CLI interface |
+| Channel | neonize (whatsmeow/Go) + BaseChannel ABC | 0.3+ | WhatsApp Web API via native Python bindings; abstract channel layer for multi-transport |
 | Database | SQLite + sqlite-vec | stdlib/0.1 | Embedded DB with vector search |
 | LLM | OpenAI SDK | 2.29+ | Chat completions with tool calling + streaming |
-| WhatsApp | neonize (whatsmeow/Go) | 0.3+ | WhatsApp Web API via native Python bindings |
 | Serialization | orjson + msgpack | 3.10+/1.1+ | Fast JSON + binary serialization |
 | Terminal UI | Rich + questionary | 14.3+/2.1+ | Formatted output, interactive menus |
 | Search | duckduckgo-search | 8.1+ | Web search skill |

@@ -1,4 +1,4 @@
-<!-- Context: core/navigation | Priority: critical | Version: 1.0 | Updated: 2026-02-15 -->
+<!-- Context: core/navigation | Priority: critical | Version: 1.1 | Updated: 2026-05-04 -->
 
 # Context Navigation
 
