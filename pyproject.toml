@@ -61,6 +61,7 @@ select = [
     "SIM",  # flake8-simplify
     "TCH",  # flake8-type-checking
     "PL",   # pylint (non-blocking — ignored rules to be removed incrementally)
+    "PERF", # perflint — performance anti-patterns (non-blocking)
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
@@ -79,7 +80,12 @@ ignore = [
     "PLW1510",  # subprocess-run-without-check (3 violations)
     "PLR0124",  # comparison-with-itself (1 violation)
     "PLR5501",  # collapsible-else-if (1 violation)
+    # PERF rules with existing violations — remove ignores incrementally as violations are fixed.
+    "PERF401",  # manual-list-append (16 violations)
 ]
+
+[tool.ruff.lint.flake8-type-checking]
+strict = true
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
@@ -106,6 +112,18 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 module = "sqlite_vec.*"
 ignore_errors = true
+
+# Strict type checking for src.bot — the most complex module (~2000 lines)
+# with the highest interaction surface.  Enabling strict here catches type
+# errors in the critical message-processing path while avoiding disruption
+# to the rest of the codebase.  Non-blocking in CI initially.
+[[tool.mypy.overrides]]
+module = "src.bot.*"
+disallow_untyped_defs = true
+disallow_any_generics = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
