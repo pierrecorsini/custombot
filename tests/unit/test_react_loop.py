@@ -24,7 +24,7 @@ from src.bot.react_loop import (
     process_tool_calls,
     react_loop,
 )
-from src.core.tool_formatter import ToolLogEntry
+from src.core.tool_formatter import MAX_TOOL_NAME_LENGTH, ToolLogEntry
 from src.exceptions import ErrorCode, LLMError
 from src.monitoring import PerformanceMetrics
 
@@ -40,9 +40,7 @@ def _make_llm(error_code: ErrorCode | None = None) -> AsyncMock:
     if error_code:
         llm.chat = AsyncMock(side_effect=LLMError("test", error_code=error_code))
     else:
-        llm.chat = AsyncMock(
-            return_value=make_chat_response(content="ok", finish_reason="stop")
-        )
+        llm.chat = AsyncMock(return_value=make_chat_response(content="ok", finish_reason="stop"))
     return llm
 
 
@@ -71,8 +69,16 @@ class TestCallLLMWithRetry:
         metrics = _make_metrics()
 
         result = await call_llm_with_retry(
-            llm, metrics, "chat_1", [], None, None, False,
-            iteration=0, max_retries=2, initial_delay=0.01,
+            llm,
+            metrics,
+            "chat_1",
+            [],
+            None,
+            None,
+            False,
+            iteration=0,
+            max_retries=2,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         assert result is None
@@ -84,8 +90,16 @@ class TestCallLLMWithRetry:
 
         with pytest.raises(LLMError) as exc_info:
             await call_llm_with_retry(
-                llm, metrics, "chat_1", [], None, None, False,
-                iteration=0, max_retries=3, initial_delay=0.01,
+                llm,
+                metrics,
+                "chat_1",
+                [],
+                None,
+                None,
+                False,
+                iteration=0,
+                max_retries=3,
+                initial_delay=0.01,
                 retryable_codes=RETRYABLE_CODES,
             )
         assert exc_info.value.error_code == ErrorCode.LLM_INVALID_REQUEST
@@ -97,8 +111,16 @@ class TestCallLLMWithRetry:
 
         with pytest.raises(LLMError) as exc_info:
             await call_llm_with_retry(
-                llm, metrics, "chat_1", [], None, None, False,
-                iteration=0, max_retries=1, initial_delay=0.01,
+                llm,
+                metrics,
+                "chat_1",
+                [],
+                None,
+                None,
+                False,
+                iteration=0,
+                max_retries=1,
+                initial_delay=0.01,
                 retryable_codes=RETRYABLE_CODES,
             )
         assert exc_info.value.error_code == ErrorCode.LLM_RATE_LIMITED
@@ -107,15 +129,25 @@ class TestCallLLMWithRetry:
         """First call fails with transient error, second succeeds."""
         response = make_chat_response(content="recovered", finish_reason="stop")
         llm = AsyncMock()
-        llm.chat = AsyncMock(side_effect=[
-            LLMError("rate limited", error_code=ErrorCode.LLM_RATE_LIMITED),
-            response,
-        ])
+        llm.chat = AsyncMock(
+            side_effect=[
+                LLMError("rate limited", error_code=ErrorCode.LLM_RATE_LIMITED),
+                response,
+            ]
+        )
         metrics = _make_metrics()
 
         result = await call_llm_with_retry(
-            llm, metrics, "chat_1", [], None, None, False,
-            iteration=0, max_retries=2, initial_delay=0.01,
+            llm,
+            metrics,
+            "chat_1",
+            [],
+            None,
+            None,
+            False,
+            iteration=0,
+            max_retries=2,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         assert result is not None
@@ -130,8 +162,16 @@ class TestCallLLMWithRetry:
         callback = AsyncMock()
 
         result = await call_llm_with_retry(
-            llm, metrics, "chat_1", [], None, callback, True,
-            iteration=0, max_retries=1, initial_delay=0.01,
+            llm,
+            metrics,
+            "chat_1",
+            [],
+            None,
+            callback,
+            True,
+            iteration=0,
+            max_retries=1,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         assert result is not None
@@ -148,16 +188,22 @@ class TestReactLoopEdgeCases:
     async def test_empty_response_returns_fallback_message(self):
         """LLM returns empty/whitespace content → fallback message."""
         llm = _make_llm()
-        llm.chat = AsyncMock(
-            return_value=make_chat_response(content="   ", finish_reason="stop")
-        )
+        llm.chat = AsyncMock(return_value=make_chat_response(content="   ", finish_reason="stop"))
         metrics = _make_metrics()
         executor = _make_tool_executor()
 
         text, tool_log, buffered = await react_loop(
-            llm, metrics, executor, "chat_1", [], None,
-            Path("/tmp/ws"), max_tool_iterations=5,
-            stream_response=False, max_retries=1, initial_delay=0.01,
+            llm,
+            metrics,
+            executor,
+            "chat_1",
+            [],
+            None,
+            Path("/tmp/ws"),
+            max_tool_iterations=5,
+            stream_response=False,
+            max_retries=1,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         assert "empty response" in text.lower()
@@ -167,23 +213,31 @@ class TestReactLoopEdgeCases:
     async def test_none_content_returns_fallback_message(self):
         """LLM returns None content → fallback message."""
         llm = _make_llm()
-        llm.chat = AsyncMock(
-            return_value=make_chat_response(content=None, finish_reason="stop")
-        )
+        llm.chat = AsyncMock(return_value=make_chat_response(content=None, finish_reason="stop"))
         metrics = _make_metrics()
         executor = _make_tool_executor()
 
         text, tool_log, buffered = await react_loop(
-            llm, metrics, executor, "chat_1", [], None,
-            Path("/tmp/ws"), max_tool_iterations=5,
-            stream_response=False, max_retries=1, initial_delay=0.01,
+            llm,
+            metrics,
+            executor,
+            "chat_1",
+            [],
+            None,
+            Path("/tmp/ws"),
+            max_tool_iterations=5,
+            stream_response=False,
+            max_retries=1,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         assert "empty response" in text.lower()
 
     async def test_length_finish_reason_with_content_returns_actual_text(self):
         """LLM returns finish_reason='length' with non-empty content → actual text + truncation warning, not empty fallback."""
-        original_text = "Quantum entanglement is a phenomenon where particles become interconnected."
+        original_text = (
+            "Quantum entanglement is a phenomenon where particles become interconnected."
+        )
         llm = _make_llm()
         llm.chat = AsyncMock(
             return_value=make_chat_response(content=original_text, finish_reason="length")
@@ -192,9 +246,17 @@ class TestReactLoopEdgeCases:
         executor = _make_tool_executor()
 
         text, tool_log, buffered = await react_loop(
-            llm, metrics, executor, "chat_1", [], None,
-            Path("/tmp/ws"), max_tool_iterations=5,
-            stream_response=False, max_retries=1, initial_delay=0.01,
+            llm,
+            metrics,
+            executor,
+            "chat_1",
+            [],
+            None,
+            Path("/tmp/ws"),
+            max_tool_iterations=5,
+            stream_response=False,
+            max_retries=1,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         # Must contain the actual LLM response text
@@ -210,16 +272,22 @@ class TestReactLoopEdgeCases:
     async def test_length_finish_reason_without_content_returns_warning(self):
         """LLM returns finish_reason='length' with empty content → truncation warning, not empty fallback."""
         llm = _make_llm()
-        llm.chat = AsyncMock(
-            return_value=make_chat_response(content="", finish_reason="length")
-        )
+        llm.chat = AsyncMock(return_value=make_chat_response(content="", finish_reason="length"))
         metrics = _make_metrics()
         executor = _make_tool_executor()
 
         text, tool_log, buffered = await react_loop(
-            llm, metrics, executor, "chat_1", [], None,
-            Path("/tmp/ws"), max_tool_iterations=5,
-            stream_response=False, max_retries=1, initial_delay=0.01,
+            llm,
+            metrics,
+            executor,
+            "chat_1",
+            [],
+            None,
+            Path("/tmp/ws"),
+            max_tool_iterations=5,
+            stream_response=False,
+            max_retries=1,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         # Must contain the truncation warning
@@ -242,9 +310,17 @@ class TestReactLoopEdgeCases:
         executor = _make_tool_executor()
 
         text, tool_log, buffered = await react_loop(
-            llm, metrics, executor, "chat_1", [], None,
-            Path("/tmp/ws"), max_tool_iterations=5,
-            stream_response=False, max_retries=1, initial_delay=0.01,
+            llm,
+            metrics,
+            executor,
+            "chat_1",
+            [],
+            None,
+            Path("/tmp/ws"),
+            max_tool_iterations=5,
+            stream_response=False,
+            max_retries=1,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         assert text == "I cannot assist with that request."
@@ -262,9 +338,17 @@ class TestReactLoopEdgeCases:
         executor = _make_tool_executor()
 
         text, tool_log, buffered = await react_loop(
-            llm, metrics, executor, "chat_1", [], None,
-            Path("/tmp/ws"), max_tool_iterations=5,
-            stream_response=False, max_retries=1, initial_delay=0.01,
+            llm,
+            metrics,
+            executor,
+            "chat_1",
+            [],
+            None,
+            Path("/tmp/ws"),
+            max_tool_iterations=5,
+            stream_response=False,
+            max_retries=1,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         assert "empty response" in text.lower()
@@ -287,9 +371,17 @@ class TestReactLoopEdgeCases:
         executor = _make_tool_executor()
 
         text, tool_log, buffered = await react_loop(
-            llm, metrics, executor, "chat_1", [], [],
-            Path("/tmp/ws"), max_tool_iterations=2,
-            stream_response=False, max_retries=1, initial_delay=0.01,
+            llm,
+            metrics,
+            executor,
+            "chat_1",
+            [],
+            [],
+            Path("/tmp/ws"),
+            max_tool_iterations=2,
+            stream_response=False,
+            max_retries=1,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         assert "maximum tool iterations" in text.lower()
@@ -305,9 +397,17 @@ class TestReactLoopEdgeCases:
         executor = _make_tool_executor()
 
         text, tool_log, buffered = await react_loop(
-            llm, metrics, executor, "chat_1", [], None,
-            Path("/tmp/ws"), max_tool_iterations=5,
-            stream_response=False, max_retries=1, initial_delay=0.01,
+            llm,
+            metrics,
+            executor,
+            "chat_1",
+            [],
+            None,
+            Path("/tmp/ws"),
+            max_tool_iterations=5,
+            stream_response=False,
+            max_retries=1,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         assert "temporarily unavailable" in text.lower()
@@ -348,12 +448,16 @@ class TestProcessToolCalls:
         choice.message.tool_calls = []
         choice.message.content = None
         # Need serialize to work on the message
-        choice.message.model_dump = MagicMock(return_value={
-            "role": "assistant", "content": None, "tool_calls": []
-        })
+        choice.message.model_dump = MagicMock(
+            return_value={"role": "assistant", "content": None, "tool_calls": []}
+        )
 
         tool_log, buffered = await process_tool_calls(
-            AsyncMock(), choice, [], "chat_1", Path("/tmp/ws"),
+            AsyncMock(),
+            choice,
+            [],
+            "chat_1",
+            Path("/tmp/ws"),
         )
         assert tool_log == []
         assert len(buffered) == 1  # just the assistant message
@@ -363,19 +467,26 @@ class TestProcessToolCalls:
         from src.constants import MAX_TOOL_CALLS_PER_TURN
 
         # Create more tool calls than the limit
-        calls = [make_tool_call(call_id=f"tc_{i}", name=f"tool_{i}") for i in range(MAX_TOOL_CALLS_PER_TURN + 3)]
+        calls = [
+            make_tool_call(call_id=f"tc_{i}", name=f"tool_{i}")
+            for i in range(MAX_TOOL_CALLS_PER_TURN + 3)
+        ]
         choice = MagicMock()
         choice.message.tool_calls = calls
         choice.message.content = None
-        choice.message.model_dump = MagicMock(return_value={
-            "role": "assistant", "content": None, "tool_calls": []
-        })
+        choice.message.model_dump = MagicMock(
+            return_value={"role": "assistant", "content": None, "tool_calls": []}
+        )
 
         executor = _make_tool_executor()
         messages: list = []
 
         tool_log, buffered = await process_tool_calls(
-            executor, choice, messages, "chat_1", Path("/tmp/ws"),
+            executor,
+            choice,
+            messages,
+            "chat_1",
+            Path("/tmp/ws"),
         )
 
         rejected_count = 3
@@ -391,7 +502,7 @@ class TestProcessToolCalls:
         assert {entry.name for entry in tool_log} == executed_names
 
         # ── Rejection messages contain the expected text ──
-        rejection_entries = buffered[1 + MAX_TOOL_CALLS_PER_TURN:]
+        rejection_entries = buffered[1 + MAX_TOOL_CALLS_PER_TURN :]
         assert len(rejection_entries) == rejected_count
         for entry in rejection_entries:
             assert entry["role"] == "tool"
@@ -422,15 +533,19 @@ class TestProcessToolCalls:
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
-        choice.message.model_dump = MagicMock(return_value={
-            "role": "assistant", "content": None, "tool_calls": []
-        })
+        choice.message.model_dump = MagicMock(
+            return_value={"role": "assistant", "content": None, "tool_calls": []}
+        )
 
         executor = _make_tool_executor()
         callback = AsyncMock()
 
         await process_tool_calls(
-            executor, choice, [], "chat_1", Path("/tmp/ws"),
+            executor,
+            choice,
+            [],
+            "chat_1",
+            Path("/tmp/ws"),
             stream_callback=callback,
         )
         callback.assert_awaited_once()
@@ -441,15 +556,19 @@ class TestProcessToolCalls:
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
-        choice.message.model_dump = MagicMock(return_value={
-            "role": "assistant", "content": None, "tool_calls": []
-        })
+        choice.message.model_dump = MagicMock(
+            return_value={"role": "assistant", "content": None, "tool_calls": []}
+        )
 
         executor = _make_tool_executor()
         channel = AsyncMock()
 
         await process_tool_calls(
-            executor, choice, [], "chat_1", Path("/tmp/ws"),
+            executor,
+            choice,
+            [],
+            "chat_1",
+            Path("/tmp/ws"),
             channel=channel,
         )
         # Channel was provided — the send_media closure is built but not
@@ -472,7 +591,11 @@ class TestExecuteToolCall:
         executor = _make_tool_executor()
 
         tc_id, content, entry = await execute_tool_call(
-            executor, tc, "chat_1", Path("/tmp/ws"), None,
+            executor,
+            tc,
+            "chat_1",
+            Path("/tmp/ws"),
+            None,
         )
         assert tc_id == "call_bad"
         assert "malformed" in content.lower()
@@ -491,7 +614,11 @@ class TestExecuteToolCall:
         # /tmp/evil_ws is NOT relative to /tmp/safe_workspace → blocked
         with patch("src.bot.react_loop.WORKSPACE_DIR", "/tmp/safe_workspace"):
             tc_id, content, entry = await execute_tool_call(
-                executor, tc, "chat_1", Path("/tmp/evil_ws"), None,
+                executor,
+                tc,
+                "chat_1",
+                Path("/tmp/evil_ws"),
+                None,
             )
         assert tc_id == "call_traversal"
         assert "path validation failed" in content.lower()
@@ -508,7 +635,11 @@ class TestExecuteToolCall:
 
         with patch("src.bot.react_loop.WORKSPACE_DIR", "/tmp/ws"):
             tc_id, content, entry = await execute_tool_call(
-                executor, tc, "chat_1", Path("/tmp/ws"), None,
+                executor,
+                tc,
+                "chat_1",
+                Path("/tmp/ws"),
+                None,
             )
         assert tc_id == "call_json"
         assert content == "search results"
@@ -526,7 +657,11 @@ class TestExecuteToolCall:
 
         with patch("src.bot.react_loop.WORKSPACE_DIR", "/tmp/ws"):
             tc_id, content, entry = await execute_tool_call(
-                executor, tc, "chat_1", Path("/tmp/ws"), None,
+                executor,
+                tc,
+                "chat_1",
+                Path("/tmp/ws"),
+                None,
             )
         assert tc_id == "call_ok"
         assert content == "found it"
@@ -549,9 +684,17 @@ class TestReactLoopHappyPath:
         executor = _make_tool_executor()
 
         text, tool_log, buffered = await react_loop(
-            llm, metrics, executor, "chat_1", [], None,
-            Path("/tmp/ws"), max_tool_iterations=5,
-            stream_response=False, max_retries=1, initial_delay=0.01,
+            llm,
+            metrics,
+            executor,
+            "chat_1",
+            [],
+            None,
+            Path("/tmp/ws"),
+            max_tool_iterations=5,
+            stream_response=False,
+            max_retries=1,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         assert text == "Hello, world!"
@@ -567,9 +710,17 @@ class TestReactLoopHappyPath:
         executor = _make_tool_executor()
 
         await react_loop(
-            llm, metrics, executor, "chat_1", [], None,
-            Path("/tmp/ws"), max_tool_iterations=5,
-            stream_response=False, max_retries=1, initial_delay=0.01,
+            llm,
+            metrics,
+            executor,
+            "chat_1",
+            [],
+            None,
+            Path("/tmp/ws"),
+            max_tool_iterations=5,
+            stream_response=False,
+            max_retries=1,
+            initial_delay=0.01,
             retryable_codes=RETRYABLE_CODES,
         )
         # Iteration tracking should have been recorded
@@ -588,9 +739,9 @@ class TestSendMediaCallback:
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
-        choice.message.model_dump = MagicMock(return_value={
-            "role": "assistant", "content": None, "tool_calls": []
-        })
+        choice.message.model_dump = MagicMock(
+            return_value={"role": "assistant", "content": None, "tool_calls": []}
+        )
 
         executor = _make_tool_executor()
         channel = AsyncMock()
@@ -608,7 +759,11 @@ class TestSendMediaCallback:
 
         with patch("src.bot.react_loop.WORKSPACE_DIR", "/tmp/ws"):
             tool_log, buffered = await process_tool_calls(
-                executor, choice, [], "chat_1", Path("/tmp/ws"),
+                executor,
+                choice,
+                [],
+                "chat_1",
+                Path("/tmp/ws"),
                 channel=channel,
             )
         channel.send_audio.assert_awaited_once()
@@ -620,9 +775,9 @@ class TestSendMediaCallback:
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
-        choice.message.model_dump = MagicMock(return_value={
-            "role": "assistant", "content": None, "tool_calls": []
-        })
+        choice.message.model_dump = MagicMock(
+            return_value={"role": "assistant", "content": None, "tool_calls": []}
+        )
 
         executor = _make_tool_executor()
         channel = AsyncMock()
@@ -639,7 +794,11 @@ class TestSendMediaCallback:
 
         with patch("src.bot.react_loop.WORKSPACE_DIR", "/tmp/ws"):
             await process_tool_calls(
-                executor, choice, [], "chat_1", Path("/tmp/ws"),
+                executor,
+                choice,
+                [],
+                "chat_1",
+                Path("/tmp/ws"),
                 channel=channel,
             )
         channel.send_document.assert_awaited_once()
@@ -651,9 +810,9 @@ class TestSendMediaCallback:
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
-        choice.message.model_dump = MagicMock(return_value={
-            "role": "assistant", "content": None, "tool_calls": []
-        })
+        choice.message.model_dump = MagicMock(
+            return_value={"role": "assistant", "content": None, "tool_calls": []}
+        )
 
         executor = _make_tool_executor()
         channel = AsyncMock()
@@ -669,7 +828,11 @@ class TestSendMediaCallback:
         with patch("src.bot.react_loop.WORKSPACE_DIR", "/tmp/ws"):
             with patch("src.bot.react_loop.log") as mock_log:
                 await process_tool_calls(
-                    executor, choice, [], "chat_1", Path("/tmp/ws"),
+                    executor,
+                    choice,
+                    [],
+                    "chat_1",
+                    Path("/tmp/ws"),
                     channel=channel,
                 )
                 mock_log.warning.assert_any_call("Unknown media kind: %s", "video")
@@ -680,9 +843,9 @@ class TestSendMediaCallback:
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
-        choice.message.model_dump = MagicMock(return_value={
-            "role": "assistant", "content": None, "tool_calls": []
-        })
+        choice.message.model_dump = MagicMock(
+            return_value={"role": "assistant", "content": None, "tool_calls": []}
+        )
 
         executor = _make_tool_executor()
         channel = AsyncMock()
@@ -699,7 +862,11 @@ class TestSendMediaCallback:
         with patch("src.bot.react_loop.WORKSPACE_DIR", "/tmp/ws"):
             # Should NOT raise — exception is caught inside _send_media
             tool_log, buffered = await process_tool_calls(
-                executor, choice, [], "chat_1", Path("/tmp/ws"),
+                executor,
+                choice,
+                [],
+                "chat_1",
+                Path("/tmp/ws"),
                 channel=channel,
             )
         assert len(tool_log) == 1  # tool still completed
@@ -720,6 +887,7 @@ class TestProcessToolCallsAdvanced:
         ``except BaseException: pass``.
         """
         import tempfile
+
         ws_root = Path(tempfile.gettempdir()) / "custombot_test_tg_salvage"
         ws_root.mkdir(parents=True, exist_ok=True)
         ws_dir = ws_root / "workspace"
@@ -729,9 +897,9 @@ class TestProcessToolCallsAdvanced:
         choice = MagicMock()
         choice.message.tool_calls = [tc1, tc2]
         choice.message.content = None
-        choice.message.model_dump = MagicMock(return_value={
-            "role": "assistant", "content": None, "tool_calls": []
-        })
+        choice.message.model_dump = MagicMock(
+            return_value={"role": "assistant", "content": None, "tool_calls": []}
+        )
 
         executor = AsyncMock()
 
@@ -758,7 +926,11 @@ class TestProcessToolCallsAdvanced:
         # the BaseException from the TaskGroup and salvages partial results.
         with patch("src.bot.react_loop.WORKSPACE_DIR", str(ws_root)):
             tool_log, buffered = await process_tool_calls(
-                executor, choice, [], "chat_1", ws_dir,
+                executor,
+                choice,
+                [],
+                "chat_1",
+                ws_dir,
             )
 
         # At least the first tool's result should be salvaged
@@ -773,6 +945,7 @@ class TestProcessToolCallsAdvanced:
         inside the salvage loop by having ALL tasks fail with RuntimeError.
         """
         import tempfile
+
         ws_root = Path(tempfile.gettempdir()) / "custombot_test_tg_allfail"
         ws_root.mkdir(parents=True, exist_ok=True)
         ws_dir = ws_root / "workspace"
@@ -782,9 +955,9 @@ class TestProcessToolCallsAdvanced:
         choice = MagicMock()
         choice.message.tool_calls = [tc1, tc2]
         choice.message.content = None
-        choice.message.model_dump = MagicMock(return_value={
-            "role": "assistant", "content": None, "tool_calls": []
-        })
+        choice.message.model_dump = MagicMock(
+            return_value={"role": "assistant", "content": None, "tool_calls": []}
+        )
 
         executor = AsyncMock()
 
@@ -796,7 +969,11 @@ class TestProcessToolCallsAdvanced:
         # Should NOT raise — salvage path catches the ExceptionGroup
         with patch("src.bot.react_loop.WORKSPACE_DIR", str(ws_root)):
             tool_log, buffered = await process_tool_calls(
-                executor, choice, [], "chat_1", ws_dir,
+                executor,
+                choice,
+                [],
+                "chat_1",
+                ws_dir,
             )
 
         # Both tasks failed during execution, so no results salvaged
@@ -813,9 +990,9 @@ class TestProcessToolCallsAdvanced:
         choice = MagicMock()
         choice.message.tool_calls = [tool_call]
         choice.message.content = None
-        choice.message.model_dump = MagicMock(return_value={
-            "role": "assistant", "content": None, "tool_calls": []
-        })
+        choice.message.model_dump = MagicMock(
+            return_value={"role": "assistant", "content": None, "tool_calls": []}
+        )
 
         large_result = "x" * (MAX_TOOL_RESULT_PERSIST_LENGTH + 500)
         executor = _make_tool_executor(result=large_result)
@@ -824,13 +1001,18 @@ class TestProcessToolCallsAdvanced:
         # the path-traversal check.  Patch WORKSPACE_DIR to a temp-like root
         # and set workspace_dir as a child of that root.
         import tempfile
+
         ws_root = Path(tempfile.gettempdir()) / "custombot_test_truncation"
         ws_root.mkdir(parents=True, exist_ok=True)
         ws_dir = ws_root / "workspace"
 
         with patch("src.bot.react_loop.WORKSPACE_DIR", str(ws_root)):
             tool_log, buffered = await process_tool_calls(
-                executor, choice, [], "chat_1", ws_dir,
+                executor,
+                choice,
+                [],
+                "chat_1",
+                ws_dir,
             )
 
         # Find the tool persist entry (not the assistant message)
@@ -839,3 +1021,36 @@ class TestProcessToolCallsAdvanced:
         # Should be truncated
         assert len(tool_persist[0]["content"]) < len(large_result)
         assert "truncated" in tool_persist[0]["content"]
+
+
+# ── ToolLogEntry name validation tests ────────────────────────────────────────
+
+
+class TestToolLogEntryNameValidation:
+    """Tests for ToolLogEntry name length truncation (defense-in-depth)."""
+
+    def test_short_name_unchanged(self):
+        entry = ToolLogEntry(name="search", args={}, result="ok")
+        assert entry.name == "search"
+
+    def test_name_exactly_at_limit_unchanged(self):
+        name = "a" * MAX_TOOL_NAME_LENGTH
+        entry = ToolLogEntry(name=name, args={}, result="ok")
+        assert len(entry.name) == MAX_TOOL_NAME_LENGTH
+        assert entry.name == name
+
+    def test_name_beyond_limit_truncated(self):
+        long_name = "x" * (MAX_TOOL_NAME_LENGTH + 500)
+        entry = ToolLogEntry(name=long_name, args={}, result="ok")
+        assert len(entry.name) == MAX_TOOL_NAME_LENGTH
+        assert entry.name == "x" * MAX_TOOL_NAME_LENGTH
+
+    def test_empty_name_preserved(self):
+        entry = ToolLogEntry(name="", args={}, result="ok")
+        assert entry.name == ""
+
+    def test_frozen_after_truncation(self):
+        entry = ToolLogEntry(name="b" * 500, args={}, result="ok")
+        assert len(entry.name) == MAX_TOOL_NAME_LENGTH
+        with pytest.raises(AttributeError):
+            entry.name = "modified"  # type: ignore[misc]
