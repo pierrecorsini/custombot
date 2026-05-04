@@ -14,20 +14,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Optional
 
-from src.builder import BotComponents
-from src.channels.base import BaseChannel, IncomingMessage
-from src.config import Config
 from src.constants import CLEANUP_STEP_TIMEOUT, DEFAULT_CHANNEL_STARTUP_TIMEOUT
 from src.core.event_bus import EVENT_ERROR_OCCURRED, Event, get_event_bus
-from src.core.message_pipeline import MessageContext, MessagePipeline
+from src.core.message_pipeline import MessageContext
 from src.core.startup import StartupContext, StartupOrchestrator
 from src.core.errors import NonCriticalCategory, log_noncritical
-from src.lifecycle import ShutdownContext, _log_component_init, _log_component_ready, _log_startup_complete, perform_shutdown
+from src.lifecycle import (
+    ShutdownContext,
+    _log_component_init,
+    _log_component_ready,
+    _log_startup_complete,
+    perform_shutdown,
+)
 from src.logging.logging_config import (
     clear_correlation_id,
     get_correlation_id,
@@ -37,6 +39,11 @@ from src.monitoring import SessionMetrics
 from src.ui.cli_output import cli as cli_output
 
 if TYPE_CHECKING:
+    from src.core.message_pipeline import MessagePipeline
+    from src.config import Config
+    from src.channels.base import BaseChannel, IncomingMessage
+    from src.builder import BotComponents
+    from concurrent.futures import ThreadPoolExecutor
     from src.bot import Bot
     from src.config.config_watcher import ConfigWatcher
     from src.health import HealthServer
@@ -252,9 +259,7 @@ class Application:
         """Full lifecycle: startup → listen → shutdown."""
         startup_time = await self._startup()
 
-        poll_task = asyncio.create_task(
-            self.channel.start(self._on_message)
-        )
+        poll_task = asyncio.create_task(self.channel.start(self._on_message))
         _log_component_init("Message Poller", "started")
 
         # Wait for either successful connection or early channel exit,
@@ -294,7 +299,9 @@ class Application:
         _log_component_ready("Message Poller")
         self._initialized_components.append("Message Poller")
 
-        _log_startup_complete(startup_time, self._initialized_components, self.components.component_durations)
+        _log_startup_complete(
+            startup_time, self._initialized_components, self.components.component_durations
+        )
 
         try:
             cli_output.info("Listening...  (Ctrl+C to stop)")
@@ -303,25 +310,30 @@ class Application:
             category = _classify_main_loop_error(exc)
             log.error(
                 "Unexpected error in main loop [%s]: %s",
-                category, exc, exc_info=self._verbose,
+                category,
+                exc,
+                exc_info=self._verbose,
             )
             self._session_metrics.increment_errors()
             from src.monitoring.performance import get_metrics_collector
+
             get_metrics_collector().track_error()
 
             # Emit structured error event for monitoring subscribers.
             try:
-                await get_event_bus().emit(Event(
-                    name=EVENT_ERROR_OCCURRED,
-                    data={
-                        "category": category,
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                        "source": "main_loop",
-                    },
-                    source="Application.run",
-                    correlation_id=get_correlation_id(),
-                ))
+                await get_event_bus().emit(
+                    Event(
+                        name=EVENT_ERROR_OCCURRED,
+                        data={
+                            "category": category,
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc),
+                            "source": "main_loop",
+                        },
+                        source="Application.run",
+                        correlation_id=get_correlation_id(),
+                    )
+                )
             except Exception:
                 log_noncritical(
                     NonCriticalCategory.EVENT_EMISSION,
@@ -510,16 +522,18 @@ class Application:
                 # notified of pipeline failures.  Event emission itself must never
                 # break the error-handling path.
                 try:
-                    await get_event_bus().emit(Event(
-                        name=EVENT_ERROR_OCCURRED,
-                        data={
-                            "chat_id": msg.chat_id,
-                            "error_type": type(exc).__name__,
-                            "error_message": str(exc),
-                        },
-                        source="Application._on_message",
-                        correlation_id=get_correlation_id(),
-                    ))
+                    await get_event_bus().emit(
+                        Event(
+                            name=EVENT_ERROR_OCCURRED,
+                            data={
+                                "chat_id": msg.chat_id,
+                                "error_type": type(exc).__name__,
+                                "error_message": str(exc),
+                            },
+                            source="Application._on_message",
+                            correlation_id=get_correlation_id(),
+                        )
+                    )
                 except Exception:
                     log_noncritical(
                         NonCriticalCategory.EVENT_EMISSION,
@@ -543,69 +557,75 @@ class Application:
             # Startup never completed — nothing to clean up.
             return
 
-        # Stop config watcher before general shutdown
-        try:
-            await asyncio.wait_for(
-                state.config_watcher.stop(), timeout=CLEANUP_STEP_TIMEOUT
-            )
-        except asyncio.TimeoutError:
-            log_noncritical(
-                NonCriticalCategory.SHUTDOWN,
-                "Config watcher stop timed out after %.1fs",
-                CLEANUP_STEP_TIMEOUT,
-                logger=log,
-                level=logging.WARNING,
-                exc_info=False,
-                extra={
-                    "shutdown_step": "config_watcher_stop",
-                    "timeout_seconds": CLEANUP_STEP_TIMEOUT,
-                    "affected_components": ["config_watcher"],
-                },
-            )
-        except Exception as exc:
-            log.warning("Error stopping config watcher: %s", exc)
+        # Stop config watcher and workspace monitor concurrently —
+        # they are independent services with no ordering dependency.
+        async def _stop_config_watcher() -> None:
+            try:
+                await asyncio.wait_for(
+                    state.config_watcher.stop(), timeout=CLEANUP_STEP_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                log_noncritical(
+                    NonCriticalCategory.SHUTDOWN,
+                    "Config watcher stop timed out after %.1fs",
+                    CLEANUP_STEP_TIMEOUT,
+                    logger=log,
+                    level=logging.WARNING,
+                    exc_info=False,
+                    extra={
+                        "shutdown_step": "config_watcher_stop",
+                        "timeout_seconds": CLEANUP_STEP_TIMEOUT,
+                        "affected_components": ["config_watcher"],
+                    },
+                )
+            except Exception as exc:
+                log.warning("Error stopping config watcher: %s", exc)
 
-        # Stop workspace monitor before general shutdown
-        try:
-            await asyncio.wait_for(
-                state.workspace_monitor.stop(), timeout=CLEANUP_STEP_TIMEOUT
-            )
-        except asyncio.TimeoutError:
-            log_noncritical(
-                NonCriticalCategory.SHUTDOWN,
-                "Workspace monitor stop timed out after %.1fs",
-                CLEANUP_STEP_TIMEOUT,
-                logger=log,
-                level=logging.WARNING,
-                exc_info=False,
-                extra={
-                    "shutdown_step": "workspace_monitor_stop",
-                    "timeout_seconds": CLEANUP_STEP_TIMEOUT,
-                    "affected_components": ["workspace_monitor"],
-                },
-            )
-        except Exception as exc:
-            log.warning("Error stopping workspace monitor: %s", exc)
+        async def _stop_workspace_monitor() -> None:
+            try:
+                await asyncio.wait_for(
+                    state.workspace_monitor.stop(), timeout=CLEANUP_STEP_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                log_noncritical(
+                    NonCriticalCategory.SHUTDOWN,
+                    "Workspace monitor stop timed out after %.1fs",
+                    CLEANUP_STEP_TIMEOUT,
+                    logger=log,
+                    level=logging.WARNING,
+                    exc_info=False,
+                    extra={
+                        "shutdown_step": "workspace_monitor_stop",
+                        "timeout_seconds": CLEANUP_STEP_TIMEOUT,
+                        "affected_components": ["workspace_monitor"],
+                    },
+                )
+            except Exception as exc:
+                log.warning("Error stopping workspace monitor: %s", exc)
+
+        await asyncio.gather(_stop_config_watcher(), _stop_workspace_monitor())
 
         try:
             await asyncio.wait_for(
-                perform_shutdown(ShutdownContext(
-                    shutdown=state.shutdown_mgr,
-                    channel=state.channel,
-                    scheduler=state.scheduler,
-                    health_server=self._health_server,
-                    db=state.components.db,
-                    vector_memory=state.components.vector_memory,
-                    project_store=state.components.project_store,
-                    message_queue=state.components.message_queue,
-                    llm=state.components.llm,
-                    session_metrics=self._session_metrics.to_dict(),
-                    log=log,
-                    verbose=self._verbose,
-                    bot=state.components.bot,
-                    executor=state.executor,
-                    routing_engine=state.components.routing_engine,
-                )),
+                perform_shutdown(
+                    ShutdownContext(
+                        shutdown=state.shutdown_mgr,
+                        channel=state.channel,
+                        scheduler=state.scheduler,
+                        health_server=self._health_server,
+                        db=state.components.db,
+                        vector_memory=state.components.vector_memory,
+                        project_store=state.components.project_store,
+                        message_queue=state.components.message_queue,
+                        llm=state.components.llm,
+                        session_metrics=self._session_metrics.to_dict(),
+                        log=log,
+                        verbose=self._verbose,
+                        bot=state.components.bot,
+                        executor=state.executor,
+                        routing_engine=state.components.routing_engine,
+                    )
+                ),
                 timeout=CLEANUP_STEP_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -620,9 +640,17 @@ class Application:
                     "shutdown_step": "perform_shutdown",
                     "timeout_seconds": CLEANUP_STEP_TIMEOUT,
                     "affected_components": [
-                        "channel", "scheduler", "health_server", "db",
-                        "vector_memory", "project_store", "message_queue",
-                        "llm", "bot", "executor", "routing_engine",
+                        "channel",
+                        "scheduler",
+                        "health_server",
+                        "db",
+                        "vector_memory",
+                        "project_store",
+                        "message_queue",
+                        "llm",
+                        "bot",
+                        "executor",
+                        "routing_engine",
                     ],
                 },
             )
