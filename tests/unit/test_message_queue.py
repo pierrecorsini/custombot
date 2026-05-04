@@ -33,6 +33,7 @@ from src.message_queue import (
     QueuedMessage,
     get_message_queue,
 )
+from src.message_queue_persistence import _decode_line
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers: lightweight IncomingMessage stand-in
@@ -101,6 +102,13 @@ def make_queued(
         created_at=created_at or time.time(),
         updated_at=updated_at or time.time(),
     )
+
+
+def decode_queue_line(line: str) -> Dict[str, Any]:
+    """Decode a queue-file line (msgpack+base64 or legacy JSON)."""
+    data = _decode_line(line, log_errors=False)
+    assert data is not None, f"Failed to decode queue line: {line[:80]!r}"
+    return data
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -297,9 +305,7 @@ class TestQueuedMessageFromIncomingMessage:
 
     def test_empty_channel_type_preserved(self):
         """When IncomingMessage has empty channel_type, QueuedMessage.channel is empty."""
-        incoming = FakeIncomingMessage(
-            message_id="m1", chat_id="c1", text="hi", channel_type=""
-        )
+        incoming = FakeIncomingMessage(message_id="m1", chat_id="c1", text="hi", channel_type="")
         msg = QueuedMessage.from_incoming_message(incoming)
         assert msg.channel == ""
 
@@ -513,7 +519,7 @@ class TestMessageQueueEnqueue:
 
         await queue.enqueue(make_incoming(message_id="a1"))
         await queue.enqueue(make_incoming(message_id="a2"))
-        await queue._flush_write_buffer()
+        await queue._flush_mgr.flush_write_buffer()
 
         qfile = data_dir / "message_queue.jsonl"
         lines = qfile.read_text(encoding="utf-8").strip().splitlines()
@@ -605,8 +611,7 @@ class TestMessageQueueTextTruncation:
             msg_id = f"len-{extra}"
             msg = await queue.enqueue(make_incoming(message_id=msg_id, text=text))
             assert len(msg.text) == MAX_QUEUED_TEXT_LENGTH, (
-                f"Expected {MAX_QUEUED_TEXT_LENGTH} chars for extra={extra}, "
-                f"got {len(msg.text)}"
+                f"Expected {MAX_QUEUED_TEXT_LENGTH} chars for extra={extra}, got {len(msg.text)}"
             )
         await queue.close()
 
@@ -683,12 +688,12 @@ class TestMessageQueueComplete:
         await queue.enqueue(make_incoming(message_id="x1"))
 
         qfile = data_dir / "message_queue.jsonl"
-        await queue._flush_write_buffer()
+        await queue._flush_mgr.flush_write_buffer()
         lines_before = qfile.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines_before) >= 1
 
         await queue.complete("x1")
-        await queue._flush_write_buffer()
+        await queue._flush_mgr.flush_write_buffer()
 
         lines_after = qfile.read_text(encoding="utf-8").strip().splitlines()
         # After complete, a completion marker is appended (append-only design)
@@ -843,7 +848,7 @@ class TestMessageQueueRecoverStale:
 
         old_msg = make_queued(message_id="stale-persist", updated_at=time.time() - 600)
         queue._pending["stale-persist"] = old_msg
-        await queue._append_to_queue(old_msg)
+        await queue._flush_mgr.append_to_queue(old_msg)
 
         await queue.recover_stale(timeout_seconds=300)
 
@@ -1010,7 +1015,7 @@ class TestMessageQueuePersistence:
 
         await queue.enqueue(make_incoming(message_id="a1"))
         await queue.enqueue(make_incoming(message_id="a2"))
-        await queue._flush_write_buffer()
+        await queue._flush_mgr.flush_write_buffer()
 
         qfile = data_dir / "message_queue.jsonl"
         lines = qfile.read_text(encoding="utf-8").strip().splitlines()
@@ -1032,7 +1037,7 @@ class TestMessageQueuePersistence:
 
         # Complete one — appends completion marker
         await queue.complete("r1")
-        await queue._flush_write_buffer()
+        await queue._flush_mgr.flush_write_buffer()
 
         # File should contain 2 enqueue entries + 1 completion marker
         qfile = data_dir / "message_queue.jsonl"
@@ -1271,7 +1276,7 @@ class TestEdgeCases:
         )
         await queue.enqueue(make_incoming(message_id="remove-1"))
         await queue.complete("remove-1")
-        await queue._flush_write_buffer()
+        await queue._flush_mgr.flush_write_buffer()
 
         qfile = data_dir / "message_queue.jsonl"
         lines = qfile.read_text(encoding="utf-8").strip().splitlines()
@@ -1296,8 +1301,7 @@ class TestEagerEviction:
         pending_msg = make_queued(message_id="pend-1", status=MessageStatus.PENDING)
         completed_msg = make_queued(message_id="done-1", status=MessageStatus.COMPLETED)
         qfile.write_text(
-            json.dumps(pending_msg.to_dict()) + "\n"
-            + json.dumps(completed_msg.to_dict()) + "\n",
+            json.dumps(pending_msg.to_dict()) + "\n" + json.dumps(completed_msg.to_dict()) + "\n",
             encoding="utf-8",
         )
 
@@ -1320,8 +1324,7 @@ class TestEagerEviction:
         completed_a = make_queued(message_id="done-a", status=MessageStatus.COMPLETED)
         completed_b = make_queued(message_id="done-b", status=MessageStatus.COMPLETED)
         qfile.write_text(
-            json.dumps(completed_a.to_dict()) + "\n"
-            + json.dumps(completed_b.to_dict()) + "\n",
+            json.dumps(completed_a.to_dict()) + "\n" + json.dumps(completed_b.to_dict()) + "\n",
             encoding="utf-8",
         )
 
@@ -1341,9 +1344,7 @@ class TestEagerEviction:
 
         msg1 = make_queued(message_id="p1", status=MessageStatus.PENDING)
         msg2 = make_queued(message_id="p2", status=MessageStatus.PENDING)
-        original_content = (
-            json.dumps(msg1.to_dict()) + "\n" + json.dumps(msg2.to_dict()) + "\n"
-        )
+        original_content = json.dumps(msg1.to_dict()) + "\n" + json.dumps(msg2.to_dict()) + "\n"
         qfile.write_text(original_content, encoding="utf-8")
 
         queue = MessageQueue(str(data_dir))
@@ -1388,8 +1389,7 @@ class TestEagerEviction:
         pending_msg = make_queued(message_id="survive-1", status=MessageStatus.PENDING)
         completed_msg = make_queued(message_id="gone-1", status=MessageStatus.COMPLETED)
         qfile.write_text(
-            json.dumps(completed_msg.to_dict()) + "\n"
-            + json.dumps(pending_msg.to_dict()) + "\n",
+            json.dumps(completed_msg.to_dict()) + "\n" + json.dumps(pending_msg.to_dict()) + "\n",
             encoding="utf-8",
         )
 
@@ -1413,11 +1413,13 @@ class TestEagerEviction:
         qfile = data_dir / "message_queue.jsonl"
 
         pending_msg = make_queued(message_id="p1", status=MessageStatus.PENDING)
-        completion_marker = json.dumps({
-            "message_id": "old-1",
-            "status": "completed",
-            "completed_at": time.time(),
-        })
+        completion_marker = json.dumps(
+            {
+                "message_id": "old-1",
+                "status": "completed",
+                "completed_at": time.time(),
+            }
+        )
         qfile.write_text(
             json.dumps(pending_msg.to_dict()) + "\n" + completion_marker + "\n",
             encoding="utf-8",
@@ -1518,11 +1520,7 @@ class TestCrashRecoveryCorruptedJsonl:
         qfile = data_dir / "message_queue.jsonl"
 
         valid_msg = make_queued(message_id="survives-1")
-        lines = (
-            json.dumps(valid_msg.to_dict()) + "\n"
-            + "\x00\x01\x02\x03\n"
-            + "NOT JSON AT ALL\n"
-        )
+        lines = json.dumps(valid_msg.to_dict()) + "\n" + "\x00\x01\x02\x03\n" + "NOT JSON AT ALL\n"
         qfile.write_bytes(lines.encode("utf-8", errors="replace"))
 
         queue = MessageQueue(str(data_dir))
@@ -1542,9 +1540,7 @@ class TestCrashRecoveryCorruptedJsonl:
         missing_text = json.dumps({"message_id": "no-text", "chat_id": "c1"})
         missing_id = json.dumps({"chat_id": "c1", "text": "no id"})
         qfile.write_text(
-            json.dumps(valid_msg.to_dict()) + "\n"
-            + missing_text + "\n"
-            + missing_id + "\n",
+            json.dumps(valid_msg.to_dict()) + "\n" + missing_text + "\n" + missing_id + "\n",
             encoding="utf-8",
         )
 
@@ -1579,9 +1575,11 @@ class TestCrashRecoveryCorruptedJsonl:
         msg_b = make_queued(message_id="inter-b")
         qfile.write_text(
             "CORRUPT LINE\n"
-            + json.dumps(msg_a.to_dict()) + "\n"
+            + json.dumps(msg_a.to_dict())
             + "\n"
-            + json.dumps(msg_b.to_dict()) + "\n"
+            + "\n"
+            + json.dumps(msg_b.to_dict())
+            + "\n"
             + "{'single': 'quoted'}\n",
             encoding="utf-8",
         )
@@ -1603,8 +1601,7 @@ class TestCrashRecoveryCorruptedJsonl:
         first = make_queued(message_id="dup-1", text="first version")
         second = make_queued(message_id="dup-1", text="second version")
         qfile.write_text(
-            json.dumps(first.to_dict()) + "\n"
-            + json.dumps(second.to_dict()) + "\n",
+            json.dumps(first.to_dict()) + "\n" + json.dumps(second.to_dict()) + "\n",
             encoding="utf-8",
         )
 
@@ -1653,9 +1650,7 @@ class TestCrashRecoveryConcurrentCompaction:
         assert await queue.get_pending_count() == 10
 
         # Complete all concurrently — should trigger 2 compactions (at 5th and 10th)
-        results = await asyncio.gather(
-            *[queue.complete(f"comp-{i}") for i in range(10)]
-        )
+        results = await asyncio.gather(*[queue.complete(f"comp-{i}") for i in range(10)])
         assert all(r is True for r in results)
         assert await queue.get_pending_count() == 0
         assert queue._completed_since_compact == 0
@@ -1679,10 +1674,7 @@ class TestCrashRecoveryConcurrentCompaction:
             await queue.enqueue(make_incoming(message_id=f"eac-{i}"))
 
         # Phase 2: concurrently enqueue 10 more while completing first 10
-        enq_tasks = [
-            queue.enqueue(make_incoming(message_id=f"eac-new-{i}"))
-            for i in range(10)
-        ]
+        enq_tasks = [queue.enqueue(make_incoming(message_id=f"eac-new-{i}")) for i in range(10)]
         comp_tasks = [queue.complete(f"eac-{i}") for i in range(10)]
 
         await asyncio.gather(*enq_tasks, *comp_tasks)
@@ -1833,9 +1825,7 @@ class TestCrashRecoveryStaleBoundary:
         )
 
         # Clearly fresh (just enqueued)
-        queue._pending["fresh"] = make_queued(
-            message_id="fresh", updated_at=time.time() - 1
-        )
+        queue._pending["fresh"] = make_queued(message_id="fresh", updated_at=time.time() - 1)
 
         stale = await queue.recover_stale(timeout_seconds=timeout)
         stale_ids = {m.message_id for m in stale}
@@ -1857,9 +1847,7 @@ class TestCrashRecoveryStaleBoundary:
         )
 
         # Message from 0.001 seconds ago — also stale
-        queue._pending["ms-ago"] = make_queued(
-            message_id="ms-ago", updated_at=time.time() - 0.001
-        )
+        queue._pending["ms-ago"] = make_queued(message_id="ms-ago", updated_at=time.time() - 0.001)
 
         stale = await queue.recover_stale(timeout_seconds=0)
         assert len(stale) == 2
@@ -1871,9 +1859,7 @@ class TestCrashRecoveryStaleBoundary:
         queue = MessageQueue(str(tmp_path / "data"))
         await queue.connect()
 
-        queue._pending["recent-1"] = make_queued(
-            message_id="recent-1", updated_at=time.time() - 1
-        )
+        queue._pending["recent-1"] = make_queued(message_id="recent-1", updated_at=time.time() - 1)
 
         stale = await queue.recover_stale(timeout_seconds=999_999_999)
         assert len(stale) == 0
@@ -1929,7 +1915,7 @@ class TestConcurrentEnqueueCompleteRaceConditions:
         assert len(chat_pending) == 30
 
         # JSONL file must have 30 lines, all valid
-        await queue._flush_write_buffer()
+        await queue._flush_mgr.flush_write_buffer()
         qfile = tmp_path / "data" / "message_queue.jsonl"
         lines = qfile.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 30
@@ -1950,16 +1936,12 @@ class TestConcurrentEnqueueCompleteRaceConditions:
 
         # Pre-enqueue 20 messages for the same chat
         for i in range(20):
-            await queue.enqueue(
-                make_incoming(message_id=f"inter-{i}", chat_id="chat-Y")
-            )
+            await queue.enqueue(make_incoming(message_id=f"inter-{i}", chat_id="chat-Y"))
 
         # Concurrently: complete first 10, enqueue 5 new ones
         complete_tasks = [queue.complete(f"inter-{i}") for i in range(10)]
         enqueue_tasks = [
-            queue.enqueue(
-                make_incoming(message_id=f"inter-new-{i}", chat_id="chat-Y")
-            )
+            queue.enqueue(make_incoming(message_id=f"inter-new-{i}", chat_id="chat-Y"))
             for i in range(5)
         ]
 
@@ -2010,9 +1992,7 @@ class TestConcurrentEnqueueCompleteRaceConditions:
         await asyncio.sleep(0)
 
         # Complete messages on the first queue — will serialize after connect's lock
-        complete_results = await asyncio.gather(
-            *[queue.complete(f"load-{i}") for i in range(5)]
-        )
+        complete_results = await asyncio.gather(*[queue.complete(f"load-{i}") for i in range(5)])
 
         # Wait for connect to finish
         await connect_task
@@ -2094,9 +2074,7 @@ class TestConcurrentEnqueueCompleteRaceConditions:
 
         # Complete 10 concurrently (2 compactions at thresholds 5 and 10)
         # while 5 messages remain pending
-        results = await asyncio.gather(
-            *[queue.complete(f"race-{i}") for i in range(10)]
-        )
+        results = await asyncio.gather(*[queue.complete(f"race-{i}") for i in range(10)])
 
         assert all(r is True for r in results)
         assert await queue.get_pending_count() == 5
@@ -2181,9 +2159,7 @@ class TestConcurrentEnqueueCompleteRaceConditions:
             await queue.enqueue(make_incoming(message_id=f"stress-{i}"))
 
         # Complete all 20 concurrently — triggers 5 compactions
-        results = await asyncio.gather(
-            *[queue.complete(f"stress-{i}") for i in range(20)]
-        )
+        results = await asyncio.gather(*[queue.complete(f"stress-{i}") for i in range(20)])
         assert all(r is True for r in results)
         assert await queue.get_pending_count() == 0
 
@@ -2214,9 +2190,7 @@ class TestConcurrentEnqueueCompleteRaceConditions:
             await queue.enqueue(make_incoming(message_id=f"cpenq-{i}"))
 
         # Complete 2 to trigger compaction, while simultaneously enqueueing a new one
-        compaction_tasks = [
-            queue.complete(f"cpenq-{i}") for i in range(2)
-        ]
+        compaction_tasks = [queue.complete(f"cpenq-{i}") for i in range(2)]
         enqueue_task = queue.enqueue(
             make_incoming(message_id="cpenq-new", chat_id="chat-Z", text="late arrival")
         )
@@ -2270,7 +2244,11 @@ _metadata_strategy = st.dictionaries(
 # Core strategy for generating QueuedMessage instances
 _queued_message_strategy = st.builds(
     QueuedMessage,
-    message_id=st.text(min_size=1, max_size=200, alphabet=st.characters(whitelist_categories=("L", "N"), whitelist_characters="-_.@")),
+    message_id=st.text(
+        min_size=1,
+        max_size=200,
+        alphabet=st.characters(whitelist_categories=("L", "N"), whitelist_characters="-_.@"),
+    ),
     chat_id=st.text(min_size=1, max_size=200, alphabet=_CHAT_ID_ALPHABET),
     text=st.text(min_size=0, max_size=5000),
     sender_id=st.one_of(st.none(), st.text(min_size=0, max_size=200)),
@@ -2278,12 +2256,8 @@ _queued_message_strategy = st.builds(
     channel=st.one_of(st.none(), st.text(min_size=0, max_size=50)),
     metadata=_metadata_strategy,
     status=_status_strategy,
-    created_at=st.floats(
-        min_value=0, max_value=2**53, allow_nan=False, allow_infinity=False
-    ),
-    updated_at=st.floats(
-        min_value=0, max_value=2**53, allow_nan=False, allow_infinity=False
-    ),
+    created_at=st.floats(min_value=0, max_value=2**53, allow_nan=False, allow_infinity=False),
+    updated_at=st.floats(min_value=0, max_value=2**53, allow_nan=False, allow_infinity=False),
 )
 
 
@@ -2355,9 +2329,7 @@ class TestQueuedMessagePropertyRoundTrip:
         chat_id=st.text(min_size=1, max_size=500, alphabet=_CHAT_ID_ALPHABET),
     )
     @settings(max_examples=100)
-    def test_text_field_fidelity(
-        self, text: str, message_id: str, chat_id: str
-    ):
+    def test_text_field_fidelity(self, text: str, message_id: str, chat_id: str):
         """Arbitrary text content (including Unicode, empty) survives round-trip."""
         msg = QueuedMessage(message_id=message_id, chat_id=chat_id, text=text)
         restored = QueuedMessage.from_dict(msg.to_dict())
@@ -2369,9 +2341,7 @@ class TestQueuedMessagePropertyRoundTrip:
     @settings(max_examples=100)
     def test_metadata_fidelity(self, metadata: dict):
         """Arbitrary metadata dicts survive round-trip via JSON."""
-        msg = QueuedMessage(
-            message_id="meta-test", chat_id="c1", text="t", metadata=metadata
-        )
+        msg = QueuedMessage(message_id="meta-test", chat_id="c1", text="t", metadata=metadata)
         # Full JSON round-trip (not just to_dict/from_dict)
         serialized = json.dumps(msg.to_dict(), ensure_ascii=False)
         restored = QueuedMessage.from_dict(json.loads(serialized))
@@ -2411,10 +2381,12 @@ class TestLoadPendingFileCorruptionRecovery:
         valid_after = make_queued(message_id="after-binary")
 
         content = (
-            json.dumps(valid_before.to_dict()) + "\n"
+            json.dumps(valid_before.to_dict())
+            + "\n"
             + "\x00\x01\x02\x03\x04\x05\n"  # null/control chars — valid UTF-8, not JSON
             + "NOT JSON GARBAGE \x10\x11\x12\n"  # more garbage with control chars
-            + json.dumps(valid_after.to_dict()) + "\n"
+            + json.dumps(valid_after.to_dict())
+            + "\n"
         )
         qfile.write_text(content, encoding="utf-8")
 
@@ -2470,11 +2442,13 @@ class TestLoadPendingFileCorruptionRecovery:
 
         # Completion markers as written by _append_completion()
         markers = [
-            json.dumps({
-                "message_id": f"msg-{i}",
-                "status": "completed",
-                "completed_at": time.time() - i,
-            })
+            json.dumps(
+                {
+                    "message_id": f"msg-{i}",
+                    "status": "completed",
+                    "completed_at": time.time() - i,
+                }
+            )
             for i in range(5)
         ]
         qfile.write_text("\n".join(markers) + "\n", encoding="utf-8")
@@ -2565,19 +2539,26 @@ class TestLoadPendingFileCorruptionRecovery:
         valid_a = make_queued(message_id="mix-valid-a", chat_id="chat-1", text="hello")
         valid_b = make_queued(message_id="mix-valid-b", chat_id="chat-2", text="world")
         valid_c = make_queued(message_id="mix-valid-c", chat_id="chat-1", text="test")
-        completion_marker = json.dumps({
-            "message_id": "mix-completed",
-            "status": "completed",
-            "completed_at": time.time(),
-        })
+        completion_marker = json.dumps(
+            {
+                "message_id": "mix-completed",
+                "status": "completed",
+                "completed_at": time.time(),
+            }
+        )
 
         content = (
-            json.dumps(valid_a.to_dict()) + "\n"
-            + b"\x00\x01\x02".decode("utf-8", errors="replace") + "\n"
-            + completion_marker + "\n"
-            + json.dumps(valid_b.to_dict()) + "\n"
+            json.dumps(valid_a.to_dict())
+            + "\n"
+            + b"\x00\x01\x02".decode("utf-8", errors="replace")
+            + "\n"
+            + completion_marker
+            + "\n"
+            + json.dumps(valid_b.to_dict())
+            + "\n"
             + "CORRUPT NOT JSON\n"
-            + json.dumps(valid_c.to_dict()) + "\n"
+            + json.dumps(valid_c.to_dict())
+            + "\n"
             + '{"message_id": "truncated", "chat_id"'  # no trailing newline
         )
 
@@ -2623,8 +2604,7 @@ class TestOrphanedTmpRecovery:
 
         # Write valid data ONLY to .tmp (main doesn't exist)
         tmp_file.write_text(
-            json.dumps(msg_a.to_dict()) + "\n"
-            + json.dumps(msg_b.to_dict()) + "\n",
+            json.dumps(msg_a.to_dict()) + "\n" + json.dumps(msg_b.to_dict()) + "\n",
             encoding="utf-8",
         )
 
@@ -2682,7 +2662,8 @@ class TestOrphanedTmpRecovery:
 
         valid_msg = make_queued(message_id="partial-ok", text="survives")
         tmp_file.write_text(
-            json.dumps(valid_msg.to_dict()) + "\n"
+            json.dumps(valid_msg.to_dict())
+            + "\n"
             + "CORRUPT LINE\n"
             + '{"message_id": "truncated", "chat_i',
             encoding="utf-8",
@@ -2712,10 +2693,7 @@ class TestBackupOnCorruption:
         qfile = data_dir / "message_queue.jsonl"
 
         valid_msg = make_queued(message_id="backup-ok")
-        original_content = (
-            json.dumps(valid_msg.to_dict()) + "\n"
-            + "CORRUPT LINE\n"
-        )
+        original_content = json.dumps(valid_msg.to_dict()) + "\n" + "CORRUPT LINE\n"
         qfile.write_text(original_content, encoding="utf-8")
 
         queue = MessageQueue(str(data_dir))
@@ -2761,9 +2739,11 @@ class TestBackupOnCorruption:
         valid_a = make_queued(message_id="keep-a", text="hello")
         valid_b = make_queued(message_id="keep-b", text="world")
         original_content = (
-            json.dumps(valid_a.to_dict()) + "\n"
+            json.dumps(valid_a.to_dict())
+            + "\n"
             + "GARBAGE\n"
-            + json.dumps(valid_b.to_dict()) + "\n"
+            + json.dumps(valid_b.to_dict())
+            + "\n"
             + '{"partial":\n'
         )
         qfile.write_text(original_content, encoding="utf-8")
@@ -2817,9 +2797,7 @@ class TestQueueCorruptionResult:
 
         valid = make_queued(message_id="ok-1")
         qfile.write_text(
-            json.dumps(valid.to_dict()) + "\n"
-            + "CORRUPT LINE\n"
-            + '{"partial":\n',
+            json.dumps(valid.to_dict()) + "\n" + "CORRUPT LINE\n" + '{"partial":\n',
             encoding="utf-8",
         )
 
@@ -2904,11 +2882,7 @@ class TestValidateMethod:
         qfile = data_dir / "message_queue.jsonl"
 
         valid = make_queued(message_id="v-ok-2")
-        original_content = (
-            json.dumps(valid.to_dict()) + "\n"
-            + "GARBAGE\n"
-            + '{"truncated":\n'
-        )
+        original_content = json.dumps(valid.to_dict()) + "\n" + "GARBAGE\n" + '{"truncated":\n'
 
         queue = MessageQueue(str(data_dir))
         await queue.connect()
@@ -2984,9 +2958,11 @@ class TestRepairMethod:
         valid_a = make_queued(message_id="repair-ok-a", text="hello")
         valid_b = make_queued(message_id="repair-ok-b", text="world")
         original = (
-            json.dumps(valid_a.to_dict()) + "\n"
+            json.dumps(valid_a.to_dict())
+            + "\n"
             + "CORRUPT\n"
-            + json.dumps(valid_b.to_dict()) + "\n"
+            + json.dumps(valid_b.to_dict())
+            + "\n"
             + '{"partial":\n'
         )
 
@@ -3021,9 +2997,7 @@ class TestRepairMethod:
         qfile = data_dir / "message_queue.jsonl"
 
         valid = make_queued(message_id="repair-bak")
-        corrupted_content = (
-            json.dumps(valid.to_dict()) + "\n" + "BAD LINE\n"
-        )
+        corrupted_content = json.dumps(valid.to_dict()) + "\n" + "BAD LINE\n"
 
         queue = MessageQueue(str(data_dir))
         await queue.connect()
@@ -3073,9 +3047,7 @@ class TestRepairMethod:
             sender_id="sender-x",
             sender_name="Alice",
         )
-        corrupted_content = (
-            json.dumps(valid.to_dict()) + "\n" + "GARBAGE\n"
-        )
+        corrupted_content = json.dumps(valid.to_dict()) + "\n" + "GARBAGE\n"
 
         queue = MessageQueue(str(data_dir))
         await queue.connect()
@@ -3101,9 +3073,7 @@ class TestRepairMethod:
         qfile = data_dir / "message_queue.jsonl"
 
         valid = make_queued(message_id="repair-then-val")
-        corrupted_content = (
-            json.dumps(valid.to_dict()) + "\n" + "BAD\n"
-        )
+        corrupted_content = json.dumps(valid.to_dict()) + "\n" + "BAD\n"
 
         queue = MessageQueue(str(data_dir))
         await queue.connect()
@@ -3135,9 +3105,7 @@ class TestAppendDurability:
         queue = MessageQueue(str(data_dir))
         await queue.connect()
 
-        msg = await queue.enqueue(
-            make_incoming(message_id="dur-1", text="durable message")
-        )
+        msg = await queue.enqueue(make_incoming(message_id="dur-1", text="durable message"))
         await queue.close()
 
         # Read file directly — must contain the enqueued message
@@ -3155,7 +3123,7 @@ class TestAppendDurability:
 
         await queue.enqueue(make_incoming(message_id="dur-comp-1"))
         await queue.complete("dur-comp-1")
-        await queue._flush_write_buffer()
+        await queue._flush_mgr.flush_write_buffer()
 
         # Don't close — check disk state immediately after complete
         qfile = data_dir / "message_queue.jsonl"
@@ -3190,7 +3158,7 @@ class TestAppendDurability:
         await queue.enqueue(make_incoming(message_id="retry-1"))
 
         # Flush normally so buffer is empty
-        await queue._flush_write_buffer()
+        await queue._flush_mgr.flush_write_buffer()
 
         # Enqueue two more messages so the buffer has content
         await queue.enqueue(make_incoming(message_id="retry-2"))
@@ -3212,14 +3180,14 @@ class TestAppendDurability:
         queue._persistence.flush_buffer = failing_flush_buffer
 
         # The inline flush should NOT raise — lines are re-buffered
-        await queue._flush_write_buffer()
+        await queue._flush_mgr.flush_write_buffer()
 
         # Message is still in pending (never lost from memory)
         assert "retry-2" in queue._pending
         assert "retry-3" in queue._pending
 
         # The re-buffered lines should be flushed on the next successful call
-        await queue._flush_write_buffer()
+        await queue._flush_mgr.flush_write_buffer()
 
         # Verify the data reached disk after retry
         qfile = data_dir / "message_queue.jsonl"

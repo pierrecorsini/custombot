@@ -42,10 +42,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
 
 from src.constants import MAX_QUEUED_TEXT_LENGTH
-from src.core.errors import NonCriticalCategory, log_noncritical
 from src.db.db_utils import _validate_chat_id
+from src.message_queue_buffer import FlushManager
 from src.message_queue_persistence import QueuePersistence
-from src.utils import json_dumps
 from src.utils.locking import AsyncLockMixin
 
 if TYPE_CHECKING:
@@ -233,8 +232,8 @@ class MessageQueue(AsyncLockMixin):
         # Populated after connect() with structured corruption metadata.
         self._last_corruption_result: Optional[QueueCorruptionResult] = None
 
-        # Background task that periodically flushes the write buffer.
-        self._flush_task: Optional[asyncio.Task[None]] = None
+        # Buffer/flush manager — owns the write buffer and background flush loop.
+        self._flush_mgr = FlushManager(self._lock, self._persistence, self._pending)
 
     async def connect(self) -> None:
         """
@@ -246,14 +245,16 @@ class MessageQueue(AsyncLockMixin):
         self._dir.mkdir(parents=True, exist_ok=True)
 
         pending, corruption = await asyncio.to_thread(self._persistence.load_pending)
-        self._pending = pending
+        # Update in-place so FlushManager's shared reference stays valid.
+        self._pending.clear()
+        self._pending.update(pending)
         self._last_corruption_result = corruption
 
         self._initialized = True
 
         # Start background flush loop to drain buffered writes on the
         # time-interval boundary during idle periods.
-        self._flush_task = asyncio.create_task(self._flush_loop())
+        self._flush_mgr.start()
 
         log.info(
             "Message queue initialized with %d pending messages",
@@ -269,16 +270,10 @@ class MessageQueue(AsyncLockMixin):
         """
         # Cancel background flush loop first so it doesn't race with
         # the final flush below.
-        if self._flush_task is not None:
-            self._flush_task.cancel()
-            try:
-                await self._flush_task
-            except asyncio.CancelledError:
-                pass
-            self._flush_task = None
+        await self._flush_mgr.stop()
 
         async with self._lock:
-            await self._persist_pending()
+            await self._flush_mgr.persist_pending()
 
         self._initialized = False
         log.info("Message queue closed, persisted %d pending messages", len(self._pending))
@@ -326,7 +321,7 @@ class MessageQueue(AsyncLockMixin):
 
         async with self._lock:
             self._pending[queued.message_id] = queued
-            await self._append_to_queue(queued)
+            await self._flush_mgr.append_to_queue(queued)
 
         log.debug(
             "Enqueued message %s for chat %s",
@@ -361,11 +356,11 @@ class MessageQueue(AsyncLockMixin):
 
             # Compact (full rewrite) only when threshold is reached
             if self._completed_since_compact >= self._compact_threshold:
-                await self._persist_pending()
+                await self._flush_mgr.persist_pending()
                 self._completed_since_compact = 0
             else:
                 # Append-only: write a completion marker
-                await self._append_completion(message_id)
+                await self._flush_mgr.append_completion(message_id)
 
         log.debug("Completed message %s", message_id)
         return True
@@ -411,7 +406,7 @@ class MessageQueue(AsyncLockMixin):
                 for msg in stale_messages:
                     del self._pending[msg.message_id]
 
-                await self._persist_pending()
+                await self._flush_mgr.persist_pending()
 
         return stale_messages
 
@@ -490,120 +485,6 @@ class MessageQueue(AsyncLockMixin):
                 result.valid_lines,
             )
             return result
-
-    # ── persistence delegation ──────────────────────────────────────────────
-
-    async def _append_to_queue(self, msg: QueuedMessage) -> None:
-        """Buffer a message line for batched write via persistence layer."""
-        try:
-            line = json_dumps(msg.to_dict(), ensure_ascii=False) + "\n"
-            self._persistence.buffer_line(line)
-            await self._maybe_flush_buffer()
-        except Exception as exc:
-            log.error("Failed to append to queue file: %s", exc)
-            raise
-
-    async def _append_completion(self, message_id: str) -> None:
-        """Buffer a completion marker for batched write via persistence layer."""
-        try:
-            entry = (
-                json_dumps(
-                    {
-                        "message_id": message_id,
-                        "status": "completed",
-                        "completed_at": time.time(),
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-            self._persistence.buffer_line(entry)
-            await self._maybe_flush_buffer()
-        except Exception as exc:
-            log.error("Failed to append completion to queue file: %s", exc)
-            # Fall back to full persist on error
-            self._persistence.clear_buffer()
-            await self._persist_pending()
-
-    async def _maybe_flush_buffer(self) -> None:
-        """Flush write buffer if a threshold is met."""
-        if self._persistence.should_flush():
-            await self._flush_write_buffer()
-
-    async def _flush_write_buffer(self) -> None:
-        """Flush all buffered lines to disk via persistence layer.
-
-        On I/O failure (e.g. disk full), the persistence layer re-buffers
-        the failed lines.  We log a warning and suppress the error so that
-        ``enqueue`` / ``complete`` callers don't lose messages — the lines
-        will be retried on the next flush cycle.
-        """
-        if not self._persistence.write_buffer:
-            return
-        try:
-            await asyncio.to_thread(self._persistence.flush_buffer)
-        except Exception as exc:
-            log.warning(
-                "Flush failed, %d lines re-buffered for retry: %s",
-                len(self._persistence.write_buffer),
-                exc,
-            )
-
-    async def _flush_loop(self) -> None:
-        """Background coroutine that drains the write buffer on a timer.
-
-        Ensures buffered writes are persisted within the fsync interval even
-        when no new enqueue calls arrive (e.g. during idle periods).
-
-        Uses the swap-buffers pattern: atomically detaches the write buffer
-        under the lock (fast pointer swap), then flushes the detached buffer
-        to disk *without* holding the lock.  This prevents enqueue/complete
-        calls from blocking behind an fsync syscall under burst traffic.
-        """
-        try:
-            while True:
-                await asyncio.sleep(self._persistence.fsync_interval)
-                if self._persistence.write_buffer:
-                    # Swap: detach the buffer under lock (O(1) pointer swap)
-                    async with self._lock:
-                        lines = self._persistence.swap_buffer()
-                    # Flush the detached buffer without the lock — enqueue/
-                    # complete can proceed against the fresh buffer immediately.
-                    if lines:
-                        try:
-                            await asyncio.to_thread(
-                                self._persistence.flush_lines, lines
-                            )
-                        except Exception as exc:
-                            log.warning(
-                                "Background flush failed, re-buffering %d lines: %s",
-                                len(lines),
-                                exc,
-                            )
-                            async with self._lock:
-                                self._persistence.rebuffer_lines(lines)
-        except asyncio.CancelledError:
-            # Expected during close() — suppress gracefully.
-            return
-
-    async def _persist_pending(self) -> None:
-        """Atomically persist all pending messages to queue file."""
-        try:
-            await asyncio.to_thread(
-                self._persistence.persist_messages, self._pending.values()
-            )
-            log.debug("Persisted %d pending messages", len(self._pending))
-        except Exception as exc:
-            log.error("Failed to persist queue: %s", exc)
-            try:
-                await asyncio.to_thread(self._persistence.cleanup_temp_file)
-            except Exception:
-                log_noncritical(
-                    NonCriticalCategory.QUEUE_OPERATION,
-                    "Failed to clean up temp queue file",
-                    logger=log,
-                )
-            raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
