@@ -17,6 +17,7 @@ Usage:
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import time
 from contextlib import asynccontextmanager, contextmanager
@@ -88,7 +89,7 @@ class OperationTimer:
     """
     Synchronous context manager for timing operations.
 
-    Measures elapsed time using perf_counter for high precision.
+    Measures elapsed time using monotonic clock for high precision.
     Can be used directly or via the @timed decorator.
 
     Attributes:
@@ -127,12 +128,12 @@ class OperationTimer:
 
     def __enter__(self) -> "OperationTimer":
         """Start timing."""
-        self._start = time.perf_counter()
+        self._start = time.monotonic()
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
         """Stop timing and log result."""
-        self._end = time.perf_counter()
+        self._end = time.monotonic()
         duration_ms = (self._end - self._start) * 1000
 
         success = exc_type is None
@@ -227,7 +228,7 @@ async def skill_timer(
         metadata["chat_id"] = chat_id
     metadata.update(extra_metadata)
 
-    start = time.perf_counter()
+    start = time.monotonic()
     result = TimingResult(
         operation_name=skill_name,
         duration_ms=0.0,
@@ -242,7 +243,7 @@ async def skill_timer(
         result.error = str(exc)
         raise
     finally:
-        end = time.perf_counter()
+        end = time.monotonic()
         result.duration_ms = (end - start) * 1000
         _log_skill_timing(result, slow_threshold)
 
@@ -304,7 +305,7 @@ def timed_operation(
             rows = db.execute(query)
         print(f"Duration: {result.duration_ms:.2f}ms")
     """
-    start = time.perf_counter()
+    start = time.monotonic()
     result = TimingResult(
         operation_name=name,
         duration_ms=0.0,
@@ -319,7 +320,7 @@ def timed_operation(
         result.error = str(exc)
         raise
     finally:
-        end = time.perf_counter()
+        end = time.monotonic()
         result.duration_ms = (end - start) * 1000
 
         extra = result.to_log_extra()
@@ -351,12 +352,46 @@ def timed_operation(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Context-Variable Timing (Hot-Path Optimisation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_timer_start: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "_timer_start", default=None
+)
+
+
+def set_timer_start() -> float:
+    """Record a monotonic start time in the current context.
+
+    Returns the captured timestamp so callers that still need the raw
+    value can use it directly.
+    """
+    start = time.monotonic()
+    _timer_start.set(start)
+    return start
+
+
+def elapsed() -> float:
+    """Seconds elapsed since :func:`set_timer_start` was called.
+
+    Returns ``0.0`` when no start time has been recorded in the
+    current context.
+    """
+    start = _timer_start.get()
+    if start is None:
+        return 0.0
+    return time.monotonic() - start
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Exports
 # ─────────────────────────────────────────────────────────────────────────────
 
 __all__ = [
     "OperationTimer",
     "TimingResult",
+    "elapsed",
+    "set_timer_start",
     "skill_timer",
     "timed_operation",
     "DEFAULT_SLOW_THRESHOLD_SECONDS",
