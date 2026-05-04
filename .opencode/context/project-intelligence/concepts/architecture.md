@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/concepts/architecture | Priority: high | Version: 3.1 | Updated: 2026-05-03 -->
+<!-- Context: project-intelligence/concepts/architecture | Priority: high | Version: 3.2 | Updated: 2026-05-04 -->
 
 # Architecture
 
@@ -55,7 +55,7 @@ The native Python approach was chosen because:
 ## Codebase References
 
 - `main.py` — CLI entry point
-- `src/bot.py` — Main bot orchestrator
+- `src/bot/` — Main bot orchestrator (split into focused sub-modules)
 - `src/llm.py` — LLM client wrapper
 - `src/memory.py` — Conversation memory management
 - `src/routing.py` — Message routing engine

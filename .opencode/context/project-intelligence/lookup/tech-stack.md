@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/tech-stack | Priority: high | Version: 3.3 | Updated: 2026-05-03 -->
+<!-- Context: project-intelligence/lookup/tech-stack | Priority: high | Version: 3.4 | Updated: 2026-05-04 -->
 
 # Tech Stack
 

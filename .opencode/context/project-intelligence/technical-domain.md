@@ -1,9 +1,9 @@
-<!-- Context: project-intelligence/technical | Priority: critical | Version: 2.8 | Updated: 2026-05-04 -->
+<!-- Context: project-intelligence/technical | Priority: critical | Version: 3.0 | Updated: 2026-05-04 -->
 
 # Technical Domain
 
 **Purpose**: Tech stack, architecture, and development patterns for custombot — a lightweight WhatsApp AI assistant.
-**Last Updated**: 2026-05-04 (harvest: all 219/219 PLAN.md items complete; 10 rounds, all done)
+**Last Updated**: 2026-05-04 (PLAN.md v3: 8/34 items complete — scheduler decomposition, DeduplicationService buffer cap, monotonic timing; previous: emit_error_event helper, Bot._load_instruction removal, pytest-timeout)
 
 ## Quick Reference
 **Update Triggers**: Tech stack changes | New patterns | Architecture decisions
@@ -31,7 +31,7 @@
 | Process | psutil | ~=6.0 | System resource monitoring |
 | Linting | Ruff | 0.15.12 | Combined linter + formatter (E/W/F/I/UP/B/SIM/PL/TCH/PERF rulesets); PL+PERF non-blocking; pinned in pyproject.toml |
 | Typing | mypy | >=1.20 | Gradual strict mode; `src/bot/` under `--strict` |
-| Testing | pytest + hypothesis | >=9.0 | Unit + property-based + benchmarks (82+ test+bench files); pytest-timeout 120s; dev extras in pyproject.toml |
+| Testing | pytest + hypothesis | >=9.0 | Unit + property-based + benchmarks (82+ test+bench files); pytest-timeout 120s; dev extras in pyproject.toml `[dev]` |
 
 ---
 
@@ -66,25 +66,15 @@ context_assembler.update_config(new_cfg)
 
 ### Structured Dependency Injection
 ```python
-@dataclass(frozen=True)      # Immutable containers (config, results)
-class BotComponents:
-    bot: Bot; db: Database; llm: LLMProvider
+@dataclass(frozen=True)      # Immutable containers
+class BotComponents: bot: Bot; db: Database; llm: LLMProvider
 
-@dataclass(slots=True)       # Parameter bag (replaces 15-param Bot constructor)
+@dataclass(slots=True)       # Parameter bag (replaces 15-param constructor)
 class BotDeps:
     config: BotConfig; db: Database; llm: LLMProvider
     memory: MemoryProtocol; skills: SkillRegistry
-    routing: RoutingEngine | None = None
-    dedup: DeduplicationService | None = None
-
-@dataclass(slots=True, frozen=True)  # ReAct loop invariants (replaces 18-param threading)
-class ReactIterationContext:
-    llm: LLMProvider; metrics: PerformanceMetrics; tool_executor: ToolExecutor
-    chat_id: str; tools: list[...] | None; workspace_dir: Path
-    stream_response: bool; max_tool_iterations: int
-    max_retries: int; initial_delay: float; retryable_codes: frozenset[ErrorCode]
-    stream_callback: StreamCallback | None = None
-    channel: BaseChannel | None = None
+    routing: RoutingEngine | None = None; dedup: DeduplicationService | None = None
+# Also: ReactIterationContext(slots=True, frozen=True) for ReAct loop invariants
 ```
 
 ### Channel Abstraction Layer
@@ -97,20 +87,31 @@ from src.channels import BaseChannel, IncomingMessage, CommandLineChannel
 ### Canonical JSON Serialization (json_utils)
 ```python
 from src.utils.json_utils import json_dumps, json_loads, safe_json_parse
-# orjson-backed with stdlib fallback; all hot-path JSON should use these
-data = json_loads(raw)                    # fast deserialization
-text = json_dumps(obj, indent=2)          # fast serialization with formatting
-result = safe_json_parse(raw, mode="strict")  # mode-based error handling (lenient/strict/line)
+# orjson-backed with stdlib fallback; modes: lenient/strict/line
+```
+
+### Scheduler Package (Decomposed from Monolith)
+```python
+from src.scheduler import TaskScheduler  # Re-exports from package
+# Internally: scheduler/engine.py (tick loop, heap scheduling)
+#             scheduler/cron.py (UTC conversion, weekday matching)
+#             scheduler/persistence.py (JSONL read/write, HMAC integrity, atomic save)
+# Adaptive sleep: computes time-to-next-due, avoids fixed TICK_SECONDS polling
 ```
 
 ### Composable Message Pipeline
 ```python
-from src.core.message_pipeline import build_pipeline_from_config, PipelineDependencies
+from src.core.message_pipeline import build_pipeline_from_config
 # Middleware chain: operation_tracker → metrics → logging → preflight → typing → error → handle
-# Dynamically extensible via config (built-in names + dotted import paths)
-# Each middleware independently testable; _send_error_reply() centralizes error-channel responses
-pipeline = build_pipeline_from_config(middleware_order=[...], deps=deps)
-await pipeline.execute(MessageContext(msg=msg))
+# Dynamically extensible via config; _send_error_reply() centralizes error-channel responses
+```
+
+### Error Event Emission Helper
+```python
+from src.core.event_bus import emit_error_event
+# Consolidates duplicate try/except error-emission boilerplate across Application, Bot, etc.
+# Auto-populates error_type + error_message; catches its own failures as non-critical
+await emit_error_event(exc, "Application.run", extra_data={"category": category})
 ```
 
 ### Module Structure (every file follows this)
@@ -118,10 +119,7 @@ await pipeline.execute(MessageContext(msg=msg))
 """module.py — One-line purpose."""
 from __future__ import annotations
 import logging; from typing import TYPE_CHECKING
-if TYPE_CHECKING: from src.config import Config
-log = logging.getLogger(__name__)
-__all__ = ["PublicClass", "public_function"]
-# Packages (e.g. src/llm/) use __init__.py to re-export public symbols for backward compat
+log = logging.getLogger(__name__); __all__ = ["PublicClass", "public_function"]
 ```
 
 ### Exception Hierarchy
@@ -148,52 +146,19 @@ raise LLMError("API timeout", provider="openai", model="gpt-4")
 
 ## Code Standards
 
-- `from __future__ import annotations` on line 1 of every file (after docstring)
-- `log = logging.getLogger(__name__)` — module-level logger in every module
-- `TYPE_CHECKING` guard for type-only imports; `__all__` exports in all public modules
-- Frozen dataclasses for immutable data; `slots=True` for mutable state
-- Structured DI: `BotDeps`, `ShutdownContext`, `ReactIterationContext`, `BuilderContext` replace multi-param constructors
-- Protocol classes for DI boundaries (14+ in `src/utils/protocols.py`): `MemoryProtocol`, `Stoppable`, `Closeable`, `BackgroundService`, `LockProvider`
-- Channel abstraction: `BaseChannel` ABC with `CommandLineChannel` and `NeonizeWhatsAppChannel`
-- Step orchestrator for multi-phase startup/build (declarative `ComponentSpec`)
-- Config hot-reload: atomic reference swap (`Application._swap_config()`)
-- Connection pooling for SQLite (sqlite_pool.py, file_pool.py); health server layered middleware with `HEALTH_ALLOWED_PATHS`
-- Offload blocking I/O via `asyncio.to_thread()`; snapshot mutable state before use
-- TOCTOU-safe file operations with `os.O_EXCL`; atomic file writes (temp→rename) in scheduler
-- Swap-buffers pattern for `MessageQueue` flush; disk-full retry buffering
-- Pre-compute `MatchingContext` in `Bot._build_turn_context()` before `match_with_rule()`
-- Reverse index for `TokenUsage._leaderboard` → O(k·log n) purge
-- Tool name sanitization: strips control chars + ANSI escapes before log/audit; name length validated (200 char max in ToolLogEntry); lazy args parsing (raw JSON stored, `parsed_args` property deserializes on demand)
-- Unified `DeduplicationService`: check_and_record_outbound (single hash), fail-open on DB errors, in-memory LRU (10K, 5-min TTL)
-- `BoundedOrderedDict(ttl=...)` for outbound dedup cache; `finish_reason="length"` handled explicitly
-- `message_dropped` event for unmatched routing and oversized messages
-- `generation_conflict` event for write conflicts in `_deliver_response()`
-- `EVENT_STARTUP_COMPLETED` emitted after Application startup completes
-- Error categorization in `Application.run()` main loop (LLM_TRANSIENT, CHANNEL_DISCONNECT, etc.)
-- RoutingEngine: non-blocking async retry, symlink rejection, zero-rule graceful degradation
-- VectorMemory decoupled via public `LLMProvider.openai_client` property
-- `AppComponents.to_shutdown_context()` factory; parallel shutdown via `asyncio.gather()`
-- Scheduler: cached `_last_run_dt`, orjson via `json_utils`, unified `_target_utc_time()`
-- Timeout path: `_message_queue.complete()` in `except asyncio.TimeoutError`
-- msgpack persistence for MessageQueue (JSON fallback for crash recovery)
-- `QueuedMessage` with `__slots__` for reduced per-instance memory
-- Message pipeline: composable middleware chain, dynamically extensible via config
-- `_send_error_reply()` centralizes send → dedup → event for error-channel responses
+- `from __future__ import annotations` on line 1; `log = logging.getLogger(__name__)` in every module; `TYPE_CHECKING` guard + `__all__` exports
+- Frozen dataclasses for immutable data; `slots=True` for mutable; structured DI (`BotDeps`, `ShutdownContext`, `ReactIterationContext`, `BuilderContext`)
+- Protocol classes for DI boundaries (14+ in `src/utils/protocols.py`); Channel abstraction via `BaseChannel` ABC; Step orchestrator (declarative `ComponentSpec`)
+- Config hot-reload: atomic reference swap (`Application._swap_config()`); Connection pooling (sqlite_pool.py, file_pool.py); Offload blocking I/O via `asyncio.to_thread()`
+- TOCTOU-safe file ops (`os.O_EXCL`); atomic writes (temp→rename); swap-buffers for `MessageQueue` flush
+- Scheduler: decomposed into `src/scheduler/` package (engine.py, cron.py, persistence.py); adaptive sleep with heap-based time-to-next-due
+- `DeduplicationService`: buffered outbound with configurable cap, batch `flush_outbound_batch()`, in-memory LRU (10K, 5-min TTL); Tool name sanitization (ANSI stripped, 200 char max)
+- `emit_error_event()` helper; Direct `InstructionLoader.load()` calls (removed `Bot._load_instruction()`); `_send_error_reply()` centralizes error-channel responses
+- Explicit discard of DB return values (`_ids =`); Events: `message_dropped`, `generation_conflict`, `EVENT_STARTUP_COMPLETED`; Error categorization in `Application.run()`
+- RoutingEngine: non-blocking async retry, symlink rejection, zero-rule degradation; VectorMemory via `LLMProvider.openai_client`; Parallel shutdown via `asyncio.gather()`
+- `time.monotonic()` in timing utilities; context-var helpers `set_timer_start()` + `elapsed()`; msgpack for MessageQueue; `QueuedMessage` with `__slots__`
 - Double quotes (ruff format), line length 100; Google-style docstrings; dev deps in pyproject.toml `[dev]` extras
-- `src/project/` — SQLite-backed knowledge tracking: ProjectStore (CRUD), ProjectGraph (BFS/traversal), ProjectRecall (hybrid vector+graph), dates utils
-- `src/core/topic_cache.py` — Per-chat topic summary cache (mtime-cached, file-based) with META parsing for topic-change signals
-- `src/core/context_builder.py` — LLM context assembly: system prompt, instructions, memory, topic summary, reduced history
-- `src/core/project_context.py` — Lazy ProjectGraph/ProjectRecall initialization for LLM context
-- `src/rate_limiter.py` — Sliding window rate limiting (per-chat 30/min, per-skill 10/min, env-configurable)
-- `src/workspace_integrity.py` — Startup workspace verification (stale temps, corrupt JSONL, locked SQLite)
-- `src/dependency_check.py` — Auto-update dependencies at startup (esp. neonize WhatsApp lib)
-- `src/progress.py` — Rich-based SpinnerStatus, ProgressBar, ProgressTracker for long-running ops
-- `src/ui/` — Presentation layer: cli_output.py (formatting), options_tui.py (interactive options)
-- `src/utils/frontmatter.py` — YAML/frontmatter parsing for instruction files
-- `src/utils/phone.py` — Phone number normalization utilities
-- Ruff: pinned 0.15.12 in pyproject.toml (local+CI parity), PERF ruleset added; CI: check_plan_syntax.py validates PLAN.md checkbox format; pip-audit SARIF upload to GitHub Security tab
-
----
+- Ruff 0.15.12 pinned (PERF ruleset); CI: check_plan_syntax.py validates PLAN.md; pip-audit SARIF to GitHub Security; Messaging constants in `src/constants/messaging.py`
 
 ## Security Requirements
 
@@ -214,38 +179,19 @@ raise LLMError("API timeout", provider="openai", model="gpt-4")
 
 ## 📂 Codebase References
 
-**Entry Point**: `main.py` — Click CLI: `start`, `options`, `diagnose` (+ `--health-host`)
-**App**: `src/app.py` — `Application` + `AppPhase` state machine + error categorization + config swap + bounded semaphore
-**Builder**: `src/builder.py` — `build_bot()` → `BotComponents`; VectorMemory decoupled from LLMClient
-**Bot**: `src/bot/` — `_bot.py` (Bot+BotDeps, outbound dedup, update_config), `crash_recovery.py`, `preflight.py`, `react_loop.py` (ReactIterationContext)
-**Channels**: `src/channels/` — `base.py` (BaseChannel ABC), `cli.py`, `neonize_backend.py`, `stealth.py`, `validation.py`, `whatsapp.py`
-**Config**: `src/config/` — Schema defs, loader, validation, `config_watcher.py` (atomic swap, 6 modules)
-**LLM**: `src/llm.py`, `src/llm_provider.py`, `src/llm_error_classifier.py` — httpx async client + circuit breaker + public `openai_client` property
-**Memory**: `src/memory.py` — Per-chat MEMORY.md + chat dir caching + async recovery + TOCTOU-safe seeding
-**Routing**: `src/routing.py` — YAML frontmatter rules, MatchingContext, symlink rejection, zero-rule degradation, non-blocking load
-**Message Queue**: `src/message_queue.py`, `src/message_queue_persistence.py` — Swap-buffers flush, streaming JSONL, disk-full handling
-**Scheduler**: `src/scheduler.py` — Cached `_last_run_dt`, orjson via json_utils, unified `_target_utc_time()`, outbound dedup
-**Serialization**: `src/utils/json_utils.py` — Canonical `json_dumps`/`json_loads` (orjson + stdlib fallback), `safe_json_parse`, msgpack
-**Pipeline**: `src/core/message_pipeline.py` — Composable middleware chain, dynamically extensible, `_send_error_reply()` helper
-**Skills**: `src/skills/` — `BaseSkill` (Python) + prompt-based skills (Markdown)
-**Security**: `src/security/` — Path validator, prompt injection, URL sanitizer, audit, signing, tool name sanitization (6 modules)
-**Health**: `src/health/` — server.py, middleware.py (path/method/size/HMAC/rate-limit/security headers), prometheus.py, checks.py
-**DB**: `src/db/` — sqlite_pool.py, file_pool.py, migration, message_store, generations, compression (14 modules)
-**Utils**: `src/utils/` — 14+ Protocol classes, locking, circuit_breaker, dag, singleton, retry, timing, type_guards (19 modules)
-**Constants**: `src/constants/` — Domain-organized constants (15 sub-modules: cache, db, health, llm, memory, messaging, network, routing, scheduler, security, shutdown, skills, workspace)
-**Core**: `src/core/` — orchestrator, event_bus (10 events), dedup, errors, context_assembler, context_builder, topic_cache, project_context, tool_executor, tool_formatter (ToolLogEntry lazy args), message_pipeline, instruction_loader, stream_accumulator, serialization, startup (StartupOrchestrator + ComponentSpec)
-**Project**: `src/project/` — ProjectStore (SQLite CRUD), ProjectGraph (BFS/traversal), ProjectRecall (hybrid vector+graph), dates
-**Monitoring**: `src/monitoring/` — Performance, memory, metrics_types, tracing, workspace_monitor
-**UI**: `src/ui/` — cli_output.py, options_tui.py (interactive options dialog)
-**Utils**: `src/utils/` — 14+ Protocol classes, locking, circuit_breaker, dag, singleton, retry, timing, type_guards, frontmatter, phone (19 modules)
-**Constants**: `src/constants/` — Domain-organized constants (15 sub-modules: cache, db, health, llm, memory, messaging, network, routing, scheduler, security, shutdown, skills, workspace)
-**Logging**: `src/logging/` — http_logging, llm_logging (redaction), logging_config (3 modules)
-**Rate Limiting**: `src/rate_limiter.py` — Sliding window (per-chat + per-skill, env-configurable)
-**Workspace**: `src/workspace_integrity.py` — Startup verification; `src/dependency_check.py` — Dependency auto-update
-**Progress**: `src/progress.py` — Rich-based spinners/progress bars; `src/templates/instructions/` — Agent instruction templates
-**Tests**: `tests/` — 82+ test+bench files (unit=59, integration=13, e2e=10); bench_regression.py; pytest-timeout 120s; src/bot/ under mypy --strict
-**Build**: `pyproject.toml`, `Makefile`, `requirements.txt`, `.pre-commit-config.yaml` (ruff+TCH strict), Dockerfile, `.gitattributes`
-**CI Scripts**: `scripts/` — check_plan_syntax.py, check_coverage_floor.py, check_config_example_sync.py; pip-audit SARIF upload in CI
+**Entry**: `main.py` (Click CLI) | **App**: `src/app.py` (Application + AppPhase + config swap) | **Builder**: `src/builder.py`
+**Bot**: `src/bot/` — _bot.py, crash_recovery.py, preflight.py, react_loop.py (ReactIterationContext)
+**Channels**: `src/channels/` — base.py (ABC), cli.py, neonize_backend.py, stealth.py, validation.py, whatsapp.py
+**Config**: `src/config/` (6 modules, atomic swap) | **LLM**: `src/llm.py` + llm_provider.py + llm_error_classifier.py
+**Memory**: `src/memory.py` | **Routing**: `src/routing.py` | **Scheduler**: `src/scheduler/` (engine.py, cron.py, persistence.py)
+**Queue**: `src/message_queue.py` + persistence | **Serialization**: `src/utils/json_utils.py` (orjson + fallback)
+**Pipeline**: `src/core/message_pipeline.py` | **Skills**: `src/skills/` | **Security**: `src/security/` (6 modules)
+**Health**: `src/health/` (server + middleware + prometheus) | **DB**: `src/db/` (14 modules, connection pooling)
+**Utils**: `src/utils/` (19 modules) | **Constants**: `src/constants/` (15 sub-modules) | **Logging**: `src/logging/` (3 modules)
+**Core**: `src/core/` — event_bus (10 events + emit_error_event), dedup, errors, context_assembler/builder, tool_executor/formatter, instruction_loader, startup (StartupOrchestrator + ComponentSpec)
+**Project**: `src/project/` (CRUD + graph + recall) | **Monitoring**: `src/monitoring/` | **UI**: `src/ui/`
+**Rate Limiting**: `src/rate_limiter.py` | **Workspace**: `src/workspace_integrity.py` + dependency_check.py
+**Tests**: `tests/` (82+ files) | **Build**: pyproject.toml, Makefile, Dockerfile | **CI**: `scripts/` + pip-audit SARIF
 
 ## Related Files
 - Navigation: `.opencode/context/project/navigation.md`

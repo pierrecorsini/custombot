@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/project-structure | Priority: high | Version: 4.3 | Updated: 2026-05-03 -->
+<!-- Context: project-intelligence/lookup/project-structure | Priority: high | Version: 4.5 | Updated: 2026-05-04 -->
 
 # Project Structure
 
@@ -13,7 +13,7 @@ custombot/
 ├── pyproject.toml           # Python project config, deps, ruff, mypy, pytest
 ├── Makefile                 # Dependency management targets (pip-compile)
 ├── Dockerfile               # Multi-stage Docker build
-├── PLAN.md                  # Improvement plan (50 items, 47 done)
+├── PLAN.md                  # (archived to .tmp/archive/ after Round 11)
 ├── requirements.txt         # Auto-generated from pyproject.toml
 ├── requirements-lock.txt    # Hash-locked dependencies
 │
@@ -31,7 +31,11 @@ custombot/
 │   ├── progress.py         # Progress tracking
 │   ├── rate_limiter.py     # Sliding window per-chat and per-skill rate limiting
 │   ├── routing.py          # Message routing engine
-│   ├── scheduler.py        # Background scheduled tasks
+│   ├── scheduler/          # Async task scheduler (decomposed from monolithic scheduler.py)
+│   │   ├── __init__.py     # Re-exports: TaskScheduler, cron helpers, persistence constants
+│   │   ├── engine.py       # Tick loop, heap scheduling, adaptive sleep
+│   │   ├── cron.py         # UTC offset, local-to-UTC conversion, weekday matching
+│   │   └── persistence.py  # JSONL I/O, HMAC integrity, atomic save
 │   ├── shutdown.py         # Graceful shutdown
 │   ├── dependency_check.py # Dependency verification
 │   ├── diagnose.py         # Diagnostics
@@ -68,102 +72,49 @@ custombot/
 │   │   ├── security.py, shutdown.py, skills.py, workspace.py
 │   │   └── ...
 │   │
-│   ├── core/               # Core engine
+│   ├── core/               # Core engine (16 modules)
 │   │   ├── context_assembler.py  # Memory + instructions + project context
-│   │   ├── context_builder.py    # LLM context construction
-│   │   ├── dedup.py         # Inbound + outbound dedup
-│   │   ├── errors.py        # 25+ categorized fire-and-forget errors
-│   │   ├── event_bus.py     # Async typed pub/sub
+│   │   ├── dedup.py         # Inbound + outbound dedup with buffered batch
+│   │   ├── event_bus.py     # Async typed pub/sub (10 events + emit_error_event)
 │   │   ├── instruction_loader.py # Instruction file loading
-│   │   ├── message_pipeline.py   # Message processing pipeline
+│   │   ├── message_pipeline.py   # Message processing middleware chain
 │   │   ├── orchestrator.py  # StepOrchestrator for dependency-ordered execution
-│   │   ├── project_context.py    # Project context injection
-│   │   ├── serialization.py # Safe JSON serialization
-│   │   ├── startup.py       # Startup sequence
-│   │   ├── stream_accumulator.py # SSE streaming delta reconstruction
+│   │   ├── startup.py       # Startup sequence (StartupOrchestrator + ComponentSpec)
 │   │   ├── tool_executor.py # Skill execution with rate-limit, timeout, audit
-│   │   ├── tool_formatter.py # Tool call result formatting
-│   │   └── topic_cache.py   # Topic-based context caching
+│   │   └── ... (context_builder, errors, project_context, serialization, etc.)
 │   │
-│   ├── db/                 # Database layer
-│   │   ├── db.py            # File-based JSONL persistence
-│   │   ├── db_utils.py      # Shared DB helper functions
-│   │   ├── db_index.py      # Message search index
-│   │   ├── db_integrity.py  # Database integrity checks
-│   │   ├── db_validation.py # Database validation
-│   │   ├── compression.py   # Data compression
-│   │   ├── file_pool.py     # Bounded file handle pool
-│   │   ├── generations.py   # LLM response generation tracking
-│   │   ├── message_store.py # JSONL message persistence
-│   │   ├── migration.py     # Schema migration support
+│   ├── db/                 # Database layer (12 modules)
+│   │   ├── db.py            # File-based JSONL persistence (facade)
 │   │   ├── sqlite_pool.py   # Shared connection pool for SQLite
-│   │   └── sqlite_utils.py  # SqliteHelper with pool integration
+│   │   ├── file_pool.py     # Bounded file handle pool
+│   │   ├── message_store.py # JSONL message persistence
+│   │   └── ... (compression, db_utils, db_index, db_integrity, generations, migration, sqlite_utils)
 │   │
 │   ├── health/             # Health check HTTP endpoint
-│   │   ├── checks.py, middleware.py, models.py
-│   │   ├── prometheus.py, server.py
+│   │   ├── checks.py, middleware.py, models.py, prometheus.py, server.py
 │   │
-│   ├── logging/            # Structured logging
-│   │   ├── logging_config.py    # Structured logging with JSON format
-│   │   ├── llm_logging.py       # Per-request LLM logging to JSON
-│   │   └── http_logging.py      # HTTP request/response logging
+│   ├── logging/            # Structured logging (3 modules: config, llm, http)
 │   │
-│   ├── monitoring/         # Monitoring & metrics
-│   │   ├── performance.py       # Performance metrics
-│   │   ├── memory.py            # Memory monitoring
-│   │   ├── metrics_types.py     # Metrics type definitions
-│   │   ├── tracing.py           # OpenTelemetry span helpers
-│   │   └── workspace_monitor.py # Filesystem cleanup
+│   ├── monitoring/         # Monitoring & metrics (5 modules: performance, memory, metrics_types, tracing, workspace_monitor)
 │   │
-│   ├── project/            # Project & knowledge
-│   │   ├── dates.py, graph.py, recall.py, store.py
+│   ├── project/            # Project & knowledge (dates, graph, recall, store)
 │   │
-│   ├── security/           # Security subsystem (defense-in-depth)
-│   │   ├── audit.py             # HMAC-SHA256 chained audit log
-│   │   ├── path_validator.py    # TOCTOU-safe path validation
-│   │   ├── prompt_injection.py  # Multi-language injection detection
-│   │   ├── signing.py           # HMAC-SHA256 task integrity
-│   │   └── url_sanitizer.py     # URL redaction for logging
+│   ├── security/           # Security subsystem (defense-in-depth: audit, path_validator, prompt_injection, signing, url_sanitizer)
 │   │
 │   ├── skills/             # Dual skill system (builtin + user)
-│   │   ├── base.py              # BaseSkill abstract class
-│   │   ├── prompt_skill.py      # Prompt-based skills (Markdown)
-│   │   └── builtin/
-│   │       ├── files.py, media.py, memory_vss.py
-│   │       ├── planner.py, project_skills.py, routing.py
-│   │       ├── shell.py, skills_manager.py
-│   │       ├── task_scheduler.py, web_research.py
+│   │   ├── base.py, prompt_skill.py
+│   │   └── builtin/ files, media, memory_vss, planner, shell, web_research, etc.
 │   │
-│   ├── templates/          # Instruction templates
-│   │   └── instructions/
-│   │       ├── chat.agent.md
-│   │       └── personal.agent.md
+│   ├── templates/instructions/  # Instruction templates (chat.agent.md, personal.agent.md)
 │   │
-│   ├── ui/                 # User interface
-│   │   ├── cli_output.py        # Colorful CLI output (Rich)
-│   │   └── options_tui.py       # Configuration editor TUI
+│   ├── ui/                 # User interface (cli_output, options_tui)
 │   │
 │   ├── utils/              # Utilities (19 modules)
-│   │   ├── async_executor.py    # Bounded concurrency executor
-│   │   ├── async_file.py        # Async file operations
-│   │   ├── background_service.py # Background service pattern
-│   │   ├── circuit_breaker.py   # Circuit breaker pattern
-│   │   ├── dag.py               # Topological sort
-│   │   ├── disk.py              # Disk utilities
-│   │   ├── frontmatter.py       # YAML frontmatter parsing
-│   │   ├── json_utils.py        # JSON utilities
-│   │   ├── locking.py           # Lock utilities
-│   │   ├── logging_utils.py     # Logging helpers
-│   │   ├── path.py              # Path utilities
-│   │   ├── phone.py             # Phone normalization
-│   │   ├── protocols.py         # Protocol classes (Channel, Skill, Storage)
-│   │   ├── retry.py             # Exponential backoff retry
-│   │   ├── singleton.py         # Singleton pattern
-│   │   ├── timing.py            # Timing utilities
-│   │   └── type_guards.py       # Runtime type checking
+│   │   ├── async_executor, async_file, background_service, circuit_breaker
+│   │   ├── dag, disk, frontmatter, json_utils, locking, logging_utils
+│   │   ├── path, phone, protocols, retry, singleton, timing, type_guards
 │   │
-│   └── vector_memory/      # Semantic memory (sqlite-vec)
-│       ├── __init__.py, _utils.py, batch.py, health.py
+│   └── vector_memory/      # Semantic memory (sqlite-vec): __init__, _utils, batch, health
 │
 ├── tests/                   # Test suite (3 tiers)
 │   ├── conftest.py           # Shared fixtures (fully-wired Bot mock)
