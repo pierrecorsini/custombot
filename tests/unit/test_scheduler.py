@@ -4,6 +4,7 @@ Tests for src/scheduler.py — Async task scheduler engine.
 Unit tests covering:
   - _same_day utility
   - _utc_offset_hours helper
+  - _target_utc_time helper
   - TaskScheduler configure / start / stop lifecycle
   - Task CRUD: add_task, add_task, remove_task_async, list_tasks
   - Task ID generation (sequential, collision avoidance)
@@ -23,7 +24,6 @@ import asyncio
 import json
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -35,6 +35,7 @@ from src.scheduler import (
     TaskScheduler,
     _now,
     _same_day,
+    _target_utc_time,
     _utc_offset_hours,
 )
 from src.constants import (
@@ -44,6 +45,10 @@ from src.constants import (
     SCHEDULER_MIN_SLEEP_SECONDS,
     SCHEDULER_RETRY_INITIAL_DELAY,
 )
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -185,8 +190,54 @@ class TestUtcOffsetHours:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TaskScheduler — configure
+# _target_utc_time
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTargetUtcTime:
+    """Tests for _target_utc_time()."""
+
+    def test_utc_plus_one(self):
+        """Local 10:00 in UTC+1 → UTC 09:00."""
+        schedule = {"hour": 10, "minute": 0}
+        utc_hour, utc_minute = _target_utc_time(schedule, 1.0)
+        assert (utc_hour, utc_minute) == (9, 0)
+
+    def test_utc_minus_five(self):
+        """Local 08:30 in UTC-5 → UTC 13:30."""
+        schedule = {"hour": 8, "minute": 30}
+        utc_hour, utc_minute = _target_utc_time(schedule, -5.0)
+        assert (utc_hour, utc_minute) == (13, 30)
+
+    def test_midnight_wrap(self):
+        """Local 23:00 in UTC+2 → UTC 21:00 (no wrap)."""
+        schedule = {"hour": 23, "minute": 0}
+        utc_hour, utc_minute = _target_utc_time(schedule, 2.0)
+        assert (utc_hour, utc_minute) == (21, 0)
+
+    def test_day_boundary_wrap(self):
+        """Local 01:00 in UTC-5 → UTC 06:00 (next day wrap via modulo)."""
+        schedule = {"hour": 1, "minute": 0}
+        utc_hour, utc_minute = _target_utc_time(schedule, -5.0)
+        assert (utc_hour, utc_minute) == (6, 0)
+
+    def test_zero_offset(self):
+        """UTC+0: local time equals UTC."""
+        schedule = {"hour": 14, "minute": 45}
+        utc_hour, utc_minute = _target_utc_time(schedule, 0.0)
+        assert (utc_hour, utc_minute) == (14, 45)
+
+    def test_defaults_to_midnight(self):
+        """Missing hour/minute defaults to 00:00."""
+        schedule: dict = {}
+        utc_hour, utc_minute = _target_utc_time(schedule, 0.0)
+        assert (utc_hour, utc_minute) == (0, 0)
+
+    def test_fractional_offset(self):
+        """UTC+5:45 (Kathmandu) local 06:00 → UTC 00:15."""
+        schedule = {"hour": 6, "minute": 0}
+        utc_hour, utc_minute = _target_utc_time(schedule, 5.75)
+        assert (utc_hour, utc_minute) == (0, 15)
 
 
 class TestConfigure:
@@ -1000,7 +1051,10 @@ class TestLoop:
 
     @pytest.mark.asyncio
     async def test_loop_batches_persists_for_same_chat(
-        self, scheduler: TaskScheduler, on_trigger: AsyncMock, workspace: Path,
+        self,
+        scheduler: TaskScheduler,
+        on_trigger: AsyncMock,
+        workspace: Path,
     ):
         """Multiple tasks for the same chat in one tick persist only once."""
         on_trigger.return_value = "done"
@@ -1044,7 +1098,10 @@ class TestLoop:
 
     @pytest.mark.asyncio
     async def test_loop_persists_multiple_chats(
-        self, scheduler: TaskScheduler, on_trigger: AsyncMock, workspace: Path,
+        self,
+        scheduler: TaskScheduler,
+        on_trigger: AsyncMock,
+        workspace: Path,
     ):
         """Tasks across multiple chats are each persisted once per tick."""
         on_trigger.return_value = "done"
@@ -1167,7 +1224,9 @@ class TestAdaptiveSleep:
         assert result == TICK_SECONDS
 
     @pytest.mark.asyncio
-    async def test_compute_adaptive_sleep_task_soon_but_not_imminent(self, scheduler: TaskScheduler):
+    async def test_compute_adaptive_sleep_task_soon_but_not_imminent(
+        self, scheduler: TaskScheduler
+    ):
         """Task due in 10s (within TICK_SECONDS) → returns actual time-to-due."""
         task_dict = _make_task(schedule_type="interval", seconds=10)
         await scheduler.add_task("chat1", task_dict)
@@ -1309,12 +1368,18 @@ class TestTimeToNextDueCache:
         # Write a tasks file to disk
         tasks_path = _tasks_file(scheduler._workspace, "chat1")
         tasks_path.parent.mkdir(parents=True, exist_ok=True)
-        tasks_path.write_text(json.dumps([{
-            "task_id": "task_001",
-            "prompt": "loaded task",
-            "schedule": {"type": "interval", "seconds": 60},
-            "enabled": True,
-        }]))
+        tasks_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "task_id": "task_001",
+                        "prompt": "loaded task",
+                        "schedule": {"type": "interval", "seconds": 60},
+                        "enabled": True,
+                    }
+                ]
+            )
+        )
 
         await scheduler._load("chat1")
         assert scheduler._tasks_dirty is True
@@ -1323,9 +1388,86 @@ class TestTimeToNextDueCache:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TaskScheduler — _get_last_run_dt caching
+# ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestIntegration:
+class TestLastRunDtCache:
+    """Tests for cached parsed ``last_run`` datetime (``_last_run_dt``)."""
+
+    def test_lazy_parse_on_first_access(self, scheduler: TaskScheduler):
+        """_get_last_run_dt parses and caches the ISO string on first call."""
+        task = _make_task(schedule_type="interval", seconds=60)
+        now = _now()
+        task["last_run"] = now.isoformat()
+        assert "_last_run_dt" not in task
+
+        result = scheduler._get_last_run_dt(task)
+        assert result is not None
+        assert result == now
+        assert task["_last_run_dt"] is result  # cached
+
+    def test_cache_hit_returns_same_object(self, scheduler: TaskScheduler):
+        """Repeated calls return the same cached datetime without re-parsing."""
+        task = _make_task(schedule_type="interval", seconds=60)
+        task["last_run"] = _now().isoformat()
+
+        first = scheduler._get_last_run_dt(task)
+        second = scheduler._get_last_run_dt(task)
+        assert first is second
+
+    def test_returns_none_when_no_last_run(self, scheduler: TaskScheduler):
+        """Tasks with no last_run return None without caching."""
+        task = _make_task(schedule_type="interval", seconds=60)
+        assert scheduler._get_last_run_dt(task) is None
+        assert "_last_run_dt" not in task
+
+    def test_returns_none_on_invalid_iso(self, scheduler: TaskScheduler):
+        """Malformed ISO string returns None without caching."""
+        task = _make_task(schedule_type="interval", seconds=60)
+        task["last_run"] = "not-a-datetime"
+        assert scheduler._get_last_run_dt(task) is None
+        assert "_last_run_dt" not in task
+
+    @pytest.mark.asyncio
+    async def test_execute_task_sets_cache(self, scheduler: TaskScheduler):
+        """_execute_task sets _last_run_dt alongside last_run."""
+        task_dict = _make_task(schedule_type="interval", seconds=600)
+        await scheduler.add_task("chat1", task_dict)
+        assert "_last_run_dt" not in task_dict
+
+        await scheduler._execute_task("chat1", task_dict)
+        assert "_last_run_dt" in task_dict
+        assert isinstance(task_dict["_last_run_dt"], datetime)
+        assert task_dict["_last_run_dt"].isoformat() == task_dict["last_run"]
+
+    def test_is_due_uses_cache(self, scheduler: TaskScheduler):
+        """_is_due populates _last_run_dt on first call for interval tasks."""
+        task = _make_task(schedule_type="interval", seconds=10)
+        task["last_run"] = (_now() - timedelta(seconds=15)).isoformat()
+        assert "_last_run_dt" not in task
+
+        scheduler._is_due(task)
+        assert "_last_run_dt" in task
+
+    def test_is_due_daily_uses_cached_dt(self, scheduler: TaskScheduler):
+        """_is_due for daily tasks uses cached dt for same-day comparison."""
+        now = _now()
+        offset = scheduler._get_cached_utc_offset()
+        local_hour = (now.hour + int(offset)) % 24
+
+        task = _make_task(schedule_type="daily", hour=local_hour, minute=now.minute)
+        task["last_run"] = now.isoformat()
+        assert "_last_run_dt" not in task
+
+        # Already ran today → not due
+        assert scheduler._is_due(task) is False
+        assert "_last_run_dt" in task
+
+        # Second call reuses cached dt
+        cached = task["_last_run_dt"]
+        scheduler._is_due(task)
+        assert task["_last_run_dt"] is cached  # same object, no re-parse
     """End-to-end scenarios combining multiple operations."""
 
     @pytest.mark.asyncio
@@ -1424,7 +1566,9 @@ class TestExecuteTaskRetry:
 
     @pytest.mark.asyncio
     async def test_success_first_attempt_no_retry(
-        self, scheduler: TaskScheduler, on_trigger: AsyncMock,
+        self,
+        scheduler: TaskScheduler,
+        on_trigger: AsyncMock,
     ):
         """Successful trigger on first attempt — no retries needed."""
         on_trigger.return_value = "ok"
@@ -1437,7 +1581,9 @@ class TestExecuteTaskRetry:
 
     @pytest.mark.asyncio
     async def test_retries_on_transient_error_then_succeeds(
-        self, scheduler: TaskScheduler, on_trigger: AsyncMock,
+        self,
+        scheduler: TaskScheduler,
+        on_trigger: AsyncMock,
     ):
         """Transient error on first call, success on retry."""
         on_trigger.side_effect = [
@@ -1457,7 +1603,9 @@ class TestExecuteTaskRetry:
 
     @pytest.mark.asyncio
     async def test_retries_exhausted_marks_failure(
-        self, scheduler: TaskScheduler, on_trigger: AsyncMock,
+        self,
+        scheduler: TaskScheduler,
+        on_trigger: AsyncMock,
     ):
         """When all retries fail on transient errors, task is marked failed."""
         on_trigger.side_effect = _make_transient_error("timeout")
@@ -1477,7 +1625,9 @@ class TestExecuteTaskRetry:
 
     @pytest.mark.asyncio
     async def test_non_transient_error_fails_immediately(
-        self, scheduler: TaskScheduler, on_trigger: AsyncMock,
+        self,
+        scheduler: TaskScheduler,
+        on_trigger: AsyncMock,
     ):
         """Non-transient errors (e.g. authentication) skip retries entirely."""
         on_trigger.side_effect = PermissionError("Invalid API key")
@@ -1492,7 +1642,9 @@ class TestExecuteTaskRetry:
 
     @pytest.mark.asyncio
     async def test_exponential_backoff_delays(
-        self, scheduler: TaskScheduler, on_trigger: AsyncMock,
+        self,
+        scheduler: TaskScheduler,
+        on_trigger: AsyncMock,
     ):
         """Verify delay doubles on each retry attempt."""
         on_trigger.side_effect = [
@@ -1508,7 +1660,8 @@ class TestExecuteTaskRetry:
         with patch("asyncio.sleep", sleep_mock):
             # Use a fixed jitter of 0 by patching calculate_delay_with_jitter
             with patch(
-                "src.utils.retry.calculate_delay_with_jitter", side_effect=lambda d: d,
+                "src.utils.retry.calculate_delay_with_jitter",
+                side_effect=lambda d: d,
             ):
                 with patch("src.scheduler.SCHEDULER_RETRY_INITIAL_DELAY", 30.0):
                     await scheduler._execute_task("chat1", task)
@@ -1522,7 +1675,10 @@ class TestExecuteTaskRetry:
 
     @pytest.mark.asyncio
     async def test_retry_with_send_on_success(
-        self, scheduler: TaskScheduler, on_trigger: AsyncMock, on_send: AsyncMock,
+        self,
+        scheduler: TaskScheduler,
+        on_trigger: AsyncMock,
+        on_send: AsyncMock,
     ):
         """After successful retry, result is delivered via on_send."""
         on_trigger.side_effect = [
@@ -1568,9 +1724,12 @@ class TestExecuteTaskTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_fires_task_marked_failed(
-        self, scheduler: TaskScheduler, on_trigger: AsyncMock,
+        self,
+        scheduler: TaskScheduler,
+        on_trigger: AsyncMock,
     ):
         """A hanging trigger times out and the task is recorded as failed."""
+
         async def hang_forever(chat_id: str, prompt: str, hmac: str | None = None) -> str:
             await asyncio.sleep(600)
 
@@ -1593,7 +1752,10 @@ class TestExecuteTaskTimeout:
 
     @pytest.mark.asyncio
     async def test_other_tasks_not_blocked_by_timeout(
-        self, scheduler: TaskScheduler, on_trigger: AsyncMock, on_send: AsyncMock,
+        self,
+        scheduler: TaskScheduler,
+        on_trigger: AsyncMock,
+        on_send: AsyncMock,
     ):
         """Co-scheduled tasks complete even when one task times out."""
         fast_task = _make_task(prompt="fast")
@@ -1629,7 +1791,10 @@ class TestExecuteTaskTimeout:
 
     @pytest.mark.asyncio
     async def test_loop_continues_after_timeout(
-        self, scheduler: TaskScheduler, on_trigger: AsyncMock, workspace: Path,
+        self,
+        scheduler: TaskScheduler,
+        on_trigger: AsyncMock,
+        workspace: Path,
     ):
         """Scheduler loop continues to the next tick after a task timeout."""
         await scheduler.add_task("chat1", _make_task(prompt="hang"))
@@ -1748,11 +1913,10 @@ class TestIsDueTimezoneEdgeCases:
             assert scheduler._is_due(task) is False
 
     @pytest.mark.parametrize(
-        "offset", [5.5, 5.75, 4.5, -3.5, 9.5, 6.5, 3.5, -4.5, -9.5],
+        "offset",
+        [5.5, 5.75, 4.5, -3.5, 9.5, 6.5, 3.5, -4.5, -9.5],
     )
-    def test_daily_no_double_fire_within_same_minute(
-        self, scheduler: TaskScheduler, offset: float
-    ):
+    def test_daily_no_double_fire_within_same_minute(self, scheduler: TaskScheduler, offset: float):
         """Task with last_run set to now should not be due again (same minute)."""
         now = datetime(2026, 4, 20, 12, 0, tzinfo=timezone.utc)
         local_min_total = int(12 * 60 + 0 + offset * 60) % (24 * 60)
@@ -1883,9 +2047,7 @@ class TestDSTTransitionHandling:
     changes, both with stale cached values and after cache refresh.
     """
 
-    def test_daily_spring_forward_after_cache_refresh(
-        self, scheduler: TaskScheduler
-    ):
+    def test_daily_spring_forward_after_cache_refresh(self, scheduler: TaskScheduler):
         """After spring-forward, daily task fires at correct UTC time with refreshed offset.
 
         CET (UTC+1) → CEST (UTC+2): local 09:00 shifts from UTC 08:00 to UTC 07:00.
@@ -1898,9 +2060,7 @@ class TestDSTTransitionHandling:
             task = _make_task(schedule_type="daily", hour=9, minute=0)
             assert scheduler._is_due(task) is True
 
-    def test_daily_spring_forward_stale_offset_misses_fire(
-        self, scheduler: TaskScheduler
-    ):
+    def test_daily_spring_forward_stale_offset_misses_fire(self, scheduler: TaskScheduler):
         """With stale pre-DST offset, daily task misses the correct post-DST UTC time.
 
         After spring-forward, actual offset is +2 (CEST). Stale cache is +1 (CET).
@@ -1914,9 +2074,7 @@ class TestDSTTransitionHandling:
             task = _make_task(schedule_type="daily", hour=9, minute=0)
             assert scheduler._is_due(task) is False
 
-    def test_daily_spring_forward_fires_at_stale_computed_time(
-        self, scheduler: TaskScheduler
-    ):
+    def test_daily_spring_forward_fires_at_stale_computed_time(self, scheduler: TaskScheduler):
         """With stale offset, the task fires at the old UTC time (one hour late post-DST).
 
         After spring-forward, stale +1 maps local 09:00 to UTC 08:00.
@@ -1930,9 +2088,7 @@ class TestDSTTransitionHandling:
             task = _make_task(schedule_type="daily", hour=9, minute=0)
             assert scheduler._is_due(task) is True
 
-    def test_daily_fall_back_after_cache_refresh(
-        self, scheduler: TaskScheduler
-    ):
+    def test_daily_fall_back_after_cache_refresh(self, scheduler: TaskScheduler):
         """After fall-back, daily task fires at correct UTC time with refreshed offset.
 
         CEST (UTC+2) → CET (UTC+1): local 09:00 shifts from UTC 07:00 to UTC 08:00.
@@ -1945,9 +2101,7 @@ class TestDSTTransitionHandling:
             task = _make_task(schedule_type="daily", hour=9, minute=0)
             assert scheduler._is_due(task) is True
 
-    def test_daily_fall_back_with_stale_offset(
-        self, scheduler: TaskScheduler
-    ):
+    def test_daily_fall_back_with_stale_offset(self, scheduler: TaskScheduler):
         """With stale pre-fall-back offset, daily task misses the correct post-transition time.
 
         After fall-back, actual offset is +1 (CET). Stale cache is +2 (CEST).
@@ -1961,9 +2115,7 @@ class TestDSTTransitionHandling:
             task = _make_task(schedule_type="daily", hour=9, minute=0)
             assert scheduler._is_due(task) is False
 
-    def test_daily_no_double_fire_across_spring_forward(
-        self, scheduler: TaskScheduler
-    ):
+    def test_daily_no_double_fire_across_spring_forward(self, scheduler: TaskScheduler):
         """Task doesn't fire twice on the same calendar day after spring-forward.
 
         The _same_day check via last_run prevents duplicate firing even
@@ -1978,9 +2130,7 @@ class TestDSTTransitionHandling:
             task["last_run"] = now.isoformat()  # already ran today
             assert scheduler._is_due(task) is False
 
-    def test_daily_no_double_fire_across_fall_back(
-        self, scheduler: TaskScheduler
-    ):
+    def test_daily_no_double_fire_across_fall_back(self, scheduler: TaskScheduler):
         """Task doesn't fire twice on the same calendar day after fall-back."""
         now = datetime(2026, 10, 25, 8, 0, tzinfo=timezone.utc)
         with patch("src.scheduler._now", return_value=now):
@@ -1991,9 +2141,7 @@ class TestDSTTransitionHandling:
             task["last_run"] = now.isoformat()  # already ran today
             assert scheduler._is_due(task) is False
 
-    def test_cron_spring_forward_after_cache_refresh(
-        self, scheduler: TaskScheduler
-    ):
+    def test_cron_spring_forward_after_cache_refresh(self, scheduler: TaskScheduler):
         """Cron task fires at correct UTC time after spring-forward with refreshed offset."""
         # Monday after spring-forward in Europe
         now = datetime(2026, 3, 30, 7, 0, tzinfo=timezone.utc)
@@ -2001,14 +2149,10 @@ class TestDSTTransitionHandling:
             scheduler._cached_utc_offset = 2.0  # CEST
             scheduler._utc_offset_updated_at = time.monotonic()
 
-            task = _make_task(
-                schedule_type="cron", hour=9, minute=0, weekdays=[now.weekday()]
-            )
+            task = _make_task(schedule_type="cron", hour=9, minute=0, weekdays=[now.weekday()])
             assert scheduler._is_due(task) is True
 
-    def test_cron_fall_back_after_cache_refresh(
-        self, scheduler: TaskScheduler
-    ):
+    def test_cron_fall_back_after_cache_refresh(self, scheduler: TaskScheduler):
         """Cron task fires at correct UTC time after fall-back with refreshed offset."""
         # Monday after fall-back in Europe
         now = datetime(2026, 10, 26, 8, 0, tzinfo=timezone.utc)
@@ -2016,14 +2160,10 @@ class TestDSTTransitionHandling:
             scheduler._cached_utc_offset = 1.0  # CET
             scheduler._utc_offset_updated_at = time.monotonic()
 
-            task = _make_task(
-                schedule_type="cron", hour=9, minute=0, weekdays=[now.weekday()]
-            )
+            task = _make_task(schedule_type="cron", hour=9, minute=0, weekdays=[now.weekday()])
             assert scheduler._is_due(task) is True
 
-    def test_cache_refreshes_after_ttl_post_dst(
-        self, scheduler: TaskScheduler
-    ):
+    def test_cache_refreshes_after_ttl_post_dst(self, scheduler: TaskScheduler):
         """After TTL expires post-DST, _get_cached_utc_offset refreshes to the new offset."""
         scheduler._cached_utc_offset = 1.0  # pre-DST CET
         scheduler._utc_offset_updated_at = time.monotonic() - 7200  # 2 hours past TTL
@@ -2032,9 +2172,7 @@ class TestDSTTransitionHandling:
             result = scheduler._get_cached_utc_offset()
             assert result == 2.0
 
-    def test_daily_correct_next_day_after_spring_forward(
-        self, scheduler: TaskScheduler
-    ):
+    def test_daily_correct_next_day_after_spring_forward(self, scheduler: TaskScheduler):
         """Task fires on the correct next calendar day after spring-forward.
 
         Ran on March 28 at UTC 08:00 (pre-DST, CET+1, local 09:00).
@@ -2050,9 +2188,7 @@ class TestDSTTransitionHandling:
             task["last_run"] = last_run
             assert scheduler._is_due(task) is True
 
-    def test_daily_correct_next_day_after_fall_back(
-        self, scheduler: TaskScheduler
-    ):
+    def test_daily_correct_next_day_after_fall_back(self, scheduler: TaskScheduler):
         """Task fires on the correct next calendar day after fall-back.
 
         Ran on Oct 24 at UTC 07:00 (pre-fall-back, CEST+2, local 09:00).
@@ -2068,9 +2204,7 @@ class TestDSTTransitionHandling:
             task["last_run"] = last_run
             assert scheduler._is_due(task) is True
 
-    def test_interval_unaffected_by_dst(
-        self, scheduler: TaskScheduler
-    ):
+    def test_interval_unaffected_by_dst(self, scheduler: TaskScheduler):
         """Interval tasks are DST-agnostic — they only measure elapsed seconds."""
         last_run = datetime(2026, 3, 29, 6, 0, tzinfo=timezone.utc).isoformat()
         now = datetime(2026, 3, 29, 7, 30, tzinfo=timezone.utc)  # 90 minutes later
@@ -2112,15 +2246,21 @@ class TestValidateTask:
 
     def test_empty_prompt_raises(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="prompt"):
-            scheduler._validate_task({"prompt": "", "schedule": {"type": "interval", "seconds": 60}})
+            scheduler._validate_task(
+                {"prompt": "", "schedule": {"type": "interval", "seconds": 60}}
+            )
 
     def test_whitespace_prompt_raises(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="prompt"):
-            scheduler._validate_task({"prompt": "   ", "schedule": {"type": "interval", "seconds": 60}})
+            scheduler._validate_task(
+                {"prompt": "   ", "schedule": {"type": "interval", "seconds": 60}}
+            )
 
     def test_non_string_prompt_raises(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="prompt"):
-            scheduler._validate_task({"prompt": 123, "schedule": {"type": "interval", "seconds": 60}})
+            scheduler._validate_task(
+                {"prompt": 123, "schedule": {"type": "interval", "seconds": 60}}
+            )
 
     def test_missing_schedule_raises(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="schedule"):
@@ -2140,7 +2280,9 @@ class TestValidateTask:
 
     def test_daily_missing_hour_raises(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="hour.*minute"):
-            scheduler._validate_task({"prompt": "test", "schedule": {"type": "daily", "minute": 30}})
+            scheduler._validate_task(
+                {"prompt": "test", "schedule": {"type": "daily", "minute": 30}}
+            )
 
     def test_daily_missing_minute_raises(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="hour.*minute"):
@@ -2152,15 +2294,21 @@ class TestValidateTask:
 
     def test_interval_zero_seconds_raises(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="seconds"):
-            scheduler._validate_task({"prompt": "test", "schedule": {"type": "interval", "seconds": 0}})
+            scheduler._validate_task(
+                {"prompt": "test", "schedule": {"type": "interval", "seconds": 0}}
+            )
 
     def test_interval_negative_seconds_raises(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="seconds"):
-            scheduler._validate_task({"prompt": "test", "schedule": {"type": "interval", "seconds": -10}})
+            scheduler._validate_task(
+                {"prompt": "test", "schedule": {"type": "interval", "seconds": -10}}
+            )
 
     def test_interval_string_seconds_raises(self, scheduler: TaskScheduler):
         with pytest.raises(ValueError, match="seconds"):
-            scheduler._validate_task({"prompt": "test", "schedule": {"type": "interval", "seconds": "60"}})
+            scheduler._validate_task(
+                {"prompt": "test", "schedule": {"type": "interval", "seconds": "60"}}
+            )
 
     def test_prompt_at_max_length_passes(self, scheduler: TaskScheduler):
         """Prompt exactly at MAX_SCHEDULED_PROMPT_LENGTH should be accepted."""
@@ -2208,38 +2356,56 @@ class TestValidateTask:
     def test_cron_weekdays_boundary_values(self, scheduler: TaskScheduler):
         """Boundary values 0 and 6 should be accepted."""
         scheduler._validate_task(
-            {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [0]}}
+            {
+                "prompt": "test",
+                "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [0]},
+            }
         )
         scheduler._validate_task(
-            {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [6]}}
+            {
+                "prompt": "test",
+                "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [6]},
+            }
         )
 
     def test_cron_weekdays_out_of_range_raises(self, scheduler: TaskScheduler):
         """Weekdays outside 0-6 should be rejected."""
         with pytest.raises(ValueError, match="weekdays.*0-6"):
             scheduler._validate_task(
-                {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [7, 8]}}
+                {
+                    "prompt": "test",
+                    "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [7, 8]},
+                }
             )
 
     def test_cron_weekdays_negative_raises(self, scheduler: TaskScheduler):
         """Negative weekday values should be rejected."""
         with pytest.raises(ValueError, match="weekdays.*0-6"):
             scheduler._validate_task(
-                {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [-1]}}
+                {
+                    "prompt": "test",
+                    "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [-1]},
+                }
             )
 
     def test_cron_weekdays_non_int_raises(self, scheduler: TaskScheduler):
         """Non-integer weekday values should be rejected."""
         with pytest.raises(ValueError, match="weekdays.*integers"):
             scheduler._validate_task(
-                {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [1.5]}}
+                {
+                    "prompt": "test",
+                    "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": [1.5]},
+                }
             )
 
     def test_cron_weekdays_not_list_raises(self, scheduler: TaskScheduler):
         """Weekdays as a non-list type should be rejected."""
         with pytest.raises(ValueError, match="weekdays.*list"):
             scheduler._validate_task(
-                {"prompt": "test", "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": "1,2,3"}}
+                {
+                    "prompt": "test",
+                    "schedule": {"type": "cron", "hour": 9, "minute": 0, "weekdays": "1,2,3"},
+                }
             )
 
     def test_cron_no_weekdays_passes(self, scheduler: TaskScheduler):
@@ -2292,9 +2458,13 @@ class TestValidateTask:
     # ── integration: valid tasks accepted and persisted correctly ──
 
     @pytest.mark.asyncio
-    async def test_add_task_valid_interval_persisted(self, scheduler: TaskScheduler, workspace: Path):
+    async def test_add_task_valid_interval_persisted(
+        self, scheduler: TaskScheduler, workspace: Path
+    ):
         """Valid interval task is accepted, stored internally, and persisted to disk."""
-        task_id = await scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=120))
+        task_id = await scheduler.add_task(
+            "chat1", _make_task(schedule_type="interval", seconds=120)
+        )
         assert task_id == "task_001"
         tasks = scheduler.list_tasks("chat1")
         assert len(tasks) == 1
@@ -2312,7 +2482,9 @@ class TestValidateTask:
     @pytest.mark.asyncio
     async def test_add_task_valid_daily_persisted(self, scheduler: TaskScheduler, workspace: Path):
         """Valid daily task is accepted, stored internally, and persisted to disk."""
-        task_id = await scheduler.add_task("chat1", _make_task(schedule_type="daily", hour=14, minute=30))
+        task_id = await scheduler.add_task(
+            "chat1", _make_task(schedule_type="daily", hour=14, minute=30)
+        )
         assert task_id == "task_001"
         tasks = scheduler.list_tasks("chat1")
         assert len(tasks) == 1
@@ -2358,11 +2530,15 @@ class TestValidateTask:
         assert data[0]["schedule"]["minute"] == 45
 
     @pytest.mark.asyncio
-    async def test_add_task_multiple_valid_types_coexist(self, scheduler: TaskScheduler, workspace: Path):
+    async def test_add_task_multiple_valid_types_coexist(
+        self, scheduler: TaskScheduler, workspace: Path
+    ):
         """Multiple valid tasks of different schedule types can coexist for same chat."""
         id1 = await scheduler.add_task("chat1", _make_task(schedule_type="interval", seconds=300))
         id2 = await scheduler.add_task("chat1", _make_task(schedule_type="daily", hour=8, minute=0))
-        id3 = await scheduler.add_task("chat1", _make_task(schedule_type="cron", hour=12, minute=30))
+        id3 = await scheduler.add_task(
+            "chat1", _make_task(schedule_type="cron", hour=12, minute=30)
+        )
         assert id1 != id2 != id3
         tasks = scheduler.list_tasks("chat1")
         assert len(tasks) == 3

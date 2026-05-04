@@ -23,7 +23,6 @@ import logging
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from src.constants import (
@@ -51,6 +50,7 @@ from src.utils.path import sanitize_path_component
 from src.utils.retry import is_transient_error
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from src.core.dedup import DeduplicationService
 
 log = logging.getLogger(__name__)
@@ -72,6 +72,23 @@ def _utc_offset_hours() -> float:
     """
     offset = datetime.now().astimezone().utcoffset()
     return offset.total_seconds() / 3600 if offset else 0
+
+
+def _target_utc_time(schedule: dict[str, Any], local_offset: float) -> tuple[int, int]:
+    """Convert a schedule's local ``hour:minute`` to UTC.
+
+    Args:
+        schedule: Dict with ``hour`` and ``minute`` keys (local time).
+        local_offset: Local UTC offset in hours (e.g. +1 for CET).
+
+    Returns:
+        ``(utc_hour, utc_minute)`` tuple.
+    """
+    target_hour = schedule.get("hour", 0)
+    target_min = schedule.get("minute", 0)
+    local_total_min = target_hour * 60 + target_min
+    utc_total_min = (local_total_min - int(local_offset * 60)) % (24 * 60)
+    return utc_total_min // 60, utc_total_min % 60
 
 
 class TaskScheduler(BaseBackgroundService):
@@ -296,9 +313,16 @@ class TaskScheduler(BaseBackgroundService):
         When ``SCHEDULER_HMAC_SECRET`` is configured, an HMAC-SHA256
         signature is written to a sidecar ``.hmac`` file alongside the
         tasks data.
+
+        Internal keys prefixed with ``_`` (e.g. ``_last_run_dt``) are
+        stripped before serialization — they are ephemeral cache values.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
-        content = json.dumps(data, indent=2)
+        serializable = [
+            {k: v for k, v in task.items() if not k.startswith("_")}
+            for task in data
+        ]
+        content = json.dumps(serializable, indent=2)
         path.write_text(content)
 
         secret = get_scheduler_secret()
@@ -343,8 +367,7 @@ class TaskScheduler(BaseBackgroundService):
                             chat_id,
                         )
                         log.warning(
-                            "AUDIT: scheduler_integrity_fail chat_id=%s "
-                            "reason=signature_mismatch",
+                            "AUDIT: scheduler_integrity_fail chat_id=%s reason=signature_mismatch",
                             chat_id,
                         )
                         return
@@ -406,6 +429,27 @@ class TaskScheduler(BaseBackgroundService):
             self._utc_offset_updated_at = now
         return self._cached_utc_offset
 
+    def _get_last_run_dt(self, task: dict[str, Any]) -> datetime | None:
+        """Return cached parsed ``last_run`` datetime, lazily parsing on first access.
+
+        Stores the parsed datetime as ``task["_last_run_dt"]`` to avoid
+        redundant ``datetime.fromisoformat()`` calls on every scheduler tick.
+        The cache is invalidated when ``last_run`` is updated in
+        ``_execute_task()``.
+        """
+        last_run = task.get("last_run")
+        if not last_run:
+            return None
+        cached = task.get("_last_run_dt")
+        if cached is not None:
+            return cached
+        try:
+            dt = datetime.fromisoformat(last_run)
+        except (ValueError, TypeError):
+            return None
+        task["_last_run_dt"] = dt
+        return dt
+
     def _is_due(self, task: dict[str, Any], now: datetime | None = None) -> bool:
         """Check if a task is due to run now.
 
@@ -426,15 +470,13 @@ class TaskScheduler(BaseBackgroundService):
         due_window = TICK_SECONDS * 1.5
 
         if stype == "daily":
-            target_hour = schedule.get("hour", 0)
-            target_min = schedule.get("minute", 0)
-            local_total_min = target_hour * 60 + target_min
-            utc_total_min = (local_total_min - int(local_offset * 60)) % (24 * 60)
-            utc_hour = utc_total_min // 60
-            utc_minute = utc_total_min % 60
+            utc_hour, utc_minute = _target_utc_time(schedule, local_offset)
             target = now.replace(hour=utc_hour, minute=utc_minute, second=0, microsecond=0)
             if abs((now - target).total_seconds()) < due_window:
-                if not last_run or not _same_day(last_run, now.isoformat()):
+                if not last_run:
+                    return True
+                last_dt = self._get_last_run_dt(task)
+                if not last_dt or last_dt.date() != now.date():
                     return True
 
         elif stype == "interval":
@@ -445,27 +487,29 @@ class TaskScheduler(BaseBackgroundService):
             if last_run_epoch is not None:
                 elapsed = now.timestamp() - last_run_epoch
             else:
-                elapsed = (now - datetime.fromisoformat(last_run)).total_seconds()
+                last_dt = self._get_last_run_dt(task)
+                elapsed = (now - last_dt).total_seconds() if last_dt else interval_sec
             if elapsed >= interval_sec:
                 return True
 
         elif stype == "cron":
-            target_hour = schedule.get("hour", 0)
-            target_min = schedule.get("minute", 0)
+            utc_hour, utc_minute = _target_utc_time(schedule, local_offset)
             weekdays = schedule.get("weekdays", list(range(7)))
-            local_total_min = target_hour * 60 + target_min
-            utc_total_min = (local_total_min - int(local_offset * 60)) % (24 * 60)
-            utc_hour = utc_total_min // 60
-            utc_minute = utc_total_min % 60
             target = now.replace(hour=utc_hour, minute=utc_minute, second=0, microsecond=0)
             if now.weekday() in weekdays and abs((now - target).total_seconds()) < due_window:
-                if not last_run or not _same_day(last_run, now.isoformat()):
+                if not last_run:
+                    return True
+                last_dt = self._get_last_run_dt(task)
+                if not last_dt or last_dt.date() != now.date():
                     return True
 
         return False
 
     async def _trigger_with_retry(
-        self, chat_id: str, prompt: str, task_id: str,
+        self,
+        chat_id: str,
+        prompt: str,
+        task_id: str,
     ) -> str:
         """Trigger the bot callback with retry for transient failures.
 
@@ -558,8 +602,7 @@ class TaskScheduler(BaseBackgroundService):
                 raise
             except asyncio.TimeoutError:
                 raise RuntimeError(
-                    f"Scheduled task {task_id} timed out after "
-                    f"{DEFAULT_SCHEDULER_TASK_TIMEOUT}s"
+                    f"Scheduled task {task_id} timed out after {DEFAULT_SCHEDULER_TASK_TIMEOUT}s"
                 ) from None
 
             # Write results back to shared dict in one synchronous block
@@ -567,6 +610,7 @@ class TaskScheduler(BaseBackgroundService):
             task["last_result"] = (result or "")[:2000]
             task["last_run"] = now_dt.isoformat()
             task["last_run_epoch"] = now_dt.timestamp()
+            task["_last_run_dt"] = now_dt
             self._tasks_dirty = True
 
             # Deliver result — transport layer handles reconnection
@@ -600,26 +644,33 @@ class TaskScheduler(BaseBackgroundService):
                 chat_id,
             )
             self._success_count += 1
-            self._recent_executions.append({
-                "task_id": task_id,
-                "chat_id": chat_id,
-                "status": "success",
-                "timestamp": _now().isoformat(),
-                "error_summary": None,
-            })
+            self._recent_executions.append(
+                {
+                    "task_id": task_id,
+                    "chat_id": chat_id,
+                    "status": "success",
+                    "timestamp": _now().isoformat(),
+                    "error_summary": None,
+                }
+            )
         except Exception as exc:
             self._failure_count += 1
-            self._recent_executions.append({
-                "task_id": task_id,
-                "chat_id": chat_id,
-                "status": "failure",
-                "timestamp": _now().isoformat(),
-                "error_summary": f"{type(exc).__name__}: {exc}"[:200],
-            })
+            self._recent_executions.append(
+                {
+                    "task_id": task_id,
+                    "chat_id": chat_id,
+                    "status": "failure",
+                    "timestamp": _now().isoformat(),
+                    "error_summary": f"{type(exc).__name__}: {exc}"[:200],
+                }
+            )
             log.error("Error executing task %s: %s", task_id, exc, exc_info=True)
 
     async def _deliver_with_retry(
-        self, chat_id: str, formatted: str, task_id: str,
+        self,
+        chat_id: str,
+        formatted: str,
+        task_id: str,
     ) -> None:
         """Deliver a scheduled task result with retry on transient send failures.
 
@@ -644,6 +695,7 @@ class TaskScheduler(BaseBackgroundService):
                 if not is_transient_error(exc):
                     raise
                 from src.utils.retry import calculate_delay_with_jitter
+
                 delay = calculate_delay_with_jitter(15.0 * (attempt + 1))
                 log.warning(
                     "Send attempt %d/%d failed for task %s: %s — retrying in %.1fs",
@@ -696,20 +748,18 @@ class TaskScheduler(BaseBackgroundService):
                         if last_run_epoch is not None:
                             elapsed = now.timestamp() - last_run_epoch
                         else:
-                            elapsed = (now - datetime.fromisoformat(last_run)).total_seconds()
+                            last_dt = self._get_last_run_dt(task)
+                            elapsed = (now - last_dt).total_seconds() if last_dt else interval_sec
                         candidate = max(0.0, interval_sec - elapsed)
 
                 elif stype in ("daily", "cron"):
-                    target_hour = schedule.get("hour", 0)
-                    target_min = schedule.get("minute", 0)
-                    local_total_min = target_hour * 60 + target_min
-                    utc_total_min = (local_total_min - int(local_offset * 60)) % (24 * 60)
-                    utc_hour = utc_total_min // 60
-                    utc_minute = utc_total_min % 60
+                    utc_hour, utc_minute = _target_utc_time(schedule, local_offset)
 
                     target_today = now.replace(
-                        hour=utc_hour, minute=utc_minute,
-                        second=0, microsecond=0,
+                        hour=utc_hour,
+                        minute=utc_minute,
+                        second=0,
+                        microsecond=0,
                     )
                     if target_today > now:
                         candidate = (target_today - now).total_seconds()
@@ -718,7 +768,9 @@ class TaskScheduler(BaseBackgroundService):
 
                     if stype == "cron":
                         weekdays = schedule.get("weekdays", list(range(7)))
-                        next_occ = target_today if target_today > now else target_today + timedelta(days=1)
+                        next_occ = (
+                            target_today if target_today > now else target_today + timedelta(days=1)
+                        )
                         for _ in range(8):
                             if next_occ.weekday() in weekdays:
                                 break
@@ -816,9 +868,7 @@ class TaskScheduler(BaseBackgroundService):
 
                     # Batch persist: one write per unique dirty chat_id
                     dirty_chat_ids = {cid for cid, _ in due_tasks}
-                    await asyncio.gather(
-                        *(self._persist(cid) for cid in dirty_chat_ids)
-                    )
+                    await asyncio.gather(*(self._persist(cid) for cid in dirty_chat_ids))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -839,7 +889,7 @@ class TaskScheduler(BaseBackgroundService):
             sleep_duration = self._compute_adaptive_sleep()
             if self._consecutive_failures > 0:
                 sleep_duration = min(
-                    sleep_duration * 2 ** self._consecutive_failures,
+                    sleep_duration * 2**self._consecutive_failures,
                     SCHEDULER_LOOP_BACKOFF_CAP,
                 )
                 log.info(
