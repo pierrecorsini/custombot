@@ -210,9 +210,7 @@ class Database:
             get_message_lock_fn=self._get_message_lock,
             get_index_lock_fn=self._message_store._get_index_lock,
             message_id_index=self._message_store._message_id_index,
-            mark_index_dirty_fn=lambda: setattr(
-                self._message_store, "_index_dirty", True
-            ),
+            mark_index_dirty_fn=lambda: setattr(self._message_store, "_index_dirty", True),
             atomic_write_fn=self._atomic_write,
             vector_memory=None,
         )
@@ -262,7 +260,8 @@ class Database:
         """
         if await self._write_breaker.is_open():
             log.warning(
-                "DB write circuit breaker OPEN — %s rejected", operation,
+                "DB write circuit breaker OPEN — %s rejected",
+                operation,
                 extra=_db_log_extra(),
             )
             raise DatabaseError(
@@ -277,7 +276,9 @@ class Database:
         for attempt in range(DB_WRITE_MAX_RETRIES + 1):
             try:
                 result = await self._run_with_timeout(
-                    write_fn(), timeout, operation,
+                    write_fn(),
+                    timeout,
+                    operation,
                 )
                 await self._write_breaker.record_success()
                 return result
@@ -431,7 +432,9 @@ class Database:
                     for line_num, line in enumerate(content.splitlines(), 1):
                         if not line.strip():
                             continue
-                        msg = safe_json_parse(line, default=None, log_errors=False, mode=JsonParseMode.LINE)
+                        msg = safe_json_parse(
+                            line, default=None, log_errors=False, mode=JsonParseMode.LINE
+                        )
                         if msg is None:
                             corrupted_files.append(f"{msg_file.name}:{line_num}")
                             continue
@@ -494,7 +497,9 @@ class Database:
         instructions_dir = workspace_root / "instructions"
         template_instructions = Path(__file__).parent.parent / "templates" / "instructions"
         await asyncio.to_thread(
-            self._seed_instruction_templates, template_instructions, instructions_dir,
+            self._seed_instruction_templates,
+            template_instructions,
+            instructions_dir,
         )
 
         # Load message ID index (delegated to MessageStore)
@@ -518,6 +523,35 @@ class Database:
 
         self._initialized = True
 
+    def warm_file_handles(self) -> int:
+        """Pre-warm ``FileHandlePool`` for all known chats.
+
+        Call after :meth:`connect` — iterates chat IDs loaded from
+        ``chats.json`` and opens their JSONL handles via the pool so the
+        first write to each chat avoids an ``open()`` syscall.
+
+        Runs synchronously; call via ``asyncio.to_thread()`` to avoid
+        blocking the event loop.
+
+        Returns:
+            Number of handles opened (excludes chats whose JSONL file
+            does not yet exist on disk).
+        """
+        count = 0
+        for chat_id in self._chats:
+            try:
+                path = self._message_file(chat_id)
+                if path.exists():
+                    self._file_pool.get_or_open(path)
+                    count += 1
+            except Exception:
+                log.debug(
+                    "FileHandle warmup skipped for chat %s", chat_id, exc_info=True
+                )
+        if count:
+            log.info("FileHandlePool pre-warmed %d handles for known chats", count)
+        return count
+
     async def close(self) -> None:
         """Flush any pending writes and close database."""
         # Flush any debounced chat writes
@@ -534,7 +568,8 @@ class Database:
 
     @staticmethod
     def _seed_instruction_templates(
-        template_instructions: Path, instructions_dir: Path,
+        template_instructions: Path,
+        instructions_dir: Path,
     ) -> None:
         """Copy instruction templates to workspace (runs off the event loop)."""
         if not template_instructions.is_dir():
@@ -743,7 +778,9 @@ class Database:
         Delegates to :func:`src.db.migration.apply_jsonl_migrations`.
         """
         apply_jsonl_migrations(
-            file_path, current_version, invalidate_fn=self._file_pool.invalidate,
+            file_path,
+            current_version,
+            invalidate_fn=self._file_pool.invalidate,
         )
 
     # ── compression delegation ─────────────────────────────────────────────

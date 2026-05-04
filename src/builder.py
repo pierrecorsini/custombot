@@ -19,6 +19,7 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -219,6 +220,9 @@ async def _step_database(ctx: BuilderContext) -> str | None:
     db = Database(data_dir=str(ctx.workspace / ".data"))
     async with maybe_spinner_async("Connecting to database..."):
         await db.connect()
+        # Pre-warm file handles for all known chats so crash recovery
+        # doesn't pay N serialized open() syscalls on first write.
+        await asyncio.to_thread(db.warm_file_handles)
     ctx.db = db
     # Wire dedup service (needs DB for inbound checks)
     ctx.dedup = DeduplicationService(db=db)
