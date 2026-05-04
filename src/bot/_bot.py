@@ -493,7 +493,7 @@ class Bot:
     ) -> str | None:
         """Core message processing: acquire lock, enqueue, run ReAct loop, track metrics."""
         tracer = get_tracer()
-        async with tracer.start_as_current_span_async(
+        with tracer.start_as_current_span(
             "message.process",
             attributes={
                 "messaging.destination": msg.chat_id,
