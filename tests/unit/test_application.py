@@ -13,8 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,6 +22,9 @@ from src.app import AppComponents, AppPhase, Application
 from src.channels.base import BaseChannel, IncomingMessage
 from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
 from src.core.startup import StartupOrchestrator
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,12 +174,15 @@ class TestStartup:
 
         mock_run = AsyncMock(side_effect=_populate_ctx_and_return)
         with patch.object(
-            StartupOrchestrator, "run_all", mock_run,
+            StartupOrchestrator,
+            "run_all",
+            mock_run,
         ):
             # Patch _build_state_from_ctx to avoid component validation
             # since the mock orchestrator doesn't populate the context
             with patch.object(
-                Application, "_build_state_from_ctx",
+                Application,
+                "_build_state_from_ctx",
                 return_value=_make_mock_app_components(),
             ):
                 await app._startup()
@@ -225,9 +230,7 @@ class TestStartup:
             ctx.health_server = mock_health
             return 0.0
 
-        with patch(
-            "src.core.startup.StartupOrchestrator.run_all", _fake_run_all
-        ):
+        with patch("src.core.startup.StartupOrchestrator.run_all", _fake_run_all):
             await app._startup()
 
         assert app._health_server is mock_health
@@ -250,9 +253,7 @@ class TestStartup:
             ctx.config_watcher = MagicMock()
             return 0.0
 
-        with patch(
-            "src.core.startup.StartupOrchestrator.run_all", _fake_run_all
-        ):
+        with patch("src.core.startup.StartupOrchestrator.run_all", _fake_run_all):
             await app._startup()
 
         assert app._state is not None
@@ -275,9 +276,7 @@ class TestStartup:
             ctx.config_watcher = MagicMock()
             return 0.0
 
-        with patch(
-            "src.core.startup.StartupOrchestrator.run_all", _fake_run_all
-        ):
+        with patch("src.core.startup.StartupOrchestrator.run_all", _fake_run_all):
             await app._startup()
 
         assert isinstance(app._state, AppComponents)
@@ -285,9 +284,7 @@ class TestStartup:
         with pytest.raises(AttributeError):
             app._state.pipeline = MagicMock()  # type: ignore[misc]
 
-    async def test_health_server_none_when_no_port(
-        self, test_config: Config
-    ) -> None:
+    async def test_health_server_none_when_no_port(self, test_config: Config) -> None:
         app = Application(test_config)  # no --health-port
 
         async def _fake_run_all(self_orch):
@@ -303,9 +300,7 @@ class TestStartup:
             # health_server stays None
             return 0.0
 
-        with patch(
-            "src.core.startup.StartupOrchestrator.run_all", _fake_run_all
-        ):
+        with patch("src.core.startup.StartupOrchestrator.run_all", _fake_run_all):
             await app._startup()
 
         assert app._health_server is None
@@ -335,13 +330,9 @@ class TestWireScheduler:
         on_send = mock_scheduler.set_on_send.call_args[0][0]
         await on_send("chat-1", "hello")
 
-        mock_channel.send_message.assert_awaited_once_with(
-            "chat-1", "hello", skip_delays=True
-        )
+        mock_channel.send_message.assert_awaited_once_with("chat-1", "hello", skip_delays=True)
 
-    async def test_set_on_trigger_calls_bot_process_scheduled(
-        self, test_config: Config
-    ) -> None:
+    async def test_set_on_trigger_calls_bot_process_scheduled(self, test_config: Config) -> None:
         mock_bot = AsyncMock()
         mock_channel = _make_mock_channel()
         mock_scheduler = _make_mock_scheduler()
@@ -418,9 +409,7 @@ class TestOnMessageDelegation:
         msg = _make_msg()
 
         mock_pipeline = MagicMock()
-        mock_pipeline.execute = AsyncMock(
-            side_effect=RuntimeError("pipeline failed")
-        )
+        mock_pipeline.execute = AsyncMock(side_effect=RuntimeError("pipeline failed"))
 
         mock_shutdown = MagicMock()
         mock_shutdown.accepting_messages = True
@@ -469,8 +458,7 @@ class TestOnMessageConcurrency:
 
         # Launch 5 messages — only 2 should run at once.
         tasks = [
-            asyncio.create_task(app._on_message(_make_msg(message_id=f"msg-{i}")))
-            for i in range(5)
+            asyncio.create_task(app._on_message(_make_msg(message_id=f"msg-{i}"))) for i in range(5)
         ]
         await asyncio.sleep(0.05)  # Let them hit the semaphore.
 
@@ -548,9 +536,7 @@ class TestOnMessageConcurrency:
 class TestShutdownCleanup:
     """Tests for Application._shutdown_cleanup() delegating to perform_shutdown."""
 
-    async def test_calls_perform_shutdown_with_all_components(
-        self, test_config: Config
-    ) -> None:
+    async def test_calls_perform_shutdown_with_all_components(self, test_config: Config) -> None:
         app = Application(test_config)
 
         mock_components = _make_mock_bot_components()
@@ -619,9 +605,7 @@ class TestShutdownCleanup:
         ctx = mock_ps.call_args[0][0]
         assert ctx.health_server is mock_health
 
-    async def test_config_watcher_timeout_does_not_block_cleanup(
-        self, test_config: Config
-    ) -> None:
+    async def test_config_watcher_timeout_does_not_block_cleanup(self, test_config: Config) -> None:
         """A hung config_watcher.stop() is cancelled after the step timeout."""
         app = Application(test_config)
 
@@ -853,6 +837,68 @@ class TestPhaseTransitions:
         app = Application(test_config)
         with pytest.raises(RuntimeError, match="CREATED.*STOPPED"):
             app._transition(AppPhase.STOPPED)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: Startup rollback on failure
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestStartupRollback:
+    """Tests for Application rollback during startup failure.
+
+    When a component spec raises during ``_startup()``, the Application
+    is left in STARTING phase with ``_state = None``.  These tests verify
+    that the state machine allows the STARTING → SHUTTING_DOWN → STOPPED
+    rollback path and that ``_shutdown_cleanup()`` handles the
+    partially-initialised state without AttributeError.
+    """
+
+    async def test_full_rollback_transition_sequence(
+        self, test_config: Config
+    ) -> None:
+        """The state machine permits STARTING → SHUTTING_DOWN → STOPPED."""
+        app = Application(test_config)
+        app._transition(AppPhase.STARTING)
+        assert app._phase == AppPhase.STARTING
+
+        # Startup fails — rollback through SHUTTING_DOWN to STOPPED
+        app._transition(AppPhase.SHUTTING_DOWN)
+        assert app._phase == AppPhase.SHUTTING_DOWN
+
+        app._transition(AppPhase.STOPPED)
+        assert app._phase == AppPhase.STOPPED
+
+    async def test_shutdown_cleanup_from_starting_phase(
+        self, test_config: Config
+    ) -> None:
+        """_shutdown_cleanup() during STARTING with _state=None completes
+        without AttributeError from partially-initialised components."""
+        app = Application(test_config)
+        app._transition(AppPhase.STARTING)
+        assert app._state is None
+
+        # No crash — _state is None, so cleanup returns early
+        await app._shutdown_cleanup()
+
+        # Phase unchanged: _shutdown_cleanup only transitions from RUNNING,
+        # and returns early when _state is None
+        assert app._phase == AppPhase.STARTING
+
+    async def test_shutdown_cleanup_after_manual_shutting_down_no_state(
+        self, test_config: Config
+    ) -> None:
+        """When caller transitions to SHUTTING_DOWN after startup failure,
+        _shutdown_cleanup() returns early without AttributeError."""
+        app = Application(test_config)
+        app._transition(AppPhase.STARTING)
+        app._transition(AppPhase.SHUTTING_DOWN)
+        assert app._state is None
+
+        await app._shutdown_cleanup()
+
+        # _state is None → early return, never reaches the STOPPED transition
+        assert app._phase == AppPhase.SHUTTING_DOWN
 
 
 # ─────────────────────────────────────────────────────────────────────────────
