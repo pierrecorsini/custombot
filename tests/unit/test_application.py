@@ -757,6 +757,135 @@ class TestShutdownCleanup:
         assert "db" in call_kwargs[1]["extra"]["affected_components"]
         assert "bot" in call_kwargs[1]["extra"]["affected_components"]
 
+    async def test_perform_shutdown_exception_still_transitions_to_stopped(
+        self, test_config: Config
+    ) -> None:
+        """If perform_shutdown raises Exception, we still transition to STOPPED."""
+        app = Application(test_config)
+
+        mock_components = _make_mock_bot_components()
+        mock_channel = _make_mock_channel()
+        mock_scheduler = _make_mock_scheduler()
+        mock_shutdown = MagicMock()
+
+        mock_cw = MagicMock()
+        mock_cw.stop = AsyncMock()
+        mock_wm = MagicMock()
+        mock_wm.stop = AsyncMock()
+
+        state = AppComponents(
+            shutdown_mgr=mock_shutdown,
+            components=mock_components,
+            scheduler=mock_scheduler,
+            channel=mock_channel,
+            pipeline=MagicMock(),
+            executor=MagicMock(spec=ThreadPoolExecutor),
+            workspace_monitor=mock_wm,
+            config_watcher=mock_cw,
+        )
+        app._state = state
+        app._health_server = None
+        app._phase = AppPhase.RUNNING
+
+        with (
+            patch("src.app.perform_shutdown", new_callable=AsyncMock) as mock_ps,
+            patch("src.app.log") as mock_log,
+        ):
+            mock_ps.side_effect = RuntimeError("component cleanup exploded")
+            await app._shutdown_cleanup()
+
+        mock_ps.assert_awaited_once()
+        assert app._phase == AppPhase.STOPPED
+
+        # Verify the error was logged
+        mock_log.error.assert_called_once()
+        assert "component cleanup exploded" in str(mock_log.error.call_args)
+
+    async def test_perform_shutdown_base_exception_still_transitions_to_stopped(
+        self, test_config: Config
+    ) -> None:
+        """If perform_shutdown raises BaseException (e.g. CancelledError),
+        we still transition to STOPPED."""
+        app = Application(test_config)
+
+        mock_components = _make_mock_bot_components()
+        mock_channel = _make_mock_channel()
+        mock_scheduler = _make_mock_scheduler()
+        mock_shutdown = MagicMock()
+
+        mock_cw = MagicMock()
+        mock_cw.stop = AsyncMock()
+        mock_wm = MagicMock()
+        mock_wm.stop = AsyncMock()
+
+        state = AppComponents(
+            shutdown_mgr=mock_shutdown,
+            components=mock_components,
+            scheduler=mock_scheduler,
+            channel=mock_channel,
+            pipeline=MagicMock(),
+            executor=MagicMock(spec=ThreadPoolExecutor),
+            workspace_monitor=mock_wm,
+            config_watcher=mock_cw,
+        )
+        app._state = state
+        app._health_server = None
+        app._phase = AppPhase.RUNNING
+
+        with (
+            patch("src.app.perform_shutdown", new_callable=AsyncMock) as mock_ps,
+            patch("src.app.log") as mock_log,
+        ):
+            mock_ps.side_effect = asyncio.CancelledError()
+            await app._shutdown_cleanup()
+
+        mock_ps.assert_awaited_once()
+        assert app._phase == AppPhase.STOPPED
+
+        # Verify the base exception was logged as a warning
+        mock_log.warning.assert_called_once()
+        assert "BaseException" in str(mock_log.warning.call_args)
+
+    async def test_config_watcher_base_exception_does_not_block_cleanup(
+        self, test_config: Config
+    ) -> None:
+        """A CancelledError from config_watcher.stop() is caught and logged."""
+        app = Application(test_config)
+
+        mock_components = _make_mock_bot_components()
+        mock_channel = _make_mock_channel()
+        mock_scheduler = _make_mock_scheduler()
+        mock_shutdown = MagicMock()
+
+        mock_cw = MagicMock()
+        mock_cw.stop = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_wm = MagicMock()
+        mock_wm.stop = AsyncMock()
+
+        state = AppComponents(
+            shutdown_mgr=mock_shutdown,
+            components=mock_components,
+            scheduler=mock_scheduler,
+            channel=mock_channel,
+            pipeline=MagicMock(),
+            executor=MagicMock(spec=ThreadPoolExecutor),
+            workspace_monitor=mock_wm,
+            config_watcher=mock_cw,
+        )
+        app._state = state
+        app._health_server = None
+        app._phase = AppPhase.RUNNING
+
+        with (
+            patch("src.app.perform_shutdown", new_callable=AsyncMock) as mock_ps,
+            patch("src.app.log") as mock_log,
+        ):
+            await app._shutdown_cleanup()
+
+        # perform_shutdown still called despite CancelledError
+        mock_ps.assert_awaited_once()
+        assert app._phase == AppPhase.STOPPED
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests: Property accessors (pre-startup guards)

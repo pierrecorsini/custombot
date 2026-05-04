@@ -605,6 +605,10 @@ class Application:
                 )
             except Exception as exc:
                 log.warning("Error stopping config watcher: %s", exc)
+            except BaseException as exc:
+                log.warning(
+                    "BaseException stopping config watcher (shutdown): %s", exc
+                )
 
         async def _stop_workspace_monitor() -> None:
             try:
@@ -627,6 +631,10 @@ class Application:
                 )
             except Exception as exc:
                 log.warning("Error stopping workspace monitor: %s", exc)
+            except BaseException as exc:
+                log.warning(
+                    "BaseException stopping workspace monitor (shutdown): %s", exc
+                )
 
         await asyncio.gather(_stop_config_watcher(), _stop_workspace_monitor())
 
@@ -667,6 +675,12 @@ class Application:
                         "routing_engine",
                     ],
                 },
+            )
+        except Exception as exc:
+            log.error("Error during perform_shutdown: %s", exc, exc_info=True)
+        except BaseException as exc:
+            log.warning(
+                "BaseException during shutdown (likely CancelledError): %s", exc
             )
 
         self._transition(AppPhase.STOPPED)
