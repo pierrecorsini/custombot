@@ -163,6 +163,137 @@ class TestInboundDedup:
         assert any("Dedup DB lookup failed" in r.message for r in caplog.records)
         assert any("msg_001" in r.message for r in caplog.records)
 
+    # ── Inbound LRU cache tests ──────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_avoids_db_call(self) -> None:
+        """Cached duplicate result short-circuits the async DB call."""
+        db = _make_db(message_exists_return=True)
+        dedup = DeduplicationService(db=db)
+
+        # First call: DB is queried, result cached.
+        result1 = await dedup.is_inbound_duplicate("msg_001")
+        assert result1 is True
+        assert db.message_exists.await_count == 1
+
+        # Second call: cache hit — DB should NOT be queried again.
+        result2 = await dedup.is_inbound_duplicate("msg_001")
+        assert result2 is True
+        assert db.message_exists.await_count == 1  # unchanged
+        assert dedup.stats.inbound_hits == 2
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_avoids_db_call(self) -> None:
+        """Cached non-duplicate result short-circuits the async DB call."""
+        db = _make_db(message_exists_return=False)
+        dedup = DeduplicationService(db=db)
+
+        # First call: DB queried, False cached.
+        result1 = await dedup.is_inbound_duplicate("msg_001")
+        assert result1 is False
+        assert db.message_exists.await_count == 1
+
+        # Second call: cache hit — DB should NOT be queried again.
+        result2 = await dedup.is_inbound_duplicate("msg_001")
+        assert result2 is False
+        assert db.message_exists.await_count == 1  # unchanged
+        assert dedup.stats.inbound_misses == 2
+
+    @pytest.mark.asyncio
+    async def test_cache_does_not_store_db_failure(self) -> None:
+        """DB failures are NOT cached — next call retries the DB."""
+        db = _make_db()
+        call_count = 0
+
+        async def _fail_then_succeed(msg_id: str) -> bool:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise DatabaseError("transient")
+            return True
+
+        db.message_exists.side_effect = _fail_then_succeed
+        dedup = DeduplicationService(db=db)
+
+        # First call: DB failure — returns False, NOT cached.
+        result1 = await dedup.is_inbound_duplicate("msg_001")
+        assert result1 is False
+
+        # Second call: DB succeeds — result IS cached.
+        result2 = await dedup.is_inbound_duplicate("msg_001")
+        assert result2 is True
+
+        # Third call: cache hit — DB not called again.
+        result3 = await dedup.is_inbound_duplicate("msg_001")
+        assert result3 is True
+        assert db.message_exists.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cache_bounded_by_max_size(self) -> None:
+        """Cache evicts oldest entries when max_size is exceeded."""
+        db = _make_db(message_exists_return=False)
+        dedup = DeduplicationService(db=db, inbound_cache_max_size=3)
+
+        # Fill cache with 3 entries.
+        await dedup.is_inbound_duplicate("msg_001")
+        await dedup.is_inbound_duplicate("msg_002")
+        await dedup.is_inbound_duplicate("msg_003")
+        assert db.message_exists.await_count == 3
+
+        # Adding a 4th entry evicts the oldest (msg_001).
+        await dedup.is_inbound_duplicate("msg_004")
+        assert db.message_exists.await_count == 4
+
+        # msg_001 is no longer cached → DB queried again.
+        await dedup.is_inbound_duplicate("msg_001")
+        assert db.message_exists.await_count == 5
+
+        # msg_003 is still cached (was the newest before msg_004) → no DB query.
+        await dedup.is_inbound_duplicate("msg_003")
+        assert db.message_exists.await_count == 5  # unchanged
+
+    @pytest.mark.asyncio
+    async def test_cache_respects_ttl(self) -> None:
+        """Cache entries expire after the configured TTL."""
+        db = _make_db(message_exists_return=False)
+        dedup = DeduplicationService(db=db, inbound_cache_ttl=0.01)  # 10ms
+
+        await dedup.is_inbound_duplicate("msg_001")
+        assert db.message_exists.await_count == 1
+
+        # Immediately re-check: cache hit.
+        await dedup.is_inbound_duplicate("msg_001")
+        assert db.message_exists.await_count == 1  # unchanged
+
+        # Wait for TTL to expire.
+        import asyncio
+
+        await asyncio.sleep(0.05)
+
+        # Cache expired → DB queried again.
+        await dedup.is_inbound_duplicate("msg_001")
+        assert db.message_exists.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_different_message_ids_independent(self) -> None:
+        """Each message_id has its own cache entry."""
+        db = _make_db()
+        dedup = DeduplicationService(db=db)
+
+        db.message_exists.return_value = False
+        await dedup.is_inbound_duplicate("msg_001")
+        db.message_exists.return_value = True
+        await dedup.is_inbound_duplicate("msg_002")
+        assert db.message_exists.await_count == 2
+
+        # Both cached independently.
+        db.message_exists.return_value = False  # would give wrong answer if DB queried
+        result1 = await dedup.is_inbound_duplicate("msg_001")
+        result2 = await dedup.is_inbound_duplicate("msg_002")
+        assert result1 is False  # cached from first call
+        assert result2 is True  # cached from second call
+        assert db.message_exists.await_count == 2  # no additional DB calls
+
 
 # ===========================================================================
 # Outbound dedup
@@ -213,6 +344,113 @@ class TestOutboundDedup:
         # Manually record, then check → should be a hit
         dedup.record_outbound("chat_1", "manual")
         assert dedup.is_outbound_duplicate("chat_1", "manual") is True
+
+
+# ===========================================================================
+# Outbound batching (record_outbound → flush pattern)
+# ===========================================================================
+
+
+class TestOutboundBatching:
+    """Tests for buffered outbound recording and batch flush."""
+
+    def test_record_outbound_appends_to_buffer(self) -> None:
+        """record_outbound() buffers entries without inserting into cache."""
+        db = _make_db()
+        dedup = DeduplicationService(db=db, outbound_ttl=60.0)
+
+        dedup.record_outbound("chat_1", "msg_a")
+        dedup.record_outbound("chat_2", "msg_b")
+
+        assert len(dedup._outbound_buffer) == 2
+        assert len(dedup._outbound_cache) == 0
+
+    def test_flush_inserts_buffered_entries_to_cache(self) -> None:
+        """flush_outbound_batch() moves all buffered entries to the cache."""
+        db = _make_db()
+        dedup = DeduplicationService(db=db, outbound_ttl=60.0)
+
+        dedup.record_outbound("chat_1", "msg_a")
+        dedup.record_outbound("chat_2", "msg_b")
+
+        dedup.flush_outbound_batch()
+
+        assert len(dedup._outbound_buffer) == 0
+        assert len(dedup._outbound_cache) == 2
+        # Both entries visible via check (auto-flush is no-op on empty buffer)
+        assert dedup.check_outbound_duplicate("chat_1", "msg_a") is True
+        assert dedup.check_outbound_duplicate("chat_2", "msg_b") is True
+
+    def test_flush_on_empty_buffer_is_noop(self) -> None:
+        """Flushing when buffer is empty is a safe no-op."""
+        db = _make_db()
+        dedup = DeduplicationService(db=db, outbound_ttl=60.0)
+
+        dedup.flush_outbound_batch()  # should not raise
+
+        assert len(dedup._outbound_buffer) == 0
+        assert len(dedup._outbound_cache) == 0
+
+    def test_check_outbound_duplicate_auto_flushes(self) -> None:
+        """check_outbound_duplicate() auto-flushes buffered entries."""
+        db = _make_db()
+        dedup = DeduplicationService(db=db, outbound_ttl=60.0)
+
+        dedup.record_outbound("chat_1", "msg_a")
+        assert len(dedup._outbound_buffer) == 1
+        assert len(dedup._outbound_cache) == 0
+
+        # Auto-flush makes the entry visible
+        assert dedup.check_outbound_duplicate("chat_1", "msg_a") is True
+        assert len(dedup._outbound_buffer) == 0
+
+    def test_is_outbound_duplicate_auto_flushes(self) -> None:
+        """is_outbound_duplicate() auto-flushes buffered entries."""
+        db = _make_db()
+        dedup = DeduplicationService(db=db, outbound_ttl=60.0)
+
+        dedup.record_outbound("chat_1", "msg_a")
+        assert dedup.is_outbound_duplicate("chat_1", "msg_a") is True
+
+    def test_buffered_entries_not_in_cache_before_flush(self) -> None:
+        """Buffered entries are absent from the outbound cache until flushed."""
+        db = _make_db()
+        dedup = DeduplicationService(db=db, outbound_ttl=60.0)
+
+        dedup.record_outbound("chat_1", "msg_a")
+        key = outbound_key("chat_1", "msg_a")
+        assert dedup._outbound_cache.get(key) is None
+
+    def test_batch_flush_amortises_eviction(self) -> None:
+        """Buffered entries exceeding max_size are evicted in a single pass."""
+        db = _make_db()
+        dedup = DeduplicationService(db=db, outbound_max_size=5, outbound_ttl=60.0)
+
+        # Buffer 8 entries — exceeds max_size=5
+        for i in range(8):
+            dedup.record_outbound("chat_1", f"msg_{i}")
+
+        assert len(dedup._outbound_buffer) == 8
+        assert len(dedup._outbound_cache) == 0
+
+        dedup.flush_outbound_batch()
+
+        assert len(dedup._outbound_buffer) == 0
+        assert len(dedup._outbound_cache) <= 5
+
+    def test_duplicate_in_buffer_coalesced_after_flush(self) -> None:
+        """Recording the same outbound twice in buffer coalesces to one key."""
+        db = _make_db()
+        dedup = DeduplicationService(db=db, outbound_ttl=60.0)
+
+        dedup.record_outbound("chat_1", "dup")
+        dedup.record_outbound("chat_1", "dup")
+
+        dedup.flush_outbound_batch()
+
+        # Same (chat_id, text) → same hash key → one cache entry
+        assert len(dedup._outbound_cache) == 1
+        assert dedup.check_outbound_duplicate("chat_1", "dup") is True
 
 
 # ===========================================================================
