@@ -923,7 +923,7 @@ class Bot:
             msg.sender_id,
         )
 
-        instruction_content = self._load_instruction(instruction_filename or "default.md")
+        instruction_content = self._instruction_loader.load(instruction_filename or "default.md")
         channel_prompt = channel.get_channel_prompt() if channel else None
 
         with context_assembly_span(chat_id=msg.chat_id, rule_id=matched_rule.id) as span:
@@ -1256,6 +1256,4 @@ class Bot:
                 logger=log,
             )
 
-    def _load_instruction(self, filename: str) -> str:
-        """Load instruction content via the InstructionLoader."""
-        return self._instruction_loader.load(filename)
+

@@ -550,7 +550,7 @@ class TestHandleMessageMaxLengthBoundary:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             result = await bot.handle_message(msg)
 
@@ -588,7 +588,7 @@ class TestHandleMessageMaxLengthBoundary:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             result = await bot.handle_message(msg)
 
@@ -661,7 +661,7 @@ class TestHandleMessageRateLimiting:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="Hi there!"),
-            patch.object(bot, "_load_instruction", return_value="system prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="system prompt"),
         ):
             result = await bot.handle_message(msg)
             assert result == "Hi there!"
@@ -694,7 +694,7 @@ class TestHandleMessageQueue:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="response"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             await bot.handle_message(msg)
             queue.enqueue.assert_awaited_once_with(msg)
@@ -717,7 +717,7 @@ class TestHandleMessageQueue:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="response"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             await bot.handle_message(msg)
             queue.complete.assert_awaited_once_with(msg.message_id)
@@ -738,7 +738,7 @@ class TestHandleMessageQueue:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="response"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             result = await bot.handle_message(msg)
             assert result == "response"
@@ -766,7 +766,7 @@ class TestHandleMessageErrors:
             patch(
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
             pytest.raises(RuntimeError, match="LLM failure"),
         ):
             await bot.handle_message(msg)
@@ -785,7 +785,7 @@ class TestHandleMessageErrors:
             patch(
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             result = await bot.handle_message(msg)
             assert result is None
@@ -806,7 +806,7 @@ class TestHandleMessageErrors:
             patch(
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             await bot.handle_message(msg)
             # complete should NOT be called on failure
@@ -856,7 +856,7 @@ class TestHandleMessageMetrics:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             await bot.handle_message(msg)
             mock_metrics.track_message_latency.assert_called_once()
@@ -881,7 +881,7 @@ class TestHandleMessageMetrics:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             await bot.handle_message(msg)
             mock_metrics.update_queue_depth.assert_called_once_with(5)
@@ -932,7 +932,7 @@ class TestHandleMessageIndentationRegression:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="Hello!"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             result = await bot.handle_message(msg)
 
@@ -951,7 +951,7 @@ class TestHandleMessageIndentationRegression:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             await bot.handle_message(msg)
 
@@ -970,7 +970,7 @@ class TestHandleMessageIndentationRegression:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             await bot.handle_message(msg)
 
@@ -988,7 +988,7 @@ class TestHandleMessageIndentationRegression:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             await bot.handle_message(msg)
 
@@ -1269,7 +1269,7 @@ class TestProcess:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="Hi!"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             await bot.handle_message(msg)
 
@@ -1298,7 +1298,7 @@ class TestProcess:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="Final answer"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             await bot.handle_message(msg)
 
@@ -1338,7 +1338,7 @@ class TestProcess:
             patch.object(
                 bot._context_assembler, "finalize_turn", return_value="Here's what I found"
             ),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
             patch(
                 "src.bot._bot.format_response_with_tool_log",
                 return_value="Here's what I found\n\n[tool log]",
@@ -1365,7 +1365,7 @@ class TestProcess:
                 "src.core.context_assembler.build_context", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="Hi!"),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             stream_cb = AsyncMock()
             await bot.handle_message(msg, stream_callback=stream_cb)
@@ -1809,23 +1809,6 @@ class TestFinalizeTurn:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Bot._load_instruction Tests
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestLoadInstruction:
-    """Tests for Bot._load_instruction — instruction file loading."""
-
-    def test_delegates_to_instruction_loader(self):
-        bot = _make_bot()
-        bot._instruction_loader = MagicMock()
-        bot._instruction_loader.load = MagicMock(return_value="file content")
-        result = bot._load_instruction("test.md")
-        assert result == "file content"
-        bot._instruction_loader.load.assert_called_once_with("test.md")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Integration-style Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1852,7 +1835,7 @@ class TestHandleMessageEndToEnd:
                 return_value=[],
             ),
             patch.object(bot._context_assembler, "finalize_turn", return_value="2+2 equals 4."),
-            patch.object(bot, "_load_instruction", return_value="You are a math tutor."),
+            patch.object(bot._instruction_loader, "load", return_value="You are a math tutor."),
         ):
             result = await bot.handle_message(msg)
 
@@ -1893,7 +1876,7 @@ class TestHandleMessageEndToEnd:
                 "finalize_turn",
                 return_value="Here are some Python tutorials...",
             ),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             result = await bot.handle_message(msg)
 
@@ -1923,7 +1906,7 @@ class TestHandleMessageEndToEnd:
                 "finalize_turn",
                 side_effect=["Response to chat 1", "Response to chat 2"],
             ),
-            patch.object(bot, "_load_instruction", return_value="prompt"),
+            patch.object(bot._instruction_loader, "load", return_value="prompt"),
         ):
             results = await asyncio.gather(
                 bot.handle_message(msg1),
@@ -1958,7 +1941,7 @@ class TestHandleMessageEndToEnd:
                     return_value=[],
                 ),
                 patch.object(bot._context_assembler, "finalize_turn", return_value="ok"),
-                patch.object(bot, "_load_instruction", return_value="prompt"),
+                patch.object(bot._instruction_loader, "load", return_value="prompt"),
             ):
                 await bot.handle_message(msg)
 
@@ -1984,7 +1967,7 @@ class TestHandleMessageEndToEnd:
                     new_callable=AsyncMock,
                     return_value=[],
                 ),
-                patch.object(bot, "_load_instruction", return_value="prompt"),
+                patch.object(bot._instruction_loader, "load", return_value="prompt"),
             ):
                 await bot.handle_message(msg)
 
