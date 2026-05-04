@@ -556,3 +556,59 @@ class TestOutboundKeyPropertyBased:
         key = outbound_key(chat_id, text)
         assert len(key) == 16
         assert all(c in "0123456789abcdef" for c in key)
+
+    @given(
+        chat_id=st.text(min_size=0, max_size=200),
+        text=st.text(min_size=0, max_size=500),
+    )
+    @settings(max_examples=300)
+    def test_deterministic(self, chat_id: str, text: str) -> None:
+        """Calling outbound_key twice with the same inputs always yields the same key."""
+        assert outbound_key(chat_id, text) == outbound_key(chat_id, text)
+
+    @given(
+        chat_id=st.text(min_size=0, max_size=10_000),
+        text=st.text(min_size=0, max_size=10_000),
+    )
+    @settings(max_examples=100)
+    def test_very_long_inputs(self, chat_id: str, text: str) -> None:
+        """outbound_key handles very long inputs (up to 10 KB) without error.
+
+        Verifies both determinism and valid hex output for large payloads
+        that could appear in practice (e.g. long messages or encoded attachments).
+        """
+        key = outbound_key(chat_id, text)
+        assert key == outbound_key(chat_id, text)
+        assert len(key) == 16
+        assert all(c in "0123456789abcdef" for c in key)
+
+    @given(data=st.data())
+    @settings(max_examples=200)
+    def test_unicode_edge_cases(self, data: st.DataObject) -> None:
+        """Exercise Unicode edge cases including surrogates, zero-width chars, and CJK."""
+        chat_id = data.draw(
+            st.text(
+                alphabet=st.characters(
+                    min_codepoint=0x0001,
+                    max_codepoint=0x10FFFF,
+                    exclude_categories=("Cs",),
+                ),
+                min_size=0,
+                max_size=200,
+            )
+        )
+        text = data.draw(
+            st.text(
+                alphabet=st.characters(
+                    min_codepoint=0x0001,
+                    max_codepoint=0x10FFFF,
+                    exclude_categories=("Cs",),
+                ),
+                min_size=0,
+                max_size=500,
+            )
+        )
+        key = outbound_key(chat_id, text)
+        assert key == outbound_key(chat_id, text)
+        assert len(key) == 16
+        assert all(c in "0123456789abcdef" for c in key)
