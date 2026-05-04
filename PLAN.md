@@ -25,7 +25,7 @@
 
 - [x] Handle `BaseException` (not just `Exception`) in `_shutdown_cleanup` — `Application._shutdown_cleanup()` catches `Exception` from `perform_shutdown()` but `asyncio.TimeoutError` in Python 3.11+ is a subclass of `BaseException` in some edge cases; ensure the timeout wrapper propagates cleanly.
 - [x] Add structured retry for `_save_chats` on `OSError` — `Database._save_chats()` delegates to `_guarded_write` which retries on `OSError`, but the debounced save in `upsert_chat` can silently lose writes if the process crashes between debounce intervals; add a final flush on `close()` (already present, but verify it handles partial writes).
-- [ ] Protect `TaskScheduler` main loop against `BaseException` — the scheduler loop (line ~938) catches `Exception` but not `BaseException` (e.g. `KeyboardInterrupt`, `SystemExit`); wrap the entire loop in a `try/finally` that sets `_running = False` unconditionally.
+- [x] Protect `TaskScheduler` main loop against `BaseException` — the scheduler loop (line ~938) catches `Exception` but not `BaseException` (e.g. `KeyboardInterrupt`, `SystemExit`); wrap the entire loop in a `try/finally` that sets `_running = False` unconditionally.
 - [ ] Add generation-conflict recovery for `_deliver_response` — when a generation conflict is detected, the current code logs and proceeds but notes that "tool-log entries may interleave"; implement a re-read + merge strategy to guarantee consistent JSONL order.
 - [ ] Emit `message_dropped` event for rate-limited messages — `Bot.handle_message()` returns `None` silently when rate-limited; emit a `message_dropped` event with `reason="rate_limited"` for observability parity with other rejection paths (no routing match, too long, etc.).
 

@@ -856,76 +856,79 @@ class TaskScheduler(BaseBackgroundService):
         After execution, dirty chat_ids are persisted in batch — one file
         write per unique chat_id instead of one per task.
         """
-        while self._running:
-            tick_had_failure = False
-            tick_had_tasks = False
+        try:
+            while self._running:
+                tick_had_failure = False
+                tick_had_tasks = False
 
-            try:
-                now = _now()
-                due_tasks: list[tuple[str, dict[str, Any]]] = []
-                for chat_id, tasks in list(self._tasks.items()):
-                    for task in tasks:
-                        if self._is_due(task, now):
-                            due_tasks.append((chat_id, task))
+                try:
+                    now = _now()
+                    due_tasks: list[tuple[str, dict[str, Any]]] = []
+                    for chat_id, tasks in list(self._tasks.items()):
+                        for task in tasks:
+                            if self._is_due(task, now):
+                                due_tasks.append((chat_id, task))
 
-                if due_tasks:
-                    tick_had_tasks = True
-                    results = await asyncio.gather(
-                        *[self._execute_task(cid, t) for cid, t in due_tasks],
-                        return_exceptions=True,
-                    )
-                    for i, result in enumerate(results):
-                        if isinstance(result, BaseException) and not isinstance(result, Exception):
-                            cid, t = due_tasks[i]
-                            log.critical(
-                                "Scheduled task %s raised BaseException: %s",
-                                t.get("task_id"),
-                                result,
-                                exc_info=(type(result), result, result.__traceback__),
-                            )
-                            raise result
-                        if isinstance(result, Exception):
-                            tick_had_failure = True
-                            cid, t = due_tasks[i]
-                            log.error(
-                                "Scheduled task %s raised: %s",
-                                t.get("task_id"),
-                                result,
-                                exc_info=(type(result), result, result.__traceback__),
-                            )
+                    if due_tasks:
+                        tick_had_tasks = True
+                        results = await asyncio.gather(
+                            *[self._execute_task(cid, t) for cid, t in due_tasks],
+                            return_exceptions=True,
+                        )
+                        for i, result in enumerate(results):
+                            if isinstance(result, BaseException) and not isinstance(result, Exception):
+                                cid, t = due_tasks[i]
+                                log.critical(
+                                    "Scheduled task %s raised BaseException: %s",
+                                    t.get("task_id"),
+                                    result,
+                                    exc_info=(type(result), result, result.__traceback__),
+                                )
+                                raise result
+                            if isinstance(result, Exception):
+                                tick_had_failure = True
+                                cid, t = due_tasks[i]
+                                log.error(
+                                    "Scheduled task %s raised: %s",
+                                    t.get("task_id"),
+                                    result,
+                                    exc_info=(type(result), result, result.__traceback__),
+                                )
 
-                    # Batch persist: one write per unique dirty chat_id
-                    dirty_chat_ids = {cid for cid, _ in due_tasks}
-                    await asyncio.gather(*(self._persist(cid) for cid in dirty_chat_ids))
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                tick_had_failure = True
-                log.error("Scheduler loop error: %s", exc, exc_info=True)
+                        # Batch persist: one write per unique dirty chat_id
+                        dirty_chat_ids = {cid for cid, _ in due_tasks}
+                        await asyncio.gather(*(self._persist(cid) for cid in dirty_chat_ids))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    tick_had_failure = True
+                    log.error("Scheduler loop error: %s", exc, exc_info=True)
 
-            # Update consecutive-failure tracking and apply backoff
-            if tick_had_failure:
-                self._consecutive_failures += 1
-            elif tick_had_tasks:
+                # Update consecutive-failure tracking and apply backoff
+                if tick_had_failure:
+                    self._consecutive_failures += 1
+                elif tick_had_tasks:
+                    if self._consecutive_failures > 0:
+                        log.info(
+                            "Scheduler recovered after %d consecutive failures",
+                            self._consecutive_failures,
+                        )
+                    self._consecutive_failures = 0
+
+                sleep_duration = self._compute_adaptive_sleep()
                 if self._consecutive_failures > 0:
-                    log.info(
-                        "Scheduler recovered after %d consecutive failures",
-                        self._consecutive_failures,
+                    sleep_duration = min(
+                        sleep_duration * 2**self._consecutive_failures,
+                        SCHEDULER_LOOP_BACKOFF_CAP,
                     )
-                self._consecutive_failures = 0
-
-            sleep_duration = self._compute_adaptive_sleep()
-            if self._consecutive_failures > 0:
-                sleep_duration = min(
-                    sleep_duration * 2**self._consecutive_failures,
-                    SCHEDULER_LOOP_BACKOFF_CAP,
-                )
-                log.info(
-                    "Scheduler tick failed (consecutive: %d), backoff sleep %.1fs",
-                    self._consecutive_failures,
-                    sleep_duration,
-                )
-            await asyncio.sleep(sleep_duration)
+                    log.info(
+                        "Scheduler tick failed (consecutive: %d), backoff sleep %.1fs",
+                        self._consecutive_failures,
+                        sleep_duration,
+                    )
+                await asyncio.sleep(sleep_duration)
+        finally:
+            self._running = False
 
 
 def _same_day(iso_a: str, iso_b: str) -> bool:
