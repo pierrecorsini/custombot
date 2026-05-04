@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import heapq
-import json
 import logging
 import time
 from collections import deque
@@ -44,7 +43,7 @@ from src.security.signing import (
     verify_payload,
     write_signature_file,
 )
-from src.utils import JSONDecodeError
+from src.utils import JSONDecodeError, json_dumps, json_loads
 from src.utils.background_service import BaseBackgroundService
 from src.utils.path import sanitize_path_component
 from src.utils.retry import is_transient_error
@@ -322,7 +321,7 @@ class TaskScheduler(BaseBackgroundService):
             {k: v for k, v in task.items() if not k.startswith("_")}
             for task in data
         ]
-        content = json.dumps(serializable, indent=2)
+        content = json_dumps(serializable, indent=2)
         path.write_text(content)
 
         secret = get_scheduler_secret()
@@ -371,7 +370,7 @@ class TaskScheduler(BaseBackgroundService):
                             chat_id,
                         )
                         return
-                self._tasks[chat_id] = json.loads(raw)
+                self._tasks[chat_id] = json_loads(raw)
                 self._tasks_dirty = True
         except (JSONDecodeError, OSError) as exc:
             log.error("Failed to load scheduler tasks for %s: %s", chat_id, exc)
