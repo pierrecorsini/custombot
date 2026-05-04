@@ -91,6 +91,38 @@ class AppComponents:
     workspace_monitor: WorkspaceMonitor
     config_watcher: ConfigWatcher
 
+    def to_shutdown_context(
+        self,
+        *,
+        health_server: HealthServer | None = None,
+        session_metrics: dict,
+        verbose: bool = False,
+        log: logging.Logger | None = None,
+    ) -> ShutdownContext:
+        """Build a ``ShutdownContext`` from these components.
+
+        Centralises the mapping so that adding a field to either
+        ``AppComponents`` or ``ShutdownContext`` produces a type error
+        here, preventing silent drift.
+        """
+        return ShutdownContext(
+            shutdown=self.shutdown_mgr,
+            channel=self.channel,
+            scheduler=self.scheduler,
+            health_server=health_server,
+            db=self.components.db,
+            vector_memory=self.components.vector_memory,
+            project_store=self.components.project_store,
+            message_queue=self.components.message_queue,
+            llm=self.components.llm,
+            session_metrics=session_metrics,
+            log=log or logging.getLogger(__name__),
+            verbose=verbose,
+            bot=self.components.bot,
+            executor=self.executor,
+            routing_engine=self.components.routing_engine,
+        )
+
 
 # ── Valid phase transitions ──────────────────────────────────────────────
 
@@ -608,22 +640,11 @@ class Application:
         try:
             await asyncio.wait_for(
                 perform_shutdown(
-                    ShutdownContext(
-                        shutdown=state.shutdown_mgr,
-                        channel=state.channel,
-                        scheduler=state.scheduler,
+                    state.to_shutdown_context(
                         health_server=self._health_server,
-                        db=state.components.db,
-                        vector_memory=state.components.vector_memory,
-                        project_store=state.components.project_store,
-                        message_queue=state.components.message_queue,
-                        llm=state.components.llm,
                         session_metrics=self._session_metrics.to_dict(),
-                        log=log,
                         verbose=self._verbose,
-                        bot=state.components.bot,
-                        executor=state.executor,
-                        routing_engine=state.components.routing_engine,
+                        log=log,
                     )
                 ),
                 timeout=CLEANUP_STEP_TIMEOUT,
