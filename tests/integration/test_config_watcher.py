@@ -12,16 +12,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.bot import BotConfig
 from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig, save_config
+from src.config.config import ShellConfig
 from src.config.config_watcher import ConfigChangeApplier, ConfigWatcher
 from src.exceptions import ConfigurationError
 from src.shutdown import GracefulShutdown
+from src.skills.builtin.shell import ShellSkill
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -163,9 +168,7 @@ class TestConfigWatcherMalformedJSON:
     """Verify that malformed JSON does not crash the watcher loop."""
 
     @pytest.mark.asyncio
-    async def test_malformed_json_does_not_crash_watcher(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_malformed_json_does_not_crash_watcher(self, tmp_path: Path) -> None:
         """
         Writing malformed JSON (e.g. ``{invalid}``) to the config file causes
         the watcher to log an error but continue polling. A subsequent valid
@@ -230,9 +233,7 @@ class TestConfigWatcherMalformedJSON:
             await watcher.stop()
 
     @pytest.mark.asyncio
-    async def test_malformed_json_keeps_current_config(
-        self, tmp_path: Path, caplog
-    ) -> None:
+    async def test_malformed_json_keeps_current_config(self, tmp_path: Path, caplog) -> None:
         """
         When the watcher encounters malformed JSON, the current (last-known-good)
         config remains in effect — no fields are changed on live components.
@@ -268,10 +269,7 @@ class TestConfigWatcherMalformedJSON:
             assert applier._bot._cfg.max_tool_iterations == bot_before
 
             # Watcher should have logged an error about the invalid config
-            assert any(
-                "Config hot-reload failed" in rec.message
-                for rec in caplog.records
-            ), (
+            assert any("Config hot-reload failed" in rec.message for rec in caplog.records), (
                 "Expected an error log about config hot-reload failure, "
                 f"got: {[rec.message for rec in caplog.records]}"
             )
@@ -365,9 +363,7 @@ class TestConfigChangeApplierValidation:
 class TestConfigChangeApplierDestructiveFields:
     """Verify destructive fields are warned and NOT applied; safe fields ARE applied."""
 
-    def test_destructive_fields_warned_safe_fields_applied(
-        self, tmp_path: Path, caplog
-    ) -> None:
+    def test_destructive_fields_warned_safe_fields_applied(self, tmp_path: Path, caplog) -> None:
         """
         When a config change includes BOTH destructive fields (``llm.model``,
         ``llm.api_key``) and safe fields (``llm.temperature``,
@@ -460,10 +456,10 @@ class TestConfigChangeApplierDestructiveFields:
         # New config changes BOTH destructive (model, api_key) and safe (temperature)
         updated = Config(
             llm=LLMConfig(
-                model="gpt-4o-mini",           # destructive — must NOT reach provider
+                model="gpt-4o-mini",  # destructive — must NOT reach provider
                 base_url="https://api.openai.com/v1",
                 api_key="sk-new-dangerous-key",  # destructive — must NOT reach provider
-                temperature=0.8,                 # safe — MUST reach provider
+                temperature=0.8,  # safe — MUST reach provider
                 timeout=60.0,
             ),
             whatsapp=WhatsAppConfig(
@@ -593,9 +589,7 @@ class TestConfigChangeApplierAtomicSwap:
         assert app_config_ref["config"] is initial
 
     @pytest.mark.asyncio
-    async def test_no_hybrid_state_during_concurrent_reads(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_no_hybrid_state_during_concurrent_reads(self, tmp_path: Path) -> None:
         """
         Concurrent coroutines reading config fields during a hot-reload must
         never observe a hybrid state (e.g. new temperature but old timeout).
@@ -651,6 +645,95 @@ class TestConfigChangeApplierAtomicSwap:
         for r in readers:
             await r
 
-        assert not hybrid_detected.is_set(), (
-            "Detected hybrid config state — atomic swap failed"
+        assert not hybrid_detected.is_set(), "Detected hybrid config state — atomic swap failed"
+
+
+class TestShellDenylistHotReload:
+    """Verify hot-reloaded shell.command_denylist takes effect on skill execution.
+
+    Tests the full pipeline: file change → watcher detection → config swap →
+    new ShellSkill behavior. Uses ``docker ps`` (not ``rm -rf /``) because
+    ``rm -rf`` is already blocked by built-in patterns — the test must prove
+    the *custom* denylist added via hot-reload is what blocks the command.
+    """
+
+    @pytest.mark.asyncio
+    async def test_hot_reloaded_denylist_blocks_command(self, tmp_path: Path) -> None:
+        """
+        Write a config with empty denylist, start the watcher, then update
+        the config to add ``\\bdocker\\b`` to the denylist. After the watcher
+        detects and applies the change, a ShellSkill constructed with the
+        updated config must reject ``docker ps``.
+        """
+        # ── Arrange: initial config with empty denylist ──
+        config_path = tmp_path / "config.json"
+        initial = _base_config(tmp_path)
+        initial.shell = ShellConfig(command_denylist=[], command_allowlist=[])
+        save_config(initial, config_path)
+
+        applier = _make_applier(initial)
+
+        watcher = ConfigWatcher(
+            config_path=config_path,
+            current_config=initial,
+            applier=applier,
+            poll_interval=0.05,
+            debounce=0.0,
         )
+
+        # Pre-condition: "docker ps" passes security with empty denylist
+        initial_skill = ShellSkill(config=initial.shell)
+        with patch("src.skills.builtin.shell.AsyncExecutor") as mock_exec_cls:
+            mock_instance = AsyncMock()
+            mock_instance.run = AsyncMock(
+                return_value=MagicMock(
+                    stdout="CONTAINER ID  IMAGE",
+                    stderr="",
+                    return_code=0,
+                    timed_out=False,
+                )
+            )
+            mock_exec_cls.return_value = mock_instance
+
+            result_before = await initial_skill.execute(
+                workspace_dir=tmp_path,
+                command="docker ps",
+            )
+
+        assert not result_before.startswith("❌ Security:"), (
+            "docker ps should be allowed with empty denylist"
+        )
+
+        # ── Act: hot-reload config with denylist ──
+        updated = _base_config(tmp_path)
+        updated.shell = ShellConfig(
+            command_denylist=[r"\bdocker\b"],
+            command_allowlist=[],
+        )
+        save_config(updated, config_path)
+
+        watcher.start()
+        try:
+            await asyncio.sleep(0.5)
+
+            # ── Assert: applier received the new config ──
+            reloaded_config = applier._config
+            assert reloaded_config.shell.command_denylist == [r"\bdocker\b"], (
+                "Applier config should reflect the hot-reloaded denylist"
+            )
+
+            # ── Assert: new ShellSkill with updated config blocks the command ──
+            reloaded_skill = ShellSkill(config=reloaded_config.shell)
+            result_after = await reloaded_skill.execute(
+                workspace_dir=tmp_path,
+                command="docker ps",
+            )
+
+            assert result_after.startswith("❌ Security:"), (
+                "docker ps should be blocked after hot-reload added it to denylist"
+            )
+            assert "custom denylist" in result_after.lower(), (
+                f"Expected 'custom denylist' in rejection message, got: {result_after}"
+            )
+        finally:
+            await watcher.stop()
