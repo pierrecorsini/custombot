@@ -256,6 +256,19 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
+      # Coverage regression gate — compares actual coverage against the stored
+      # floor in .coverage-floor.  Fails the run if coverage has dropped below
+      # the threshold.  On main-branch pushes, --update ratchets the floor
+      # upward automatically so the baseline never goes stale.
+      - name: Coverage regression check
+        if: matrix.python-version == '3.11'
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            ARGS="--update"
+          fi
+          python scripts/check_coverage_floor.py $ARGS
+
   # Dedicated Python 3.13 compatibility report.
   # Runs the full test suite with verbose output, JUnit XML, and uploads a
   # structured compatibility report so 3.13-specific failures are tracked
