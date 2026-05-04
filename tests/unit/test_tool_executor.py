@@ -20,7 +20,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.core.tool_executor import MAX_ARGS_BYTES, MAX_ARGS_DEPTH, ToolExecutor, _measured_depth, format_skill_error
+from src.core.tool_executor import (
+    MAX_ARGS_BYTES,
+    MAX_ARGS_DEPTH,
+    ToolExecutor,
+    _measured_depth,
+    format_skill_error,
+)
 from src.exceptions import SkillError
 from src.rate_limiter import RateLimitResult
 from tests.helpers.llm_mocks import make_tool_call
@@ -285,9 +291,7 @@ class TestToolExecutorOversizedArgs:
             workspace_dir=Path("/tmp/ws"),
         )
 
-        metrics.track_skill_args_oversized.assert_called_once_with(
-            "my_skill", len(oversized_args)
-        )
+        metrics.track_skill_args_oversized.assert_called_once_with("my_skill", len(oversized_args))
 
     async def test_oversized_args_no_metrics_when_none(self) -> None:
         """No error when metrics is None (default)."""
@@ -902,8 +906,6 @@ class TestToolExecutorClose:
             skills_registry=registry,
             audit_log_dir=tmp_path / "audit",
         )
-        # Trigger lazy creation of the audit logger via _audit()
-        executor._audit("chat_1", "skill_a", "{}", True, "success")
         assert executor._audit_logger is not None
 
         executor.close()
@@ -916,8 +918,6 @@ class TestToolExecutorClose:
             skills_registry=registry,
             audit_log_dir=tmp_path / "audit",
         )
-        # Trigger lazy creation
-        executor._audit("chat_1", "skill_a", "{}", True, "success")
         logger = executor._audit_logger
         assert logger is not None
 
@@ -995,8 +995,7 @@ class TestToolExecutorClose:
         executor._audit("chat_1", "skill_a", "{}", True, "success")
         executor.close()
 
-        # This should not recreate the logger because _audit_log_dir
-        # was set to None during first _audit() call
+        # _audit_logger is already None after close(), so _audit() is a no-op
         executor._audit("chat_2", "skill_b", "{}", True, "success")
         assert executor._audit_logger is None
 
