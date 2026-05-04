@@ -15,6 +15,7 @@ Built-in event names:
     - ``scheduled_task_completed`` — scheduled task finished successfully
     - ``message_dropped``          — message dropped without processing (no routing/match)
     - ``generation_conflict``      — write conflict detected during response delivery
+    - ``startup_completed``         — application startup finished successfully
 
 Usage::
 
@@ -70,6 +71,7 @@ EVENT_SCHEDULED_TASK_STARTED: str = "scheduled_task_started"
 EVENT_SCHEDULED_TASK_COMPLETED: str = "scheduled_task_completed"
 EVENT_MESSAGE_DROPPED: str = "message_dropped"
 EVENT_GENERATION_CONFLICT: str = "generation_conflict"
+EVENT_STARTUP_COMPLETED: str = "startup_completed"
 
 KNOWN_EVENTS: frozenset[str] = frozenset(
     {
@@ -82,6 +84,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         EVENT_SCHEDULED_TASK_COMPLETED,
         EVENT_MESSAGE_DROPPED,
         EVENT_GENERATION_CONFLICT,
+        EVENT_STARTUP_COMPLETED,
     }
 )
 
@@ -299,4 +302,5 @@ __all__ = [
     "EVENT_SCHEDULED_TASK_COMPLETED",
     "EVENT_MESSAGE_DROPPED",
     "EVENT_GENERATION_CONFLICT",
+    "EVENT_STARTUP_COMPLETED",
 ]

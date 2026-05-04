@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Optional
 
 from src.constants import CLEANUP_STEP_TIMEOUT, DEFAULT_CHANNEL_STARTUP_TIMEOUT
-from src.core.event_bus import EVENT_ERROR_OCCURRED, Event, get_event_bus
+from src.core.event_bus import EVENT_ERROR_OCCURRED, EVENT_STARTUP_COMPLETED, Event, get_event_bus
 from src.core.message_pipeline import MessageContext
 from src.core.startup import StartupContext, StartupOrchestrator
 from src.core.errors import NonCriticalCategory, log_noncritical
@@ -334,6 +335,28 @@ class Application:
         _log_startup_complete(
             startup_time, self._initialized_components, self.components.component_durations
         )
+
+        # Emit structured startup event for monitoring subscribers.
+        try:
+            await get_event_bus().emit(
+                Event(
+                    name=EVENT_STARTUP_COMPLETED,
+                    data={
+                        "component_count": len(self._initialized_components),
+                        "total_duration_s": time.time() - startup_time,
+                        "component_durations": dict(
+                            self.components.component_durations
+                        ),
+                    },
+                    source="Application.run",
+                )
+            )
+        except Exception:
+            log_noncritical(
+                NonCriticalCategory.EVENT_EMISSION,
+                "Failed to emit startup_completed event",
+                logger=log,
+            )
 
         try:
             cli_output.info("Listening...  (Ctrl+C to stop)")
