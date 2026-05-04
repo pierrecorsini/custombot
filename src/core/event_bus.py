@@ -14,6 +14,7 @@ Built-in event names:
     - ``scheduled_task_started``  — scheduled task began processing
     - ``scheduled_task_completed`` — scheduled task finished successfully
     - ``message_dropped``          — message dropped without processing (no routing/match)
+    - ``generation_conflict``      — write conflict detected during response delivery
 
 Usage::
 
@@ -68,6 +69,7 @@ EVENT_SHUTDOWN_STARTED: str = "shutdown_started"
 EVENT_SCHEDULED_TASK_STARTED: str = "scheduled_task_started"
 EVENT_SCHEDULED_TASK_COMPLETED: str = "scheduled_task_completed"
 EVENT_MESSAGE_DROPPED: str = "message_dropped"
+EVENT_GENERATION_CONFLICT: str = "generation_conflict"
 
 KNOWN_EVENTS: frozenset[str] = frozenset(
     {
@@ -79,6 +81,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         EVENT_SCHEDULED_TASK_STARTED,
         EVENT_SCHEDULED_TASK_COMPLETED,
         EVENT_MESSAGE_DROPPED,
+        EVENT_GENERATION_CONFLICT,
     }
 )
 
@@ -166,9 +169,7 @@ class EventBus:
         """Remove *handler* from *event_name* subscriptions."""
         if event_name not in self._handlers:
             return
-        self._handlers[event_name] = [
-            h for h in self._handlers[event_name] if h is not handler
-        ]
+        self._handlers[event_name] = [h for h in self._handlers[event_name] if h is not handler]
         log.debug(
             "Unsubscribed handler from event '%s' (%d remaining)",
             event_name,
@@ -188,17 +189,15 @@ class EventBus:
             log.warning("Event emitted after bus closed: %s", event.name)
             return
 
-        self._emission_counts[event.name] = (
-            self._emission_counts.get(event.name, 0) + 1
-        )
+        self._emission_counts[event.name] = self._emission_counts.get(event.name, 0) + 1
 
         handlers = self._handlers.get(event.name)
         if not handlers:
             return
 
-        self._handler_invocation_counts[event.name] = (
-            self._handler_invocation_counts.get(event.name, 0) + len(handlers)
-        )
+        self._handler_invocation_counts[event.name] = self._handler_invocation_counts.get(
+            event.name, 0
+        ) + len(handlers)
 
         if event.name not in KNOWN_EVENTS:
             log.debug(
@@ -299,4 +298,5 @@ __all__ = [
     "EVENT_SCHEDULED_TASK_STARTED",
     "EVENT_SCHEDULED_TASK_COMPLETED",
     "EVENT_MESSAGE_DROPPED",
+    "EVENT_GENERATION_CONFLICT",
 ]

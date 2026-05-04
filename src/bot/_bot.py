@@ -41,7 +41,7 @@ from src.constants import (
 from src.core.context_assembler import ContextAssembler
 from src.core.context_builder import ChatMessage
 from src.core.errors import NonCriticalCategory, log_noncritical
-from src.core.event_bus import Event, EventBus, get_event_bus
+from src.core.event_bus import EVENT_GENERATION_CONFLICT, Event, EventBus, get_event_bus
 from src.core.instruction_loader import InstructionLoader
 from src.core.project_context import ProjectContextLoader as _ProjectContextLoaderImpl
 from src.core.tool_executor import ToolExecutor
@@ -1096,12 +1096,25 @@ class Bot:
             # producing interleaved tool/result lines alongside the concurrent
             # turn's messages.  A full re-read + merge would be needed to avoid
             # this, but the per-chat lock makes true concurrency rare.
+            current_gen = self._db.get_generation(chat_id)
             log.warning(
                 "Write conflict for chat %s — generation changed during "
                 "processing. Persisting with potentially stale context; "
                 "tool-log entries may interleave with a concurrent turn.",
                 chat_id,
                 extra={"chat_id": chat_id},
+            )
+            await get_event_bus().emit(
+                Event(
+                    name=EVENT_GENERATION_CONFLICT,
+                    data={
+                        "chat_id": chat_id,
+                        "expected_generation": generation,
+                        "current_generation": current_gen,
+                    },
+                    source="Bot._deliver_response",
+                    correlation_id=get_correlation_id(),
+                )
             )
         await self._db.save_messages_batch(chat_id=chat_id, messages=batch)
 
