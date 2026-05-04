@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Final
 
 from src.exceptions import CustomBotException
+from src.utils.async_file import sync_atomic_write
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +135,6 @@ def write_signature_file(sig_path: str | Path, signature: str) -> None:
     path = Path(sig_path) if not isinstance(sig_path, Path) else sig_path
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(signature)
+        sync_atomic_write(path, signature)
     except OSError as exc:
         log.error("Failed to write HMAC signature file %s: %s", path, exc)

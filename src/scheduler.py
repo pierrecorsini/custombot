@@ -44,6 +44,7 @@ from src.security.signing import (
     write_signature_file,
 )
 from src.utils import JSONDecodeError, json_dumps, json_loads
+from src.utils.async_file import sync_atomic_write
 from src.utils.background_service import BaseBackgroundService
 from src.utils.path import sanitize_path_component
 from src.utils.retry import is_transient_error
@@ -322,7 +323,7 @@ class TaskScheduler(BaseBackgroundService):
             for task in data
         ]
         content = json_dumps(serializable, indent=2)
-        path.write_text(content)
+        sync_atomic_write(path, content)
 
         secret = get_scheduler_secret()
         if secret is not None:
