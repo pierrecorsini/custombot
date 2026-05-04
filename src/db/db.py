@@ -496,11 +496,13 @@ class Database:
         workspace_root = self._dir.parent
         instructions_dir = workspace_root / "instructions"
         template_instructions = Path(__file__).parent.parent / "templates" / "instructions"
-        await asyncio.to_thread(
-            self._seed_instruction_templates,
-            template_instructions,
-            instructions_dir,
-        )
+        # Avoid event-loop overhead when template directory is absent or empty
+        if template_instructions.is_dir() and any(template_instructions.iterdir()):
+            await asyncio.to_thread(
+                self._seed_instruction_templates,
+                template_instructions,
+                instructions_dir,
+            )
 
         # Load message ID index (delegated to MessageStore)
         await self._message_store.ensure_message_index()

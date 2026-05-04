@@ -15,7 +15,7 @@
 
 ## Performance Optimization
 
-- [ ] Avoid redundant `asyncio.to_thread()` for `_seed_instruction_templates` — `Database.connect()` always offloads seeding to a thread even when the template directory is empty; add an early `is_dir()` check before creating the thread task to avoid event-loop overhead on every startup.
+- [x] Avoid redundant `asyncio.to_thread()` for `_seed_instruction_templates` — `Database.connect()` always offloads seeding to a thread even when the template directory is empty; add an early `is_dir()` check before creating the thread task to avoid event-loop overhead on every startup.
 - [ ] Pre-compute `_match_impl` wildcard shortcut for single-rule routing — when only one routing rule exists (common for simple deployments), the channel-index lookup, cache check, and priority merge are all unnecessary overhead; add a fast path that directly evaluates the single rule.
 - [ ] Batch `save_message` calls in `_prepare_turn` — `Bot._prepare_turn()` makes separate `upsert_chat()` and `save_message()` calls that each acquire locks and debounce; combine into a single write transaction to reduce lock contention and I/O syscalls.
 - [ ] Replace `perf_counter()` calls with monotonic clock in hot paths — `_handle_message_inner` and `_react_iteration` both call `time.perf_counter()` multiple times; cache the start time in a context variable and derive elapsed from it to reduce syscall overhead.
