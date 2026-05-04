@@ -1,5 +1,4 @@
-"""
-src/scheduler.py — Async task scheduler engine.
+"""scheduler/engine.py — Async task scheduler engine.
 
 Runs as an asyncio background task. Checks scheduled jobs periodically,
 and when a job is due, injects a synthetic message into the bot's
@@ -9,9 +8,6 @@ Schedule types:
   - daily:   {hour, minute} — runs once per day at that time
   - interval: {seconds}     — runs every N seconds
   - cron:    {hour, minute, weekdays} — runs on specific days
-
-Persistence:
-  workspace/.scheduler/tasks.json — one array of task objects per chat.
 """
 
 from __future__ import annotations
@@ -27,7 +23,6 @@ from typing import Any, Awaitable, Callable, TYPE_CHECKING
 from src.constants import (
     DEFAULT_SCHEDULER_TASK_TIMEOUT,
     MAX_SCHEDULED_PROMPT_LENGTH,
-    SCHEDULER_HMAC_SECRET_ENV,
     SCHEDULER_HMAC_SIG_EXT,
     SCHEDULER_LOOP_BACKOFF_CAP,
     SCHEDULER_MAX_RETRIES,
@@ -36,59 +31,25 @@ from src.constants import (
     SCHEDULER_RETRY_INITIAL_DELAY,
 )
 from src.db.db import _validate_chat_id
-from src.security.signing import (
-    get_scheduler_secret,
-    read_signature_file,
-    sign_payload,
-    verify_payload,
-    write_signature_file,
-)
-from src.utils import JSONDecodeError, json_dumps, json_loads
-from src.utils.async_file import sync_atomic_write
+from src.security.signing import get_scheduler_secret, read_signature_file, sign_payload
+from src.utils import JSONDecodeError, json_loads
 from src.utils.background_service import BaseBackgroundService
-from src.utils.path import sanitize_path_component
 from src.utils.retry import is_transient_error
+
+from src.scheduler.cron import TICK_SECONDS, _now, _target_utc_time, _utc_offset_hours
+from src.scheduler.persistence import (
+    SCHEDULER_DIR,
+    TASKS_FILE,
+    read_tasks_file,
+    resolve_tasks_path,
+    write_tasks_file,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
     from src.core.dedup import DeduplicationService
 
 log = logging.getLogger(__name__)
-
-SCHEDULER_DIR = ".scheduler"
-TASKS_FILE = "tasks.json"
-TICK_SECONDS = 30  # check every 30s
-
-
-def _now() -> datetime:
-    return datetime.now(tz=timezone.utc)
-
-
-def _utc_offset_hours() -> float:
-    """Local UTC offset in hours (e.g. +1 for CET).
-
-    .astimezone() converts a naive datetime to the local timezone,
-    which makes .utcoffset() work reliably on all platforms (including Windows).
-    """
-    offset = datetime.now().astimezone().utcoffset()
-    return offset.total_seconds() / 3600 if offset else 0
-
-
-def _target_utc_time(schedule: dict[str, Any], local_offset: float) -> tuple[int, int]:
-    """Convert a schedule's local ``hour:minute`` to UTC.
-
-    Args:
-        schedule: Dict with ``hour`` and ``minute`` keys (local time).
-        local_offset: Local UTC offset in hours (e.g. +1 for CET).
-
-    Returns:
-        ``(utc_hour, utc_minute)`` tuple.
-    """
-    target_hour = schedule.get("hour", 0)
-    target_min = schedule.get("minute", 0)
-    local_total_min = target_hour * 60 + target_min
-    utc_total_min = (local_total_min - int(local_offset * 60)) % (24 * 60)
-    return utc_total_min // 60, utc_total_min % 60
 
 
 class TaskScheduler(BaseBackgroundService):
@@ -274,61 +235,15 @@ class TaskScheduler(BaseBackgroundService):
 
     # ── persistence ────────────────────────────────────────────────────────
 
-    def _resolve_tasks_path(self, chat_id: str) -> Path | None:
-        """Build and validate the tasks.json path for a chat.
-
-        Sanitizes ``chat_id`` and verifies the resolved path stays within
-        the workspace root to prevent path-traversal attacks.
-
-        Returns:
-            Validated ``Path`` or ``None`` if workspace is unset / path is
-            outside the workspace tree.
-        """
-        if not self._workspace:
-            return None
-        safe_id = sanitize_path_component(chat_id)
-        dest = (self._workspace / safe_id / SCHEDULER_DIR / TASKS_FILE).resolve()
-        workspace_root = self._workspace.resolve()
-        if not dest.is_relative_to(workspace_root):
-            log.warning(
-                "Scheduler path traversal blocked for chat_id=%r (resolved: %s)",
-                chat_id,
-                dest,
-            )
-            return None
-        return dest
-
     async def _persist(self, chat_id: str) -> None:
         """Persist tasks to disk via thread pool to avoid blocking the event loop."""
-        dest = self._resolve_tasks_path(chat_id)
+        if not self._workspace:
+            return
+        dest = resolve_tasks_path(self._workspace, chat_id)
         if dest is None:
             return
         data = self._tasks.get(chat_id, [])
-        await asyncio.to_thread(self._write_tasks_file, dest, data)
-
-    @staticmethod
-    def _write_tasks_file(path: Path, data: list[dict[str, Any]]) -> None:
-        """Synchronous helper: mkdir + serialize + write (runs in thread pool).
-
-        When ``SCHEDULER_HMAC_SECRET`` is configured, an HMAC-SHA256
-        signature is written to a sidecar ``.hmac`` file alongside the
-        tasks data.
-
-        Internal keys prefixed with ``_`` (e.g. ``_last_run_dt``) are
-        stripped before serialization — they are ephemeral cache values.
-        """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        serializable = [
-            {k: v for k, v in task.items() if not k.startswith("_")}
-            for task in data
-        ]
-        content = json_dumps(serializable, indent=2)
-        sync_atomic_write(path, content)
-
-        secret = get_scheduler_secret()
-        if secret is not None:
-            signature = sign_payload(secret, content.encode("utf-8"))
-            write_signature_file(path.with_suffix(path.suffix + SCHEDULER_HMAC_SIG_EXT), signature)
+        await asyncio.to_thread(write_tasks_file, dest, data)
 
     async def _load(self, chat_id: str) -> None:
         """Load tasks for a chat from disk via thread pool to avoid blocking.
@@ -337,11 +252,13 @@ class TaskScheduler(BaseBackgroundService):
         verified before parsing.  If verification fails, tasks are **not**
         loaded and a security audit warning is logged.
         """
-        dest = self._resolve_tasks_path(chat_id)
+        if not self._workspace:
+            return
+        dest = resolve_tasks_path(self._workspace, chat_id)
         if dest is None:
             return
         try:
-            raw = await asyncio.to_thread(self._read_tasks_file, dest)
+            raw = await asyncio.to_thread(read_tasks_file, dest)
             if raw is not None:
                 # Verify HMAC when a secret is configured.
                 secret = get_scheduler_secret()
@@ -403,13 +320,6 @@ class TaskScheduler(BaseBackgroundService):
                 self._tasks_dirty = True
         except (JSONDecodeError, OSError) as exc:
             log.error("Failed to load scheduler tasks for %s: %s", chat_id, exc)
-
-    @staticmethod
-    def _read_tasks_file(path: Path) -> str | None:
-        """Synchronous helper: check exists + read (runs in thread pool)."""
-        if path.exists():
-            return path.read_text()
-        return None
 
     async def load_all(self) -> None:
         """Load tasks for all chats from workspace concurrently.
@@ -710,7 +620,7 @@ class TaskScheduler(BaseBackgroundService):
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
-                await self._on_send(chat_id, formatted)
+                await self._on_send(chat_id, formatted)  # type: ignore[misc]
                 log.info(
                     "Delivered scheduled task %s to chat %s",
                     task_id,
@@ -929,13 +839,3 @@ class TaskScheduler(BaseBackgroundService):
                 await asyncio.sleep(sleep_duration)
         finally:
             self._running = False
-
-
-def _same_day(iso_a: str, iso_b: str) -> bool:
-    """Check if two ISO timestamps are on the same calendar day (UTC)."""
-    try:
-        da = datetime.fromisoformat(iso_a)
-        db = datetime.fromisoformat(iso_b)
-        return da.date() == db.date()
-    except (ValueError, TypeError):
-        return False
