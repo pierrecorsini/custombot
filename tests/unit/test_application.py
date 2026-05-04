@@ -928,3 +928,134 @@ class TestPropertyGuards:
         app = Application(test_config)
         with pytest.raises(RuntimeError, match="Components not available in CREATED phase"):
             _ = app.scheduler
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: _swap_config() atomicity
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSwapConfigAtomicity:
+    """Verify that _swap_config() performs a truly atomic reference swap.
+
+    Under CPython's GIL a single attribute assignment is atomic, so concurrent
+    coroutines reading ``app._config`` should observe either the *entire* old
+    config or the *entire* new config — never a hybrid that mixes fields from
+    both (e.g. new temperature but old shutdown_timeout).
+    """
+
+    @staticmethod
+    def _config_a(tmp_path: "Path") -> Config:
+        """Config "A" with distinctive field values."""
+        return Config(
+            llm=LLMConfig(
+                model="model-a",
+                base_url="https://a.example.com",
+                api_key="sk-a",
+                temperature=0.3,
+                timeout=15.0,
+            ),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+            ),
+            shutdown_timeout=20.0,
+            per_chat_timeout=120.0,
+            log_verbosity="quiet",
+            skills_auto_load=False,
+        )
+
+    @staticmethod
+    def _config_b(tmp_path: "Path") -> Config:
+        """Config "B" — every observable field differs from A."""
+        return Config(
+            llm=LLMConfig(
+                model="model-b",
+                base_url="https://b.example.com",
+                api_key="sk-b",
+                temperature=0.9,
+                timeout=60.0,
+            ),
+            whatsapp=WhatsAppConfig(
+                provider="neonize",
+                neonize=NeonizeConfig(db_path=str(tmp_path / "session.db")),
+            ),
+            shutdown_timeout=90.0,
+            per_chat_timeout=300.0,
+            log_verbosity="verbose",
+            skills_auto_load=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_hybrid_state_during_concurrent_reads(
+        self, tmp_path: "Path"
+    ) -> None:
+        """Concurrent readers must never see a hybrid config during _swap_config()."""
+        cfg_a = self._config_a(tmp_path)
+        cfg_b = self._config_b(tmp_path)
+
+        app = Application(cfg_a)
+
+        # ── Reader coroutine ──────────────────────────────────────────────
+        hybrid_detected = asyncio.Event()
+        stop_reading = asyncio.Event()
+
+        async def reader() -> None:
+            while not stop_reading.is_set():
+                cfg = app._config
+                is_a = (
+                    cfg.llm.temperature == 0.3
+                    and cfg.llm.model == "model-a"
+                    and cfg.shutdown_timeout == 20.0
+                    and cfg.per_chat_timeout == 120.0
+                    and cfg.log_verbosity == "quiet"
+                )
+                is_b = (
+                    cfg.llm.temperature == 0.9
+                    and cfg.llm.model == "model-b"
+                    and cfg.shutdown_timeout == 90.0
+                    and cfg.per_chat_timeout == 300.0
+                    and cfg.log_verbosity == "verbose"
+                )
+                if not is_a and not is_b:
+                    hybrid_detected.set()
+                    return
+                await asyncio.sleep(0)
+
+        # ── Launch readers, swap, then stop ───────────────────────────────
+        readers = [asyncio.create_task(reader()) for _ in range(5)]
+        await asyncio.sleep(0.01)  # let readers spin up
+
+        app._swap_config(cfg_b)
+
+        await asyncio.sleep(0.02)  # let readers observe new state
+
+        stop_reading.set()
+        for r in readers:
+            await r
+
+        assert not hybrid_detected.is_set(), (
+            "Detected hybrid config state — _swap_config() is not atomic"
+        )
+
+    def test_swap_changes_reference(self, tmp_path: "Path") -> None:
+        """After _swap_config, app._config is the new object."""
+        cfg_a = self._config_a(tmp_path)
+        cfg_b = self._config_b(tmp_path)
+
+        app = Application(cfg_a)
+        assert app._config is cfg_a
+
+        app._swap_config(cfg_b)
+        assert app._config is cfg_b
+        assert app._config.llm.temperature == 0.9
+
+    def test_swap_idempotent_with_same_config(
+        self, tmp_path: "Path"
+    ) -> None:
+        """Swapping with the same config object is a no-op identity swap."""
+        cfg = self._config_a(tmp_path)
+        app = Application(cfg)
+
+        app._swap_config(cfg)
+        assert app._config is cfg
