@@ -25,14 +25,16 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.channels.base import IncomingMessage
 from src.routing import MatchingContext, RoutingEngine, RoutingRule
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -162,6 +164,190 @@ class TestRoutingMatch:
 
 
 # ===================================================================
+# 1b. ROUTING LATENCY THRESHOLD REGRESSION
+# ===================================================================
+
+# Absolute latency threshold — if any scenario regresses beyond this the
+# test fails, acting as a CI performance gate for the hot-path matching.
+_ROUTING_MATCH_THRESHOLD_MS = 1.0
+_ROUTING_BENCH_ITERATIONS = 1_000
+
+
+def _median_ns(samples: list[int]) -> float:
+    """Return the median value in nanoseconds from a *sorted* list."""
+    n = len(samples)
+    mid = n // 2
+    if n % 2 == 0:
+        return (samples[mid - 1] + samples[mid]) / 2
+    return float(samples[mid])
+
+
+@pytest.fixture()
+def routing_engine_indexed(tmp_path: Path) -> RoutingEngine:
+    """RoutingEngine with a fully-built channel index (realistic match path).
+
+    Unlike ``routing_engine`` above (which sets ``_rules_list`` directly and
+    skips index rebuild), this fixture uses the ``_rules`` setter so that
+    ``_candidates_by_channel`` and ``_default_candidates`` are populated —
+    the same state the engine reaches after ``load_rules()``.
+    """
+    engine = RoutingEngine(tmp_path / "instructions", use_watchdog=False)
+
+    rules = [
+        # Wildcard catch-all (lowest priority)
+        RoutingRule(
+            id="catch-all",
+            priority=100,
+            sender="*",
+            recipient="*",
+            channel="*",
+            content_regex="*",
+            instruction="chat.md",
+        ),
+        # Channel-specific (medium priority)
+        RoutingRule(
+            id="whatsapp-rule",
+            priority=10,
+            sender="*",
+            recipient="*",
+            channel="whatsapp",
+            content_regex="*",
+            instruction="whatsapp.md",
+        ),
+        # Regex content match (high priority)
+        RoutingRule(
+            id="greeting",
+            priority=0,
+            sender="*",
+            recipient="*",
+            channel="whatsapp",
+            content_regex="hello|hi|hey.*",
+            instruction="greeting.md",
+        ),
+        # Specific sender (very high priority)
+        RoutingRule(
+            id="admin",
+            priority=-1,
+            sender="9999999999",
+            recipient="*",
+            channel="*",
+            content_regex="*",
+            instruction="admin.md",
+        ),
+    ]
+    # Use the _rules setter to rebuild the channel index properly.
+    engine._rules = rules  # noqa: SLF001
+    engine._last_stale_check = time.monotonic()
+    engine._file_mtimes = {}
+    return engine
+
+
+@pytest.mark.benchmark(group="routing-threshold", disable_gc=True)
+class TestRoutingLatencyThreshold:
+    """Assert ``match_with_rule()`` median latency stays under 1 ms.
+
+    Unlike the ``pytest-benchmark`` tests in ``TestRoutingMatch``, these use
+    direct ``time.perf_counter_ns()`` measurement with a hard assertion.
+    A failure means a performance regression was introduced in the matching
+    logic, the channel index, or the cache layer.
+    """
+
+    def test_cold_match_wildcard(self, routing_engine_indexed: RoutingEngine) -> None:
+        """Full evaluation path — cache miss, regex compiled, wildcard matched."""
+        msg = _make_msg(text="random message")
+        samples: list[int] = []
+        for _ in range(_ROUTING_BENCH_ITERATIONS):
+            routing_engine_indexed._match_cache.clear()
+            start = time.perf_counter_ns()
+            routing_engine_indexed.match_with_rule(msg)
+            samples.append(time.perf_counter_ns() - start)
+        samples.sort()
+        median_ms = _median_ns(samples) / 1_000_000
+        assert median_ms < _ROUTING_MATCH_THRESHOLD_MS, (
+            f"Cold wildcard match median {median_ms:.4f} ms exceeds "
+            f"{_ROUTING_MATCH_THRESHOLD_MS} ms threshold"
+        )
+
+    def test_cold_match_regex(self, routing_engine_indexed: RoutingEngine) -> None:
+        """Regex content matching — more expensive pattern evaluation."""
+        msg = _make_msg(text="Hello, how are you?")
+        # Prime regex compilation on first call
+        routing_engine_indexed.match_with_rule(msg)
+        samples: list[int] = []
+        for _ in range(_ROUTING_BENCH_ITERATIONS):
+            routing_engine_indexed._match_cache.clear()
+            start = time.perf_counter_ns()
+            routing_engine_indexed.match_with_rule(msg)
+            samples.append(time.perf_counter_ns() - start)
+        samples.sort()
+        median_ms = _median_ns(samples) / 1_000_000
+        assert median_ms < _ROUTING_MATCH_THRESHOLD_MS, (
+            f"Cold regex match median {median_ms:.4f} ms exceeds "
+            f"{_ROUTING_MATCH_THRESHOLD_MS} ms threshold"
+        )
+
+    def test_cache_hit(self, routing_engine_indexed: RoutingEngine) -> None:
+        """Pure cache lookup — fastest path, just xxhash + dict get."""
+        msg = _make_msg(text="cached message")
+        # Prime the cache
+        routing_engine_indexed.match_with_rule(msg)
+        samples: list[int] = []
+        for _ in range(_ROUTING_BENCH_ITERATIONS):
+            start = time.perf_counter_ns()
+            routing_engine_indexed.match_with_rule(msg)
+            samples.append(time.perf_counter_ns() - start)
+        samples.sort()
+        median_ms = _median_ns(samples) / 1_000_000
+        assert median_ms < _ROUTING_MATCH_THRESHOLD_MS, (
+            f"Cache hit median {median_ms:.4f} ms exceeds "
+            f"{_ROUTING_MATCH_THRESHOLD_MS} ms threshold"
+        )
+
+    def test_large_rule_set(self, tmp_path: Path) -> None:
+        """Stress-test with 50 rules across 5 channels.
+
+        Verifies channel-grouped candidate lookup remains fast even when
+        the total rule set is significantly larger than typical (4 rules).
+        """
+        engine = RoutingEngine(tmp_path / "instructions", use_watchdog=False)
+        channels = ["whatsapp", "telegram", "discord", "cli", "api"]
+        rules: list[RoutingRule] = []
+        for ch_idx, channel in enumerate(channels):
+            for i in range(10):
+                rules.append(
+                    RoutingRule(
+                        id=f"rule-{channel}-{i}",
+                        priority=ch_idx * 10 + i,
+                        sender="*",
+                        recipient="*",
+                        channel=channel,
+                        content_regex=".*",
+                        instruction=f"{channel}-{i}.md",
+                    )
+                )
+        engine._rules = rules  # noqa: SLF001
+        engine._last_stale_check = time.monotonic()
+        engine._file_mtimes = {}
+
+        msg = _make_msg(text="benchmark message")
+        # Warm up regex compilation
+        engine.match_with_rule(msg)
+
+        samples: list[int] = []
+        for _ in range(_ROUTING_BENCH_ITERATIONS):
+            engine._match_cache.clear()
+            start = time.perf_counter_ns()
+            engine.match_with_rule(msg)
+            samples.append(time.perf_counter_ns() - start)
+        samples.sort()
+        median_ms = _median_ns(samples) / 1_000_000
+        assert median_ms < _ROUTING_MATCH_THRESHOLD_MS, (
+            f"50-rule channel-indexed match median {median_ms:.4f} ms exceeds "
+            f"{_ROUTING_MATCH_THRESHOLD_MS} ms threshold"
+        )
+
+
+# ===================================================================
 # 2. EMBEDDING CACHE LOOKUP
 # ===================================================================
 
@@ -176,7 +362,8 @@ def vector_memory_with_cache():
     # Create a VectorMemory without calling __init__ fully (avoid SQLite)
     vm = object.__new__(VectorMemory)
     vm._embed_cache: BoundedOrderedDict[str, list[float]] = BoundedOrderedDict(
-        max_size=256, eviction="half",
+        max_size=256,
+        eviction="half",
     )
     vm._cache_lock = _new_thread_lock()
     vm._inflight: dict[str, asyncio.Future[list[float]]] = {}
@@ -196,6 +383,7 @@ def vector_memory_with_cache():
 def _new_thread_lock():
     """Create a ThreadLock without importing the full module at module scope."""
     from src.utils.locking import ThreadLock
+
     return ThreadLock()
 
 
@@ -294,7 +482,9 @@ class TestJsonlWrite:
 
             async def _run():
                 return await message_store.save_message(
-                    _CHAT_ID, "assistant", _MEDIUM_TEXT,
+                    _CHAT_ID,
+                    "assistant",
+                    _MEDIUM_TEXT,
                 )
 
             @benchmark
@@ -310,7 +500,9 @@ class TestJsonlWrite:
 
             async def _run():
                 return await message_store.save_message(
-                    _CHAT_ID, "assistant", large_content,
+                    _CHAT_ID,
+                    "assistant",
+                    large_content,
                 )
 
             @benchmark
@@ -341,11 +533,13 @@ def context_assembler(tmp_path: Path):
     # Build 20 history messages
     history = []
     for i in range(20):
-        history.append({
-            "role": "user" if i % 2 == 0 else "assistant",
-            "content": f"Message {i}: " + "word " * 20,
-            "_sanitized": True,
-        })
+        history.append(
+            {
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"Message {i}: " + "word " * 20,
+                "_sanitized": True,
+            }
+        )
 
     db = AsyncMock()
     db.get_recent_messages = AsyncMock(return_value=history)
