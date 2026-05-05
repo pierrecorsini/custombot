@@ -27,7 +27,7 @@ import pytest
 
 from src.bot import Bot, BotConfig, BotDeps, PreflightResult
 from src.channels.base import IncomingMessage
-from src.core.event_bus import EVENT_RESPONSE_SENT
+from src.core.event_bus import EVENT_GENERATION_CONFLICT, EVENT_RESPONSE_SENT
 from src.core.tool_formatter import ToolLogEntry
 from src.exceptions import ErrorCode, LLMError
 from src.rate_limiter import RateLimitResult
@@ -89,6 +89,7 @@ def _make_bot(
     db = AsyncMock()
     db.message_exists = AsyncMock(return_value=False)
     db.upsert_chat = AsyncMock()
+    db.upsert_chat_and_save_message = AsyncMock()
     db.save_message = AsyncMock()
     db.get_history = AsyncMock(return_value=[])
 
@@ -1273,13 +1274,15 @@ class TestProcess:
         ):
             await bot.handle_message(msg)
 
-        # upsert_chat should be called
-        bot._db.upsert_chat.assert_awaited_once_with(msg.chat_id, msg.sender_name)
-        # save_message for user turn
-        calls = bot._db.save_message.call_args_list
-        user_save = calls[0]
-        assert user_save.kwargs["role"] == "user"
-        assert user_save.kwargs["content"] == "Hello bot"
+        # upsert_chat_and_save_message should be called
+        bot._db.upsert_chat_and_save_message.assert_awaited_once_with(
+            chat_id=msg.chat_id,
+            sender_name=msg.sender_name,
+            role="user",
+            content="Hello bot",
+            name=msg.sender_name,
+            message_id=msg.message_id,
+        )
 
     async def test_saves_assistant_message_to_db(self):
         bot = _make_bot()
@@ -1409,6 +1412,7 @@ class TestRecoverPendingMessages:
         queued_msg.text = "Hello from crash"
         queued_msg.sender_name = "Bob"
         queued_msg.sender_id = "1234567890"
+        queued_msg.created_at = 1700000000.0
         queue.recover_stale = AsyncMock(return_value=[queued_msg])
         bot = _make_bot(message_queue=queue)
         channel = MagicMock()
@@ -1431,12 +1435,14 @@ class TestRecoverPendingMessages:
         q1.text = "msg1"
         q1.sender_name = "A"
         q1.sender_id = "1234"
+        q1.created_at = 1700000000.0
         q2 = MagicMock()
         q2.message_id = "m2"
         q2.chat_id = "c2"
         q2.text = "msg2"
         q2.sender_name = "B"
         q2.sender_id = "5678"
+        q2.created_at = 1700000000.0
         queue.recover_stale = AsyncMock(return_value=[q1, q2])
         bot = _make_bot(message_queue=queue)
         bot.handle_message = AsyncMock(return_value="ok")
@@ -1455,12 +1461,14 @@ class TestRecoverPendingMessages:
         q1.text = "ok"
         q1.sender_name = "A"
         q1.sender_id = "1234"
+        q1.created_at = 1700000000.0
         q2 = MagicMock()
         q2.message_id = "m2"
         q2.chat_id = "c2"
         q2.text = "fail"
         q2.sender_name = "B"
         q2.sender_id = "5678"
+        q2.created_at = 1700000000.0
         queue.recover_stale = AsyncMock(return_value=[q1, q2])
         bot = _make_bot(message_queue=queue)
         channel = MagicMock()
@@ -1485,6 +1493,7 @@ class TestRecoverPendingMessages:
         q1.text = "bad"
         q1.sender_name = "A"
         q1.sender_id = "1234"
+        q1.created_at = 1700000000.0
         queue.recover_stale = AsyncMock(return_value=[q1])
         bot = _make_bot(message_queue=queue)
         channel = MagicMock()
@@ -1512,6 +1521,7 @@ class TestRecoverPendingMessages:
         queued_msg.text = "recovered text"
         queued_msg.sender_name = "Alice"
         queued_msg.sender_id = "1234"
+        queued_msg.created_at = 1700000000.0
         queue.recover_stale = AsyncMock(return_value=[queued_msg])
         bot = _make_bot(message_queue=queue)
         channel = MagicMock()
@@ -2575,9 +2585,11 @@ class TestDeliverResponse:
         assert result == "No tools used"
 
     async def test_generation_conflict_logs_warning(self):
-        """When check_generation returns False, a warning is logged."""
+        """When check_generation returns False, a warning is logged after re-read + merge."""
         bot = _make_bot()
         bot._db.check_generation = MagicMock(return_value=False)
+        bot._db.get_generation = MagicMock(return_value=7)
+        bot._db.get_recent_messages = AsyncMock(return_value=[])
 
         with (
             patch.object(bot._context_assembler, "finalize_turn", return_value="Response"),
@@ -2601,25 +2613,29 @@ class TestDeliverResponse:
                 )
 
         bot._db.check_generation.assert_called_once_with("chat_conflict", 5)
+        bot._db.get_recent_messages.assert_awaited_once()
         mock_log.warning.assert_any_call(
             "Write conflict for chat %s — generation changed during "
-            "processing. Persisting with potentially stale context; "
-            "tool-log entries may interleave with a concurrent turn.",
+            "processing. Re-read %d existing messages, merged batch "
+            "from %d to %d entries.",
             "chat_conflict",
+            0,
+            1,
+            1,
             extra={"chat_id": "chat_conflict"},
         )
         assert result == "Response"
 
     async def test_generation_conflict_still_persists(self):
-        """When check_generation returns False, save_messages_batch is still called.
+        """When check_generation returns False, save_messages_batch is called with merged batch.
 
-        Documents the current design choice: generation conflicts are logged
-        as warnings but the write proceeds anyway.  The per-chat lock makes
-        true concurrency rare, so the trade-off favours persistence over
-        data loss.
+        The re-read + merge strategy deduplicates the batch against existing
+        messages.  When no overlap is found, the full batch is persisted.
         """
         bot = _make_bot()
         bot._db.check_generation = MagicMock(return_value=False)
+        bot._db.get_generation = MagicMock(return_value=6)
+        bot._db.get_recent_messages = AsyncMock(return_value=[])
         bot._db.save_messages_batch = AsyncMock(return_value=["id1", "id2"])
 
         buffered = [{"role": "tool", "content": "result", "name": "bash"}]
@@ -2644,7 +2660,7 @@ class TestDeliverResponse:
                 verbose="",
             )
 
-        # Despite the generation conflict, the batch is still persisted
+        # No overlap with existing messages → full batch persisted
         expected_batch = [
             {"role": "tool", "content": "result", "name": "bash"},
             {"role": "assistant", "content": "Response"},
@@ -2653,7 +2669,6 @@ class TestDeliverResponse:
             chat_id="chat_conflict",
             messages=expected_batch,
         )
-        # Response is still returned (not suppressed)
         assert result == "Response"
 
     async def test_save_messages_batch_called_with_correct_batch(self):
@@ -2765,6 +2780,8 @@ class TestDeliverResponse:
         """End-to-end _deliver_response with filtering + summary + conflict + event."""
         bot = _make_bot()
         bot._db.check_generation = MagicMock(return_value=False)
+        bot._db.get_generation = MagicMock(return_value=4)
+        bot._db.get_recent_messages = AsyncMock(return_value=[])
         bot._db.save_messages_batch = AsyncMock(return_value=["id1", "id2"])
 
         tool_log = [ToolLogEntry(name="shell", args={"command": "echo hi"}, result="hi")]
@@ -2816,11 +2833,14 @@ class TestDeliverResponse:
                 chat_id="chat_full",
                 messages=expected_batch,
             )
-            # (f) event emitted
-            mock_bus.emit.assert_awaited_once()
-            event = mock_bus.emit.call_args[0][0]
-            assert event.name == EVENT_RESPONSE_SENT
-            assert event.data["chat_id"] == "chat_full"
+            # (f) events emitted — conflict event + response_sent event
+            assert mock_bus.emit.await_count == 2
+            conflict_event = mock_bus.emit.call_args_list[0][0][0]
+            assert conflict_event.name == EVENT_GENERATION_CONFLICT
+            assert conflict_event.data["chat_id"] == "chat_full"
+            response_event = mock_bus.emit.call_args_list[1][0][0]
+            assert response_event.name == EVENT_RESPONSE_SENT
+            assert response_event.data["chat_id"] == "chat_full"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3039,48 +3059,33 @@ class TestProcessScheduledHMAC:
 
 
 class TestSendToChat:
-    """Tests for Bot._send_to_chat — shared send + dedup + event helper.
+    """Tests for Bot._send_to_chat — delegates to channel.send_and_track.
 
-    Verifies that dedup recording and event emission happen regardless of
-    whether a channel is provided, and that channel.send_message is only
-    called when a channel is passed.
+    When a channel is provided, ``send_to_chat`` delegates the full
+    send → dedup → event pipeline to ``BaseChannel.send_and_track()``.
+    When no channel is provided, dedup and event emission happen directly
+    in ``response_delivery.send_to_chat``.
     """
 
-    async def test_with_channel_sends_records_and_emits(self):
-        """With channel: send_message called, dedup recorded, event emitted."""
+    async def test_with_channel_delegates_to_send_and_track(self):
+        """With channel: send_and_track called with chat_id, text, dedup."""
         bot = _make_bot()
         mock_channel = AsyncMock()
 
-        with (
-            patch("src.bot._bot.get_event_bus") as mock_get_bus,
-            patch("src.bot._bot.get_correlation_id", return_value="corr-1"),
-        ):
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
+        await bot._send_to_chat("chat_abc", "Hello!", channel=mock_channel)
 
-            await bot._send_to_chat("chat_abc", "Hello!", channel=mock_channel)
-
-        # (a) channel.send_message called
-        mock_channel.send_message.assert_awaited_once_with("chat_abc", "Hello!")
-
-        # (b) dedup recorded
-        bot._dedup.record_outbound.assert_called_once_with("chat_abc", "Hello!")
-
-        # (c) response_sent event emitted
-        mock_bus.emit.assert_awaited_once()
-        event = mock_bus.emit.call_args[0][0]
-        assert event.name == "response_sent"
-        assert event.data == {"chat_id": "chat_abc", "response_length": 6}
-        assert event.source == "Bot._send_to_chat"
-        assert event.correlation_id == "corr-1"
+        # send_and_track receives the dedup service
+        mock_channel.send_and_track.assert_awaited_once_with(
+            "chat_abc", "Hello!", dedup=bot._dedup
+        )
 
     async def test_without_channel_still_records_and_emits(self):
         """Without channel: no send, but dedup and event still fire."""
         bot = _make_bot()
 
         with (
-            patch("src.bot._bot.get_event_bus") as mock_get_bus,
-            patch("src.bot._bot.get_correlation_id", return_value=None),
+            patch("src.bot.response_delivery.get_event_bus") as mock_get_bus,
+            patch("src.bot.response_delivery.get_correlation_id", return_value=None),
         ):
             mock_bus = AsyncMock()
             mock_get_bus.return_value = mock_bus
