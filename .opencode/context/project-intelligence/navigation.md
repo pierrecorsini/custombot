@@ -1,22 +1,27 @@
-<!-- Context: project-intelligence/navigation | Priority: critical | Version: 2.5 | Updated: 2026-05-05 -->
+<!-- Context: project-intelligence/navigation | Priority: critical | Version: 1.0 | Updated: 2026-05-05 -->
 
 # Project Intelligence
 
-| File | Description | Priority |
-|------|-------------|----------|
-| technical-domain.md | Tech stack, code patterns, naming, standards, security | critical |
+**Purpose**: Quick routes to project-specific context files
 
 ---
 
-## Relationship to Other Context
+## Quick Routes
 
-| Category | Covers |
-|----------|--------|
-| **project-intelligence/** (here) | Domain-level: why tech choices, business context, patterns |
-| **project/** | Feature-level: how each component works, APIs, schemas |
-| **core/** | Universal standards: MVI, structure, templates |
+| File | Description | Priority |
+|------|-------------|----------|
+| `technical-domain.md` | Tech stack, architecture, code patterns, naming conventions | critical |
 
-## Related Files
+---
 
-- **Project Context**: `.opencode/context/project/navigation.md`
-- **Standards**: `.opencode/context/core/standards/project-intelligence.md`
+## By Concern
+
+**Technical** → Stack, architecture, patterns → `technical-domain.md`
+
+---
+
+## Management
+
+- Update patterns: `/add-context --update`
+- View structure: `/context map project-intelligence`
+- Validate: `/context validate`
