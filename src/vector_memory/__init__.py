@@ -21,10 +21,9 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import sqlite_vec
-from openai import AsyncOpenAI
 
 from src.db.sqlite_utils import SqliteHelper
 from src.core.errors import NonCriticalCategory, log_noncritical
@@ -36,6 +35,9 @@ from src.utils.retry import retry_with_backoff
 from src.vector_memory._utils import _cache_key, _serialize_f32, _track_embed_cache_event
 from src.vector_memory.batch import BatchEmbedMixin
 from src.vector_memory.health import EmbeddingHealthMixin
+
+if TYPE_CHECKING:
+    from openai import AsyncOpenAI
 
 # Bump this when the schema changes.  Migrations in _MIGRATIONS below will
 # bring older databases up to this version incrementally.
@@ -73,7 +75,9 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         self._dimensions = embedding_dimensions
         # LRU cache for embeddings — avoids redundant API calls for identical text
         self._embed_cache_size = embed_cache_size
-        self._embed_cache: BoundedOrderedDict[str, list[float]] = BoundedOrderedDict(max_size=embed_cache_size, eviction="half")
+        self._embed_cache: BoundedOrderedDict[str, list[float]] = BoundedOrderedDict(
+            max_size=embed_cache_size, eviction="half"
+        )
         # In-flight deduplication: tracks pending embedding requests so
         # concurrent calls for the same text share one API call.  Bounded
         # by _MAX_INFLIGHT to prevent unbounded memory growth under high
@@ -208,12 +212,14 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
             if isinstance(data, list):
                 for entry in data:
                     if isinstance(entry, dict) and all(k in entry for k in ("chat_id", "text")):
-                        self._pending_retries.append((
-                            entry["chat_id"],
-                            entry["text"],
-                            entry.get("category", ""),
-                            entry.get("queued_at", time.time()),
-                        ))
+                        self._pending_retries.append(
+                            (
+                                entry["chat_id"],
+                                entry["text"],
+                                entry.get("category", ""),
+                                entry.get("queued_at", time.time()),
+                            )
+                        )
                 if self._pending_retries:
                     log.info(
                         "Loaded %d retry saves from previous session",
@@ -361,9 +367,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
     def _migrate_schema(self) -> None:
         """Apply incremental schema migrations up to _SCHEMA_VERSION."""
         assert self._db is not None
-        row = self._db.execute(
-            "SELECT value FROM _schema_meta WHERE key = 'version'"
-        ).fetchone()
+        row = self._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
         current = int(row[0]) if row else 0
 
         if current >= _SCHEMA_VERSION:
@@ -404,12 +408,8 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
             "SELECT value FROM _schema_meta WHERE key = 'embedding_dimensions'"
         ).fetchone()
 
-        model_changed = (
-            stored_model is not None and stored_model[0] != self._embedding_model
-        )
-        dims_changed = (
-            stored_dims is not None and int(stored_dims[0]) != self._dimensions
-        )
+        model_changed = stored_model is not None and stored_model[0] != self._embedding_model
+        dims_changed = stored_dims is not None and int(stored_dims[0]) != self._dimensions
 
         if model_changed:
             log.warning(
@@ -565,9 +565,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
             embeddings = await self._embed_batch(texts)
             now = time.time()
 
-            rows = await asyncio.to_thread(
-                self._insert_entries, chat_id, items, now, embeddings
-            )
+            rows = await asyncio.to_thread(self._insert_entries, chat_id, items, now, embeddings)
 
             log.debug("Batch-saved %d vector memories chat=%s", len(rows), chat_id)
 
@@ -622,25 +620,33 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
     ) -> list[int]:
         """Synchronous batch DB insert (run in thread pool).
 
-        All inserts are committed in a single transaction for efficiency.
+        All inserts are wrapped in a single explicit ``BEGIN IMMEDIATE``
+        transaction so the SQLite write lock is acquired up-front and all
+        fsync overhead is deferred to the final ``COMMIT``.  This reduces
+        disk I/O by 10-100× compared to individual autocommit inserts.
         """
         assert self._db is not None
         self._check_disk_space_before_write()
         row_ids: list[int] = []
         with self._write_lock:
-            for (text, category), embedding in zip(items, embeddings):
-                cur = self._db.execute(
-                    "INSERT INTO memory_entries (chat_id, text, category, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (chat_id, text, category, created_at),
-                )
-                row_id = cur.lastrowid
-                self._db.execute(
-                    "INSERT INTO memory_vec (rowid, embedding) VALUES (?, ?)",
-                    (row_id, _serialize_f32(embedding)),
-                )
-                row_ids.append(row_id)
-            self._db.commit()
+            self._db.execute("BEGIN IMMEDIATE TRANSACTION")
+            try:
+                for (text, category), embedding in zip(items, embeddings):
+                    cur = self._db.execute(
+                        "INSERT INTO memory_entries (chat_id, text, category, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (chat_id, text, category, created_at),
+                    )
+                    row_id = cur.lastrowid
+                    self._db.execute(
+                        "INSERT INTO memory_vec (rowid, embedding) VALUES (?, ?)",
+                        (row_id, _serialize_f32(embedding)),
+                    )
+                    row_ids.append(row_id)
+                self._db.commit()
+            except BaseException:
+                self._db.rollback()
+                raise
         return row_ids
 
     async def search(self, chat_id: str, query: str, limit: int = 5) -> List[Dict[str, Any]]:
