@@ -50,7 +50,10 @@
 | **Security subsystem** | `concepts/security-subsystem.md` |
 | **Non-critical error system** | `concepts/noncritical-errors.md` |
 | **Step orchestrator pattern** | `concepts/step-orchestrator.md` |
+| **Code review decisions (R11)** | `concepts/code-review-decisions.md` |
 | **Bug fixes log** | `errors/bug-fixes.md` |
+| **Known error gaps** | `errors/known-gaps.md` |
+| **Security improvement gaps** | `errors/security-gaps.md` |
 | **Implemented modules** | `lookup/implemented-modules.md` |
 | **PLAN.md progress** | `lookup/plan-progress.md` |
 | **Improvement roadmap** | `lookup/improvement-roadmap.md` |
@@ -96,12 +99,15 @@
 | `security-subsystem.md` | Defense-in-depth security layer (6 modules) | ~70 |
 | `noncritical-errors.md` | 25+ categorized fire-and-forget error logging | ~55 |
 | `step-orchestrator.md` | Generic dependency-ordered step execution | ~65 |
+| `code-review-decisions.md` | Round 11 completed refactors + optimizations | ~65 |
 
 ### errors/ — Bug Fixes & Solutions
 
 | File | Topic | Lines |
 |------|-------|-------|
 | `bug-fixes.md` | Dict attribute error + unawaited coroutine | ~47 |
+| `known-gaps.md` | 5 unresolved error/resilience gaps | ~70 |
+| `security-gaps.md` | 4 security improvement areas with priority | ~65 |
 
 ### guides/ — How-To (step-by-step)
 
@@ -149,6 +155,7 @@
 - `.tmp/sessions/` (2 session summaries) — extracted 2026-04-30
 - `.tmp/tasks/` (10 task categories, 138 subtasks) — extracted 2026-04-30
 - `PLAN.md` (158 lines) — extracted 2026-04-30
+- `PLAN.md` (61 lines, Round 11) — extracted 2026-05-04
 - `src/app.py`, `src/builder.py`, `src/bot/`, `src/core/` — harvested 2026-05-02
 
 ## Harvest History
@@ -169,6 +176,7 @@
 | 2026-05-04 | Harvest: Round 9 progress (9/20 done) + pattern updates | 3 updated concepts (graceful-shutdown v1.1, dedup v1.1, scheduler v1.1), 3 updated lookup (plan-progress v8.0, modules v2.1, arch-overview v2.3), 1 updated (tech-domain v2.1, nav v1.9) | — |
 | 2026-05-04 | Harvest: Round 10 full sync (PLAN.md 308 lines rechecked) | 3 updated (plan-progress v12.0, tech-domain v2.5, nav v2.0) | — |
 | 2026-05-04 | Harvest: source code sync (30 commits, event bus +10, lazy args, startup.py) | 3 updated concepts (event-bus v1.2), 2 updated lookup (implemented-modules v3.0, plan-progress v13.0), 1 updated (tech-domain v2.8, nav v2.2) | PLAN.md → .tmp/archive/ |
+| 2026-05-04 | Harvest: PLAN.md Round 11 (10/15 done, 5 remaining) | 1 new concept (code-review-decisions), 2 new errors (known-gaps, security-gaps), 2 updated (plan-progress v14.0, nav v2.3) | PLAN.md → .tmp/archive/ |
 
 ## Related
 

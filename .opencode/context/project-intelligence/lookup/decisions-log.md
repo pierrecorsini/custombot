@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/decisions-log | Priority: high | Version: 4.0 | Updated: 2026-05-02 -->
+<!-- Context: project-intelligence/lookup/decisions-log | Priority: high | Version: 4.1 | Updated: 2026-05-05 -->
 
 # Decisions Log
 
@@ -105,6 +105,17 @@ Related: [Links to PRs, issues, docs]
 
 ---
 
+## Decision: Bot & Queue Sub-Module Decomposition
+
+**Date**: 2026-05-04 | **Status**: Decided
+
+**Context**: `_bot.py` (1280 lines) and `message_queue.py` (638 lines) exceeded manageable size; new features required understanding large files.
+**Decision**: Extract focused sub-modules — bot: `context_building.py`, `response_delivery.py`; queue: `message_queue_buffer.py`. Original files become thin coordinators.
+**Rationale**: Mirrors successful decomposition of `scheduler/` into engine/cron/persistence. Each module owns one concern.
+**Alternatives**: Keep monolithic (rejected: cognitive overhead), further micro-splitting (rejected: premature).
+
+---
+
 ## Deprecated Decisions
 
 | Decision | Date | Replaced By | Why |
@@ -112,7 +123,8 @@ Related: [Links to PRs, issues, docs]
 
 ## Codebase References
 
-- `src/bot.py` — Orchestrator implementing these decisions
+- `src/bot/` — Bot sub-modules (context_building, response_delivery, react_loop)
+- `src/message_queue.py` + `message_queue_buffer.py` — Queue decomposition
 - `channels/whatsapp.py` — neonize integration
 - `.workspace/` — Runtime file centralization
 

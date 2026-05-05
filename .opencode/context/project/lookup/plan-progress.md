@@ -1,9 +1,9 @@
-<!-- Context: project/lookup/plan-progress | Priority: high | Version: 13.0 | Updated: 2026-05-04 -->
+<!-- Context: project/lookup/plan-progress | Priority: high | Version: 14.0 | Updated: 2026-05-04 -->
 
 # Lookup: PLAN.md Progress Tracker
 
-**Purpose**: Quick-reference status of all improvement plan items across 10 rounds
-**Source**: `PLAN.md` (308 lines) — Round 10 senior technical review
+**Purpose**: Quick-reference status of all improvement plan items across 11 rounds
+**Source**: `PLAN.md` (61 lines) — Round 11 senior code review (fresh slate, 219 previous completed)
 
 ---
 
@@ -21,7 +21,8 @@
 | Round 8 | 20 | 20 | 0 |
 | Round 9 | 20 | 20 | 0 |
 | Round 10 | 27 | 27 | 0 |
-| **Total** | **219** | **219** | **0** |
+| Round 11 | 15 | 10 | **5** |
+| **Total** | **234** | **229** | **5** |
 
 ---
 
@@ -75,7 +76,67 @@
 
 ---
 
-## Rounds 4-9 Completed (132/132)
+## Round 11 — In Progress (10/15)
+
+*Senior code review (2026-05-04). Source: `PLAN.md` (fresh slate, 61 lines)*
+
+### Architecture & Code Quality (5/5 ✅)
+
+- [x] Extract `_load_instruction()` into `InstructionLoader` — consolidate single source of truth
+- [x] Remove `RoutingRule` frozen-dataclass workarounds — regular dataclass with compiled patterns at construction
+- [x] Eliminate lazy `SkillAuditLogger` initialization in `ToolExecutor` — explicit init
+- [x] Consolidate duplicate error-emission boilerplate — shared `emit_error_event()` helper
+- [x] Type-annotate `Database` return types consistently — explicit ` -> str` annotations
+
+### Performance Optimization (5/5 ✅)
+
+- [x] Avoid redundant `asyncio.to_thread()` for `_seed_instruction_templates` — early `is_dir()` check
+- [x] Pre-compute `_match_impl` wildcard shortcut for single-rule routing — fast path
+- [x] Batch `save_message` calls in `_prepare_turn` — single write transaction
+- [x] Replace `perf_counter()` calls with monotonic clock in hot paths — cached context variable
+- [x] Add `__slots__` to `DeduplicationService` — max-length cap on outbound buffer
+
+### Error Handling & Resilience (2/4)
+
+- [x] Handle `BaseException` in `_shutdown_cleanup`
+- [x] Add structured retry for `_save_chats` on `OSError`
+- [ ] Add generation-conflict recovery for `_deliver_response` — re-read + merge strategy
+- [ ] Emit `message_dropped` event for rate-limited messages
+
+### Test Coverage & Quality (0/7)
+
+- [ ] Property-based tests for `RoutingEngine._match_impl`
+- [ ] Integration tests for config hot-reload destructive-field warnings
+- [ ] Test `Bot.process_scheduled` HMAC verification failure path
+- [ ] Chaos test for concurrent `DeduplicationService` operations
+- [ ] Test for `Database.warm_file_handles`
+- [ ] Increase mypy strict coverage beyond `src/bot/`
+- [ ] Add regression tests for `PERF401` violations
+
+### Security Hardening (0/4)
+
+- [ ] Add `message_dropped` event for ACL-rejected messages
+- [ ] Rate-limit `_send_error_reply` to prevent amplification
+- [ ] Validate scheduler task `prompt` for injection — reject, don't just log
+- [ ] Add file-size cap for instruction file loading
+
+### Observability & Monitoring (0/4)
+
+- [ ] Prometheus histogram for routing-match latency
+- [ ] Per-skill error rate gauge in `PerformanceMetrics`
+- [ ] Structured `startup_completed` event with config hash
+- [ ] Periodic outbound dedup stats logging
+
+### Developer Experience (0/4)
+
+- [ ] Remove `from src.llm import LLMClient` backward-compat re-exports
+- [ ] Add `--dry-run` flag to config validation
+- [ ] Consolidate `BoundedOrderedDict` TTL handling
+- [ ] Document generation-counter write-conflict protocol
+
+---
+
+## Rounds 4-10 Completed (159/159)
 
 ### Round 4 (25/25) — 2026-05-02
 - Config split (785→3 modules), ShutdownContext, `build_bot()` public, __all__ exports
@@ -166,6 +227,7 @@
 - Source code changes (10 commits) — 2026-05-04
 - Source code changes (20 commits) — 2026-05-04
 - PLAN.md full sync (all 219/219 complete) — 2026-05-04
+- PLAN.md Round 11 (10/15 done, 5 remaining) — 2026-05-04
 
 ## Related
 

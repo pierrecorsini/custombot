@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/navigation | Priority: critical | Version: 2.3 | Updated: 2026-05-04 -->
+<!-- Context: project-intelligence/navigation | Priority: critical | Version: 2.5 | Updated: 2026-05-05 -->
 
 # Project Intelligence
 
