@@ -509,6 +509,9 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
 
         If the embedding API is unreachable mid-session, the save is queued
         for retry and ``-1`` is returned — callers never see an exception.
+
+        DB-level errors (corruption, sqlite-vec unavailable) are not queued
+        for retry since retrying won't fix the underlying problem.
         """
         assert self._db is not None
 
@@ -529,6 +532,15 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
                 asyncio.ensure_future(self._retry_pending_saves())
 
             return row_id
+        except sqlite3.Error as exc:
+            # DB-level error — not retryable, don't queue
+            log_noncritical(
+                NonCriticalCategory.VECTOR_MEMORY_FALLBACK,
+                f"Database error during save(chat={chat_id}), not queuing for retry: {exc}",
+                logger=log,
+                level=logging.WARNING,
+            )
+            return -1
         except Exception as exc:
             await self._mark_embedding_api_unhealthy()
             log_noncritical(
@@ -574,6 +586,16 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
                 asyncio.ensure_future(self._retry_pending_saves())
 
             return rows
+        except sqlite3.Error as exc:
+            # DB-level error — not retryable, don't queue
+            log_noncritical(
+                NonCriticalCategory.VECTOR_MEMORY_FALLBACK,
+                f"Database error during save_batch(chat={chat_id}, "
+                f"{len(items)} items), not queuing for retry: {exc}",
+                logger=log,
+                level=logging.WARNING,
+            )
+            return []
         except Exception as exc:
             await self._mark_embedding_api_unhealthy()
             log_noncritical(
@@ -652,20 +674,20 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
     async def search(self, chat_id: str, query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """Semantic search within a chat's memories.
 
-        If the embedding API is unreachable, returns an empty list instead
-        of propagating the exception — search failure must never break the
-        caller's control flow.
+        Embedding API errors return an empty list (API is down, nothing to
+        embed).  DB-level errors (corruption, sqlite-vec unavailable) are
+        **propagated** so callers can fall back to text-based search over
+        MEMORY.md instead of silently returning no results.
         """
         assert self._db is not None
 
         if not query.strip():
             return []
 
+        # Phase 1: Embedding — API errors are non-fatal, return empty.
         try:
             await self._check_embedding_api_health()
             query_vec = _serialize_f32(await self._embed(query))
-
-            return await asyncio.to_thread(self._search_sync, chat_id, query_vec, limit)
         except Exception as exc:
             await self._mark_embedding_api_unhealthy()
             log_noncritical(
@@ -675,6 +697,10 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
                 level=logging.WARNING,
             )
             return []
+
+        # Phase 2: DB query — DB errors propagate so callers can fall back
+        # to text-based search (regex/grep over MEMORY.md).
+        return await asyncio.to_thread(self._search_sync, chat_id, query_vec, limit)
 
     def _search_sync(self, chat_id: str, query_vec: bytes, limit: int) -> List[Dict[str, Any]]:
         """Synchronous DB search using the per-thread pooled read connection.
@@ -709,19 +735,30 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
         """Return the N most recent memories for a chat (no embedding).
 
         Uses the per-thread pooled read connection for true concurrency.
+        Returns an empty list on DB errors so callers can fall back to
+        text-based MEMORY.md without raising.
         """
-        conn = self._get_read_connection()
-        rows = conn.execute(
-            """
-            SELECT id, text, category, created_at
-            FROM memory_entries
-            WHERE chat_id = ?
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (chat_id, limit),
-        ).fetchall()
-        return [{"id": r[0], "text": r[1], "category": r[2], "created_at": r[3]} for r in rows]
+        try:
+            conn = self._get_read_connection()
+            rows = conn.execute(
+                """
+                SELECT id, text, category, created_at
+                FROM memory_entries
+                WHERE chat_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            ).fetchall()
+            return [{"id": r[0], "text": r[1], "category": r[2], "created_at": r[3]} for r in rows]
+        except sqlite3.Error as exc:
+            log_noncritical(
+                NonCriticalCategory.VECTOR_MEMORY_FALLBACK,
+                f"Database error in list_recent(chat={chat_id}): {exc}",
+                logger=log,
+                level=logging.WARNING,
+            )
+            return []
 
     def delete(self, memory_id: int) -> bool:
         """Delete a memory entry by ID."""
@@ -733,13 +770,25 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
             return cur.rowcount > 0
 
     def count(self, chat_id: str) -> int:
-        """Count memories for a chat. Uses the per-thread pooled read connection."""
-        conn = self._get_read_connection()
-        row = conn.execute(
-            "SELECT COUNT(*) FROM memory_entries WHERE chat_id = ?",
-            (chat_id,),
-        ).fetchone()
-        return row[0] if row else 0
+        """Count memories for a chat. Uses the per-thread pooled read connection.
+
+        Returns 0 on DB errors so callers degrade gracefully.
+        """
+        try:
+            conn = self._get_read_connection()
+            row = conn.execute(
+                "SELECT COUNT(*) FROM memory_entries WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+            return row[0] if row else 0
+        except sqlite3.Error as exc:
+            log_noncritical(
+                NonCriticalCategory.VECTOR_MEMORY_FALLBACK,
+                f"Database error in count(chat={chat_id}): {exc}",
+                logger=log,
+                level=logging.WARNING,
+            )
+            return 0
 
     def health_snapshot(self) -> dict[str, Any]:
         """Return a snapshot of embedding health for monitoring.
