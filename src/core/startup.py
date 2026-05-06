@@ -321,6 +321,8 @@ async def _step_health_server(ctx: StartupContext) -> str | None:
             startup_durations=startup_durations,
             vector_memory=ctx.components.vector_memory,
             sqlite_pool=sqlite_pool,
+            llm=ctx.components.llm,
+            dedup=ctx.components.dedup,
         )
         await health_server.start(port=health_port, host=health_host)
         ctx.health_server = health_server

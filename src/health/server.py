@@ -15,6 +15,7 @@ Optional HMAC authentication via ``HEALTH_HMAC_SECRET`` env var:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -47,6 +48,7 @@ from src.health.middleware import (
     verify_hmac,
 )
 from src.health.models import ComponentHealth, HealthReport, HealthStatus
+from src.health.registry import HealthCheckRegistry
 from src.health.prometheus import (
     build_circuit_breaker_prometheus_output,
     build_db_write_breaker_prometheus_output,
@@ -90,11 +92,9 @@ class HealthServer:
         startup_durations: Optional[dict[str, float]] = None,
         vector_memory: Any = None,
         sqlite_pool: Any = None,
+        llm: Any = None,
+        dedup: Any = None,
     ) -> None:
-        self._db = db
-        self._neonize_backend = neonize_backend
-        self._llm_api_key = llm_api_key
-        self._llm_base_url = llm_base_url or "https://api.openai.com/v1"
         self._check_whatsapp = check_whatsapp
         self._check_llm = check_llm
         self._check_memory = check_memory
@@ -102,17 +102,211 @@ class HealthServer:
         self._include_token_usage = include_token_usage
         self._token_usage = token_usage
         self._bot = bot
+        self._db = db
         self._scheduler = scheduler
         self._llm_log_dir = llm_log_dir
         self._workspace_dir = workspace_dir
         self._shutdown_mgr = shutdown_mgr
+        self._neonize_backend = neonize_backend
+        self._has_db = db is not None
         self._startup_durations = startup_durations
-        self._vector_memory = vector_memory
-        self._sqlite_pool = sqlite_pool
         self._startup_total_seconds: Optional[float] = None
         self._runner: Optional[Any] = None
         self._site: Optional[Any] = None
         self._port: int = 8080
+        self._llm = llm
+        self._dedup = dedup
+
+        # Build the health check registry from constructor dependencies.
+        self._registry = self._build_registry(
+            db=db,
+            neonize_backend=neonize_backend,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url or "https://api.openai.com/v1",
+            check_whatsapp=check_whatsapp,
+            check_llm=check_llm,
+            check_memory=check_memory,
+            check_performance=check_performance,
+            bot=bot,
+            scheduler=scheduler,
+            llm_log_dir=llm_log_dir,
+            workspace_dir=workspace_dir,
+            vector_memory=vector_memory,
+            sqlite_pool=sqlite_pool,
+        )
+
+    @staticmethod
+    def _build_registry(
+        *,
+        db: Optional["Database"],
+        neonize_backend: Optional["NeonizeBackend"],
+        llm_api_key: Optional[str],
+        llm_base_url: str,
+        check_whatsapp: bool,
+        check_llm: bool,
+        check_memory: bool,
+        check_performance: bool,
+        bot: Optional["Bot"],
+        scheduler: Optional["TaskScheduler"],
+        llm_log_dir: Optional[str],
+        workspace_dir: Optional[str],
+        vector_memory: Any,
+        sqlite_pool: Any,
+    ) -> HealthCheckRegistry:
+        """Register all health checks with their bound dependencies."""
+        registry = HealthCheckRegistry()
+
+        # Database
+        if db is not None:
+            registry.register(check_database, db=db)
+        else:
+            registry.register(
+                lambda: ComponentHealth(
+                    name="database",
+                    status=HealthStatus.UNHEALTHY,
+                    message="Database not configured",
+                ),
+                name="database",
+            )
+
+        # WhatsApp / neonize
+        if check_whatsapp:
+            registry.register(check_neonize, backend=neonize_backend)
+
+        # LLM credentials
+        if check_llm and llm_api_key:
+            registry.register(
+                check_llm_credentials, api_key=llm_api_key, base_url=llm_base_url
+            )
+
+        # System memory (psutil-based)
+        if check_memory:
+            registry.register(
+                HealthServer._make_monitoring_check(
+                    "memory",
+                    "src.monitoring",
+                    "check_memory_health",
+                    fallback_message="psutil not installed",
+                )
+            )
+
+        # Performance metrics
+        if check_performance:
+            registry.register(
+                HealthServer._make_monitoring_check(
+                    "performance",
+                    "src.monitoring",
+                    "check_performance_health",
+                    fallback_message="Performance metrics not available",
+                )
+            )
+
+        # Bot wiring
+        if bot is not None:
+            registry.register(
+                HealthServer._make_wiring_check(bot),
+                name="wiring",
+            )
+
+        # Scheduler
+        registry.register(check_scheduler, scheduler=scheduler)
+
+        # VectorMemory
+        registry.register(check_vector_memory, vector_memory=vector_memory)
+
+        # SQLite pool
+        registry.register(check_sqlite_pool, pool=sqlite_pool)
+
+        # LLM logs
+        registry.register(check_llm_logs, log_dir=llm_log_dir)
+
+        # Disk usage (requires workspace_dir)
+        if workspace_dir:
+            registry.register(check_disk_usage, workspace_dir=workspace_dir)
+            registry.register(check_disk_space_health, workspace_dir=workspace_dir)
+            registry.register(
+                HealthServer._make_workspace_monitor_check(workspace_dir),
+                name="workspace",
+            )
+
+        return registry
+
+    @staticmethod
+    def _make_monitoring_check(
+        component_name: str,
+        module_path: str,
+        function_name: str,
+        *,
+        fallback_message: str,
+    ) -> Any:
+        """Create a check function that lazily imports a monitoring module."""
+
+        async def _check() -> ComponentHealth:
+            try:
+                mod = __import__(module_path, fromlist=[function_name])
+                fn = getattr(mod, function_name)
+                result = await fn()
+                if isinstance(result, dict) and "component" in result:
+                    return result["component"]
+                return ComponentHealth(
+                    name=component_name,
+                    status=HealthStatus.DEGRADED,
+                    message=f"Unexpected result from {function_name}",
+                )
+            except ImportError:
+                return ComponentHealth(
+                    name=component_name,
+                    status=HealthStatus.DEGRADED,
+                    message=fallback_message,
+                )
+            except Exception as exc:
+                log.debug("%s health check error: %s", component_name, exc)
+                return ComponentHealth(
+                    name=component_name,
+                    status=HealthStatus.DEGRADED,
+                    message=f"{component_name} check error: {type(exc).__name__}",
+                )
+
+        _check.__name__ = f"check_{component_name}"
+        return _check
+
+    @staticmethod
+    def _make_wiring_check(bot: "Bot") -> Any:
+        """Create a wiring check that validates bot component wiring."""
+
+        def _check() -> ComponentHealth:
+            wiring_result = bot.validate_wiring()
+            return check_wiring(wiring_result)
+
+        _check.__name__ = "check_wiring"
+        return _check
+
+    @staticmethod
+    def _make_workspace_monitor_check(workspace_dir: str) -> Any:
+        """Create a workspace health check that lazily imports the monitor."""
+
+        async def _check() -> ComponentHealth:
+            try:
+                from src.monitoring.workspace_monitor import check_workspace_health
+
+                ws_result = await check_workspace_health(workspace_dir)
+                if isinstance(ws_result, dict) and "component" in ws_result:
+                    return ws_result["component"]
+                return ComponentHealth(
+                    name="workspace",
+                    status=HealthStatus.HEALTHY,
+                    message="Workspace OK",
+                )
+            except Exception as exc:
+                log.debug("Workspace health check error: %s", exc)
+                return ComponentHealth(
+                    name="workspace",
+                    status=HealthStatus.DEGRADED,
+                    message=f"Workspace check error: {type(exc).__name__}",
+                )
+
+        _check.__name__ = "check_workspace"
+        return _check
 
     def update_startup_durations(self, durations: dict[str, float]) -> None:
         """Replace the startup-durations snapshot with the final, complete data.
@@ -125,186 +319,12 @@ class HealthServer:
         self._startup_total_seconds = sum(durations.values())
 
     async def _get_health_report(self) -> HealthReport:
-        """Run all health checks and return a report."""
-        components: list[ComponentHealth] = []
-
-        if self._db:
-            components.append(await check_database(self._db))
-        else:
-            components.append(
-                ComponentHealth(
-                    name="database",
-                    status=HealthStatus.UNHEALTHY,
-                    message="Database not configured",
-                )
-            )
-
-        if self._check_whatsapp:
-            components.append(await check_neonize(self._neonize_backend))
-
-        if self._check_llm and self._llm_api_key:
-            components.append(await check_llm_credentials(self._llm_api_key, self._llm_base_url))
-
-        if self._check_memory:
-            try:
-                from src.monitoring import check_memory_health
-
-                memory_result = await check_memory_health()
-                if "component" in memory_result:
-                    components.append(memory_result["component"])
-            except ImportError:
-                components.append(
-                    ComponentHealth(
-                        name="memory",
-                        status=HealthStatus.DEGRADED,
-                        message="psutil not installed",
-                    )
-                )
-            except Exception as exc:
-                log.debug("Memory health check error: %s", exc)
-                components.append(
-                    ComponentHealth(
-                        name="memory",
-                        status=HealthStatus.DEGRADED,
-                        message=f"Memory check error: {type(exc).__name__}",
-                    )
-                )
-
-        if self._check_performance:
-            try:
-                from src.monitoring import check_performance_health
-
-                perf_result = await check_performance_health()
-                if "component" in perf_result:
-                    components.append(perf_result["component"])
-            except ImportError:
-                components.append(
-                    ComponentHealth(
-                        name="performance",
-                        status=HealthStatus.DEGRADED,
-                        message="Performance metrics not available",
-                    )
-                )
-            except Exception as exc:
-                log.debug("Performance health check error: %s", exc)
-                components.append(
-                    ComponentHealth(
-                        name="performance",
-                        status=HealthStatus.DEGRADED,
-                        message=f"Performance check error: {type(exc).__name__}",
-                    )
-                )
-
-        # Wiring validation (startup component wiring)
-        if self._bot is not None:
-            try:
-                wiring_result = self._bot.validate_wiring()
-                components.append(check_wiring(wiring_result))
-            except Exception as exc:
-                log.debug("Wiring health check error: %s", exc)
-                components.append(
-                    ComponentHealth(
-                        name="wiring",
-                        status=HealthStatus.UNHEALTHY,
-                        message=f"Wiring check failed: {type(exc).__name__}",
-                    )
-                )
-
-        # Scheduler status
-        try:
-            components.append(check_scheduler(self._scheduler))
-        except Exception as exc:
-            log.debug("Scheduler health check error: %s", exc)
-            components.append(
-                ComponentHealth(
-                    name="scheduler",
-                    status=HealthStatus.UNHEALTHY,
-                    message=f"Scheduler check failed: {type(exc).__name__}",
-                )
-            )
-
-        # VectorMemory degradation status
-        try:
-            components.append(check_vector_memory(self._vector_memory))
-        except Exception as exc:
-            log.debug("VectorMemory health check error: %s", exc)
-            components.append(
-                ComponentHealth(
-                    name="vector_memory",
-                    status=HealthStatus.DEGRADED,
-                    message=f"VectorMemory check failed: {type(exc).__name__}",
-                )
-            )
-
-        # SQLite connection pool status
-        try:
-            components.append(check_sqlite_pool(self._sqlite_pool))
-        except Exception as exc:
-            log.debug("SQLite pool health check error: %s", exc)
-            components.append(
-                ComponentHealth(
-                    name="sqlite_pool",
-                    status=HealthStatus.DEGRADED,
-                    message=f"SQLite pool check failed: {type(exc).__name__}",
-                )
-            )
-
-        # LLM log directory status
-        try:
-            components.append(check_llm_logs(self._llm_log_dir))
-        except Exception as exc:
-            log.debug("LLM logs health check error: %s", exc)
-            components.append(
-                ComponentHealth(
-                    name="llm_logs",
-                    status=HealthStatus.DEGRADED,
-                    message=f"LLM logs check failed: {type(exc).__name__}",
-                )
-            )
-
-        # Disk usage for database and workspace directories
-        if self._workspace_dir:
-            try:
-                components.append(check_disk_usage(self._workspace_dir))
-            except Exception as exc:
-                log.debug("Disk usage health check error: %s", exc)
-                components.append(
-                    ComponentHealth(
-                        name="disk_usage",
-                        status=HealthStatus.DEGRADED,
-                        message=f"Disk usage check failed: {type(exc).__name__}",
-                    )
-                )
-
-            # Filesystem-level free disk space check
-            try:
-                components.append(check_disk_space_health(self._workspace_dir))
-            except Exception as exc:
-                log.debug("Disk space health check error: %s", exc)
-                components.append(
-                    ComponentHealth(
-                        name="disk_space",
-                        status=HealthStatus.DEGRADED,
-                        message=f"Disk space check failed: {type(exc).__name__}",
-                    )
-                )
-
-            # Workspace monitor cleanup stats
-            try:
-                from src.monitoring.workspace_monitor import check_workspace_health
-
-                ws_result = await check_workspace_health(self._workspace_dir)
-                if "component" in ws_result:
-                    components.append(ws_result["component"])
-            except Exception as exc:
-                log.debug("Workspace health check error: %s", exc)
-
+        """Run all registered health checks and return a report."""
         token_usage = None
         if self._include_token_usage:
             token_usage = get_token_usage_stats(self._token_usage)
 
-        return HealthReport(
-            components=components,
+        return await self._registry.run_all(
             token_usage=token_usage,
             startup_durations=self._startup_durations,
             startup_total_seconds=self._startup_total_seconds,
@@ -357,13 +377,11 @@ class HealthServer:
 
         ready, reasons = check_readiness(
             shutdown_accepting=(
-                self._shutdown_mgr.accepting_messages
-                if self._shutdown_mgr is not None
-                else False
+                self._shutdown_mgr.accepting_messages if self._shutdown_mgr is not None else False
             ),
             neonize_backend=self._neonize_backend,
             bot_wired=self._bot is not None,
-            db_available=self._db is not None,
+            db_available=self._has_db,
         )
 
         body: dict[str, Any] = {"ready": ready}
@@ -380,8 +398,7 @@ class HealthServer:
                 body["whatsapp"]["status"] = "connected"
             else:
                 body["whatsapp"]["status"] = (
-                    "waiting-for-qr" if not self._neonize_backend.is_ready
-                    else "disconnected"
+                    "waiting-for-qr" if not self._neonize_backend.is_ready else "disconnected"
                 )
 
         return web.json_response(body, status=200 if ready else 503)
@@ -474,24 +491,30 @@ class HealthServer:
                 per_chat = self._token_usage.get_top_chats()
 
             output = build_prometheus_output(
-                token_usage, snapshot, llm_log_bytes, db_size_bytes,
-                workspace_size_bytes, workspace_growth,
-                disk_free_bytes, disk_total_bytes,
+                token_usage,
+                snapshot,
+                llm_log_bytes,
+                db_size_bytes,
+                workspace_size_bytes,
+                workspace_growth,
+                disk_free_bytes,
+                disk_total_bytes,
                 per_chat_tokens=per_chat,
             )
             output += build_scheduler_prometheus_output(self._scheduler)
-            # Circuit breaker metrics (via public Bot accessor)
-            cb = self._bot.get_llm_status() if self._bot is not None else None
+            # LLM circuit breaker metrics (accessed directly, not through Bot)
+            cb = self._llm.circuit_breaker if self._llm is not None else None
             output += build_circuit_breaker_prometheus_output(cb)
-            # DB write circuit breaker metrics
-            db_cb = self._bot.get_db_write_breaker() if self._bot is not None else None
+            # DB write circuit breaker metrics (accessed directly, not through Bot)
+            db_cb = self._db.write_breaker if self._db is not None else None
             output += build_db_write_breaker_prometheus_output(db_cb)
-            # Dedup service metrics (via public Bot accessor)
-            dedup_stats = self._bot.get_dedup_stats() if self._bot is not None else None
+            # Dedup service metrics (accessed directly, not through Bot)
+            dedup_stats = self._dedup.stats if self._dedup is not None else None
             output += build_dedup_prometheus_output(dedup_stats)
             # EventBus emission and handler metrics
             try:
                 from src.core.event_bus import get_event_bus
+
                 output += build_event_bus_prometheus_output(get_event_bus())
             except Exception:
                 log_noncritical(
@@ -555,16 +578,14 @@ class HealthServer:
         # Method validation (applied first — cheapest check)
         middlewares.append(create_method_validation_middleware())
 
+        # Request size limits (reject bodies and oversized URLs before path validation)
+        max_body, max_url = load_request_size_config()
+        middlewares.append(create_request_size_limit_middleware(max_body, max_url))
+
         # Path validation (reject unknown paths before rate-limit counting)
         from src.constants import HEALTH_ALLOWED_PATHS
 
         middlewares.append(create_path_validation_middleware(HEALTH_ALLOWED_PATHS))
-
-        # Request size limits
-        max_body, max_url = load_request_size_config()
-        middlewares.append(
-            create_request_size_limit_middleware(max_body, max_url)
-        )
 
         # Per-IP rate limiting middleware
         limit, window, max_ips = load_rate_limit_config()

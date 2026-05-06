@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -60,8 +60,8 @@ async def _create_test_client(server: HealthServer) -> Any:
     ip_limiter = IPLimiter(limit, window, max_ips)
 
     middlewares = [
-        create_path_validation_middleware(HEALTH_ALLOWED_PATHS),
         create_request_size_limit_middleware(max_body, max_url),
+        create_path_validation_middleware(HEALTH_ALLOWED_PATHS),
         create_rate_limit_middleware(ip_limiter),
     ]
 
@@ -81,13 +81,7 @@ async def _create_test_client(server: HealthServer) -> Any:
 
 def _make_server() -> HealthServer:
     """Build a minimal HealthServer with all optional deps mocked."""
-    bot = MagicMock()
-    bot.get_llm_status.return_value = None
-    bot.get_db_write_breaker.return_value = None
-    bot.get_dedup_stats.return_value = None
-
     return HealthServer(
-        bot=bot,
         check_whatsapp=False,
         check_llm=False,
         check_memory=False,
@@ -127,9 +121,7 @@ class TestSecurityHeaders:
         """HSTS header is added when X-Forwarded-Proto: https is set."""
         client = await _create_test_client(_make_server())
         try:
-            resp = await client.get(
-                "/version", headers={"X-Forwarded-Proto": "https"}
-            )
+            resp = await client.get("/version", headers={"X-Forwarded-Proto": "https"})
             hsts = resp.headers.get("Strict-Transport-Security")
             assert hsts is not None, "HSTS header should be present over HTTPS proxy"
             assert "max-age=" in hsts
@@ -141,9 +133,7 @@ class TestSecurityHeaders:
         """HSTS header must NOT be present when X-Forwarded-Proto is http."""
         client = await _create_test_client(_make_server())
         try:
-            resp = await client.get(
-                "/version", headers={"X-Forwarded-Proto": "http"}
-            )
+            resp = await client.get("/version", headers={"X-Forwarded-Proto": "http"})
             assert "Strict-Transport-Security" not in resp.headers
         finally:
             await client.close()
@@ -152,9 +142,7 @@ class TestSecurityHeaders:
 class TestIPLimiter:
     """Unit tests for ``IPLimiter`` rate limiting, burst, cooldown, and eviction."""
 
-    def _make_limiter(
-        self, limit: int = 3, window: float = 5.0, max_ips: int = 4
-    ) -> IPLimiter:
+    def _make_limiter(self, limit: int = 3, window: float = 5.0, max_ips: int = 4) -> IPLimiter:
         return IPLimiter(limit, window, max_ips)
 
     # ── (a) Requests within the limit are allowed ────────────────────────
@@ -359,5 +347,45 @@ class TestPathValidation:
             # A legitimate request should still be allowed (not rate-limited)
             resp = await client.get("/version")
             assert resp.status == 200
+        finally:
+            await client.close()
+
+
+class TestContentLengthValidation:
+    """Verify that requests with Content-Length > 0 are rejected.
+
+    Health endpoints are read-only GET endpoints that should never carry a
+    request body.  Any Content-Length > 0 is rejected with 400 *before*
+    path validation runs, preventing memory allocation from large headers.
+    """
+
+    async def test_rejects_positive_content_length(self) -> None:
+        """GET requests with Content-Length > 0 should be rejected with 400."""
+        client = await _create_test_client(_make_server())
+        try:
+            resp = await client.get("/version", headers={"Content-Length": "100"})
+            assert resp.status == 400
+            text = await resp.text()
+            assert "Bad Request" in text
+        finally:
+            await client.close()
+
+    async def test_allows_zero_content_length(self) -> None:
+        """GET requests with Content-Length: 0 should be allowed."""
+        client = await _create_test_client(_make_server())
+        try:
+            resp = await client.get("/version", headers={"Content-Length": "0"})
+            assert resp.status == 200
+        finally:
+            await client.close()
+
+    async def test_rejects_before_path_validation(self) -> None:
+        """Content-Length > 0 is rejected even for unknown paths (early rejection)."""
+        client = await _create_test_client(_make_server())
+        try:
+            resp = await client.get("/unknown-path", headers={"Content-Length": "999999"})
+            assert resp.status == 400, (
+                "Content-Length check should reject before path validation returns 404"
+            )
         finally:
             await client.close()

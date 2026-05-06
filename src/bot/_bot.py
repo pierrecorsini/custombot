@@ -6,6 +6,8 @@ Thin ``Bot`` class that wires together the extracted submodules:
 - :mod:`src.bot.preflight` — lightweight pre-filter checks
 - :mod:`src.bot.crash_recovery` — stale message recovery
 - :mod:`src.bot.react_loop` — ReAct (Reason + Act) loop
+- :mod:`src.bot.context_building` — routing match + context assembly
+- :mod:`src.bot.response_delivery` — post-ReAct response delivery pipeline
 
 The ``Bot`` class owns construction, lifecycle, diagnostics, and the
 public entry points (``handle_message``, ``process_scheduled``).  Heavy
@@ -16,13 +18,11 @@ this file navigable and reduce merge conflicts.
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import logging
-import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from src.channels.base import IncomingMessage
 from src.constants import (
@@ -41,23 +41,20 @@ from src.constants import (
 from src.core.context_assembler import ContextAssembler
 from src.core.context_builder import ChatMessage
 from src.core.errors import NonCriticalCategory, log_noncritical
-from src.core.event_bus import EVENT_GENERATION_CONFLICT, Event, EventBus, emit_error_event, get_event_bus
+from src.core.event_bus import Event, get_event_bus
 from src.core.instruction_loader import InstructionLoader
 from src.core.project_context import ProjectContextLoader as _ProjectContextLoaderImpl
 from src.core.tool_executor import ToolExecutor
-from src.core.tool_formatter import format_response_with_tool_log
-from src.db import _validate_chat_id
-from src.exceptions import DatabaseError, ErrorCode, LLMError
+from src.utils.validation import _validate_chat_id
+from src.exceptions import ErrorCode
 from src.logging import clear_correlation_id, get_correlation_id, set_correlation_id
 from src.monitoring import get_metrics_collector
 from src.monitoring.tracing import (
-    context_assembly_span,
     get_tracer,
     record_exception_safe,
     set_correlation_id_on_span,
 )
 from src.rate_limiter import RateLimiter
-from src.routing import MatchingContext
 from src.security.prompt_injection import (
     detect_injection,
     filter_response_content,
@@ -69,28 +66,30 @@ from src.security.signing import (
 )
 from src.security.audit import audit_log
 from src.utils import LRULockCache
+from src.utils.timing import elapsed as _elapsed, set_timer_start as _set_timer_start
 
+from src.bot.context_building import (
+    TurnContext,
+    build_turn_context as _build_turn_context,
+    routing_show_errors_var,
+)
 from src.bot.crash_recovery import recover_pending_messages as _recover_pending_messages
 from src.bot.preflight import preflight_check as _preflight_check
 from src.bot.react_loop import (
-    call_llm_with_retry as _call_llm_with_retry,
-    execute_tool_call as _execute_tool_call,
-    format_max_iterations_message as _format_max_iterations_message,
-    process_tool_calls as _process_tool_calls,
     react_loop as _react_loop,
+)
+from src.bot.response_delivery import (
+    deliver_response as _deliver_response,
+    send_to_chat as _send_to_chat,
 )
 
 if TYPE_CHECKING:
-    from src.bot.react_loop import (
-        StreamCallback,
-    )
-    from src.routing import RoutingEngine
+    from src.bot.react_loop import StreamCallback
     from src.core.tool_formatter import ToolLogEntry
     from src.bot.preflight import PreflightResult
     from src.db import Database
     from src.monitoring import PerformanceMetrics, SessionMetrics
-    from src.utils.circuit_breaker import CircuitBreaker
-    from src.core.dedup import DedupStats, DeduplicationService
+    from src.core.dedup import DeduplicationService
     from src.message_queue import MessageQueue
     from src.skills import SkillRegistry
     from src.utils.protocols import (
@@ -102,6 +101,7 @@ if TYPE_CHECKING:
     )
     from src.channels.base import BaseChannel, SendMediaCallback
     from src.llm import LLMProvider
+    from src.routing import RoutingEngine
 
 
 log = logging.getLogger(__name__)
@@ -118,28 +118,6 @@ _RETRYABLE_LLM_ERROR_CODES: frozenset[ErrorCode] = frozenset(
         ErrorCode.LLM_CONNECTION_FAILED,
     }
 )
-
-# Per-request routing flag — contextvar prevents cross-request state leaks
-# when multiple messages are processed concurrently on the event loop.
-_routing_show_errors_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "routing_show_errors", default=True
-)
-
-
-@dataclass(slots=True, frozen=True)
-class TurnContext:
-    """Immutable context assembled for a single ReAct turn.
-
-    Built by ``Bot._build_turn_context()`` from routing match, instruction
-    loading, memory reads, and the LLM message list.  Returned as a single
-    object so the context-assembly stage can be unit-tested independently of
-    the full ReAct loop.
-    """
-
-    messages: list[ChatMessage]
-    rule_id: str
-    skill_exec_verbose: str
-    show_errors: bool
 
 
 @dataclass(slots=True, frozen=True)
@@ -172,6 +150,8 @@ class BotConfig:
     system_prompt_prefix: str
     stream_response: bool = False
     per_chat_timeout: float = 300.0
+    react_loop_timeout: float = 0.0
+    max_concurrent_messages: int = 10
 
 
 @dataclass(slots=True)
@@ -323,26 +303,6 @@ class Bot:
             log.info("Wiring validation passed — all %d components OK", len(checks))
         return checks
 
-    # ── diagnostics ──────────────────────────────────────────────────────────
-
-    def get_llm_status(self) -> CircuitBreaker | None:
-        """Return the LLM circuit breaker for health/metrics endpoints."""
-        if self._llm is None:
-            return None
-        return self._llm.circuit_breaker
-
-    def get_dedup_stats(self) -> DedupStats | None:
-        """Return dedup hit/miss counters for health/metrics endpoints."""
-        if self._dedup is None:
-            return None
-        return self._dedup.stats
-
-    def get_db_write_breaker(self) -> CircuitBreaker | None:
-        """Return the DB write circuit breaker for health/metrics endpoints."""
-        if self._db is None:
-            return None
-        return self._db.write_breaker
-
     # ── crash recovery ────────────────────────────────────────────────────────
 
     async def recover_pending_messages(
@@ -363,6 +323,7 @@ class Bot:
             handle_message=self.handle_message,
             timeout_seconds=timeout_seconds,
             channel=channel,
+            max_concurrent=self._cfg.max_concurrent_messages,
         )
 
     # ── preflight ─────────────────────────────────────────────────────────────
@@ -485,9 +446,10 @@ class Bot:
                 rate_result.limit_value,
                 extra={"chat_id": msg.chat_id, "rate_limit": rate_result.limit_value},
             )
-            await self._send_to_chat(
+            await _send_to_chat(
                 msg.chat_id,
                 "⚠️ You're sending messages too quickly. Please wait a moment.",
+                dedup=self._dedup,
                 channel=channel,
             )
             clear_correlation_id()
@@ -516,13 +478,13 @@ class Bot:
             set_correlation_id_on_span(proc_span, correlation_id)
 
             async with self._chat_locks.acquire(msg.chat_id):
-                start_time = time.perf_counter()
+                _set_timer_start()
                 generation = self._db.get_generation(msg.chat_id)
 
                 if self._message_queue:
                     await self._message_queue.enqueue(msg)
 
-                _routing_show_errors_var.set(True)
+                routing_show_errors_var.set(True)
 
                 try:
                     # Wrap the processing pipeline in a per-chat timeout.
@@ -551,7 +513,7 @@ class Bot:
                     if self._message_queue:
                         await self._message_queue.complete(msg.message_id)
 
-                    processing_time = time.perf_counter() - start_time
+                    processing_time = _elapsed()
                     self._metrics.track_message_latency(processing_time)
                     self._metrics.track_chat_message(msg.chat_id)
 
@@ -573,7 +535,7 @@ class Bot:
                     )
                     return result
                 except asyncio.TimeoutError:
-                    processing_time = time.perf_counter() - start_time
+                    processing_time = _elapsed()
                     record_exception_safe(proc_span, asyncio.TimeoutError())
                     log.error(
                         "Message %s TIMED OUT after %.1fs (per_chat_timeout=%.1fs) "
@@ -615,10 +577,12 @@ class Bot:
                     )
                     raise
                 except Exception as exc:
+                    processing_time = _elapsed()
                     record_exception_safe(proc_span, exc)
                     log.error(
-                        "Message processing failed for %s: %s",
+                        "Message processing failed for %s after %.2fs: %s",
                         msg.message_id,
+                        processing_time,
                         exc,
                         exc_info=True,
                         extra={
@@ -628,7 +592,7 @@ class Bot:
                         },
                     )
 
-                    if not _routing_show_errors_var.get():
+                    if not routing_show_errors_var.get():
                         log.info(
                             "Error suppressed (showErrors=false) for message %s",
                             msg.message_id,
@@ -637,7 +601,7 @@ class Bot:
 
                     raise
                 finally:
-                    _routing_show_errors_var.set(True)  # reset to default
+                    routing_show_errors_var.set(True)  # reset to default
                     clear_correlation_id()
 
     # ── scheduled task processing ──────────────────────────────────────────
@@ -860,7 +824,10 @@ class Bot:
         msg: IncomingMessage,
         channel: "BaseChannel | None" = None,
     ) -> TurnContext | None:
-        """Match routing rule, load instruction, and assemble LLM messages."""
+        """Match routing rule, load instruction, and assemble LLM messages.
+
+        Delegates to :func:`src.bot.context_building.build_turn_context`.
+        """
         if not self._routing:
             log.warning("No routing engine configured, skipping message")
             await get_event_bus().emit(
@@ -877,79 +844,12 @@ class Bot:
             )
             return None
 
-        if not self._routing.has_rules:
-            log.warning(
-                "Routing engine has no rules loaded — message from %s in chat %s ignored. "
-                "Ensure workspace/instructions/ contains at least a 'chat.agent.md' "
-                "with routing frontmatter.",
-                msg.sender_id,
-                msg.chat_id,
-            )
-            await get_event_bus().emit(
-                Event(
-                    name="message_dropped",
-                    data={"chat_id": msg.chat_id, "sender_id": msg.sender_id, "reason": "no_rules"},
-                    source="Bot._build_turn_context",
-                    correlation_id=get_correlation_id(),
-                )
-            )
-            return None
-
-        match_ctx = MatchingContext.from_message(msg)
-        matched_rule, instruction_filename = await self._routing.match_with_rule(msg, ctx=match_ctx)
-        if not matched_rule:
-            log.info(
-                "No routing rule matched for message from %s (fromMe=%s, toMe=%s), ignoring",
-                msg.sender_id,
-                msg.fromMe,
-                msg.toMe,
-            )
-            await get_event_bus().emit(
-                Event(
-                    name="message_dropped",
-                    data={"chat_id": msg.chat_id, "sender_id": msg.sender_id, "reason": "no_match"},
-                    source="Bot._build_turn_context",
-                    correlation_id=get_correlation_id(),
-                )
-            )
-            return None
-
-        _routing_show_errors_var.set(matched_rule.showErrors)
-
-        log.info(
-            "Matched routing rule '%s' (instruction: %s) for message from %s",
-            matched_rule.id,
-            instruction_filename,
-            msg.sender_id,
-        )
-
-        instruction_content = self._instruction_loader.load(instruction_filename or "default.md")
-        channel_prompt = channel.get_channel_prompt() if channel else None
-
-        with context_assembly_span(chat_id=msg.chat_id, rule_id=matched_rule.id) as span:
-            set_correlation_id_on_span(span, get_correlation_id())
-            result = await self._context_assembler.assemble(
-                chat_id=msg.chat_id,
-                channel_prompt=channel_prompt,
-                instruction=instruction_content,
-                rule_id=matched_rule.id,
-            )
-            if result is not None:
-                span.set_attribute("custombot.context.message_count", len(result.messages))
-
-        if result is None:
-            log.warning(
-                "Context assembly returned None for chat %s — build_context failure",
-                msg.chat_id,
-                extra={"chat_id": msg.chat_id},
-            )
-            return None
-
-        return TurnContext(
-            messages=result.messages,
-            rule_id=result.rule_id or matched_rule.id,
-            skill_exec_verbose=matched_rule.skillExecVerbose,
-            show_errors=matched_rule.showErrors,
+        return await _build_turn_context(
+            msg,
+            routing=self._routing,
+            instruction_loader=self._instruction_loader,
+            context_assembler=self._context_assembler,
+            channel=channel,
         )
 
     async def _prepare_turn(
@@ -962,10 +862,9 @@ class Bot:
         Performs the turn-preparation steps that run before the ReAct loop:
 
         1. Emit ``message_received`` event
-        2. Upsert chat metadata
-        3. Persist user message to DB
-        4. Ensure workspace directory exists
-        5. Build turn context (routing match + context assembly)
+        2. Upsert chat metadata + persist user message (batched)
+        3. Ensure workspace directory exists
+        4. Build turn context (routing match + context assembly)
 
         Returns ``None`` when routing produces no match (message dropped).
         """
@@ -978,10 +877,10 @@ class Bot:
             )
         )
 
-        await self._db.upsert_chat(msg.chat_id, msg.sender_name)
         try:
-            _msg_id = await self._db.save_message(
+            await self._db.upsert_chat_and_save_message(
                 chat_id=msg.chat_id,
+                sender_name=msg.sender_name,
                 role="user",
                 content=msg.text,
                 name=msg.sender_name,
@@ -1036,6 +935,7 @@ class Bot:
             buffered_persist=buffered_persist,
             generation=generation,
             verbose=verbose,
+            channel=channel,
         )
 
     async def _deliver_response(
@@ -1046,101 +946,24 @@ class Bot:
         buffered_persist: list[dict[str, Any]],
         generation: int,
         verbose: str,
+        channel: "BaseChannel | None" = None,
     ) -> str | None:
         """Post-ReAct response delivery: format, dedup, persist, emit.
 
-        Handles the full delivery pipeline after the ReAct loop produces a
-        raw response:
-
-        1. Finalize turn (topic extraction via context assembler)
-        2. Filter sensitive content from response
-        3. Append tool-log summary (when verbose == "summary")
-        4. Check outbound dedup — suppress duplicate delivery
-        5. Persist assistant message to DB (with generation-conflict detection)
-        6. Record outbound dedup + emit ``response_sent`` event via ``_send_to_chat``
-
-        Returns the final response text, or *None* if suppressed by outbound
-        dedup.
+        Delegates to :func:`src.bot.response_delivery.deliver_response`.
         """
-        response_text = self._context_assembler.finalize_turn(chat_id, raw_response)
-
-        filter_result = filter_response_content(response_text)
-        if filter_result.flagged:
-            response_text = filter_result.sanitized_content
-            log.warning(
-                "Filtered sensitive content from LLM response: %s",
-                filter_result.categories,
-                extra={
-                    "chat_id": chat_id,
-                    "filter_categories": filter_result.categories,
-                },
-            )
-
-        if verbose == "summary" and tool_log:
-            response_text = format_response_with_tool_log(response_text, tool_log)
-
-        # Outbound dedup: suppress duplicate responses to the same chat.
-        if self._dedup and self._dedup.check_outbound_duplicate(chat_id, response_text):
-            log.info(
-                "Outbound dedup suppressed duplicate response for chat %s",
-                chat_id,
-                extra={"chat_id": chat_id},
-            )
-            return None
-
-        batch = [*buffered_persist, {"role": "assistant", "content": response_text}]
-        if not self._db.check_generation(chat_id, generation):
-            # Generation conflict: another write landed while we were processing.
-            # We proceed with the append anyway — save_messages_batch appends to
-            # JSONL so no data is lost, but our tool-call context may be stale,
-            # producing interleaved tool/result lines alongside the concurrent
-            # turn's messages.  A full re-read + merge would be needed to avoid
-            # this, but the per-chat lock makes true concurrency rare.
-            current_gen = self._db.get_generation(chat_id)
-            log.warning(
-                "Write conflict for chat %s — generation changed during "
-                "processing. Persisting with potentially stale context; "
-                "tool-log entries may interleave with a concurrent turn.",
-                chat_id,
-                extra={"chat_id": chat_id},
-            )
-            await get_event_bus().emit(
-                Event(
-                    name=EVENT_GENERATION_CONFLICT,
-                    data={
-                        "chat_id": chat_id,
-                        "expected_generation": generation,
-                        "current_generation": current_gen,
-                    },
-                    source="Bot._deliver_response",
-                    correlation_id=get_correlation_id(),
-                )
-            )
-        try:
-            _ids = await self._db.save_messages_batch(chat_id=chat_id, messages=batch)
-        except (OSError, DatabaseError) as exc:
-            # Disk full, permission denied, or DB circuit-breaker open.
-            # The response is already generated — deliver it to the user
-            # even if persistence fails.  Log and emit an event so that
-            # monitoring subscribers can track write failures.
-            log_noncritical(
-                NonCriticalCategory.DB_OPERATION,
-                f"Failed to persist response for chat {chat_id}: {exc}",
-                logger=log,
-            )
-            await emit_error_event(
-                exc,
-                "Bot._deliver_response",
-                extra_data={
-                    "chat_id": chat_id,
-                    "source": "Bot._deliver_response.save_messages_batch",
-                },
-            )
-
-        # Record outbound dedup + emit response_sent event via shared helper.
-        await self._send_to_chat(chat_id, response_text)
-
-        return response_text
+        return await _deliver_response(
+            chat_id,
+            raw_response,
+            tool_log,
+            buffered_persist,
+            generation,
+            verbose,
+            context_assembler=self._context_assembler,
+            db=self._db,
+            dedup=self._dedup,
+            channel=channel,
+        )
 
     # ── ReAct loop (delegation to react_loop.py) ──────────────────────────
 
@@ -1169,6 +992,7 @@ class Bot:
             retryable_codes=_RETRYABLE_LLM_ERROR_CODES,
             stream_callback=stream_callback,
             channel=channel,
+            react_loop_timeout=self._cfg.react_loop_timeout,
         )
 
     # ── config hot-reload ──────────────────────────────────────────────────
@@ -1205,43 +1029,3 @@ class Bot:
             old_cfg.memory_max_history,
             new_cfg.memory_max_history,
         )
-
-    # ── helpers ────────────────────────────────────────────────────────────
-
-    async def _send_to_chat(
-        self,
-        chat_id: str,
-        text: str,
-        channel: "BaseChannel | None" = None,
-    ) -> None:
-        """Send a message to a chat with dedup recording and event emission.
-
-        Centralizes the send → dedup → event pipeline so that *all* outbound
-        messages (rate-limit warnings, error replies, scheduled responses) are
-        tracked consistently.  Callers that only need persistence without an
-        actual channel send (e.g. ``_deliver_response``) can pass
-        ``channel=None``.
-        """
-        if channel:
-            await channel.send_message(chat_id, text)
-
-        if self._dedup:
-            self._dedup.record_outbound(chat_id, text)
-
-        try:
-            await get_event_bus().emit(
-                Event(
-                    name="response_sent",
-                    data={"chat_id": chat_id, "response_length": len(text)},
-                    source="Bot._send_to_chat",
-                    correlation_id=get_correlation_id(),
-                )
-            )
-        except Exception:
-            log_noncritical(
-                NonCriticalCategory.EVENT_EMISSION,
-                f"Failed to emit response_sent event for chat {chat_id}",
-                logger=log,
-            )
-
-
