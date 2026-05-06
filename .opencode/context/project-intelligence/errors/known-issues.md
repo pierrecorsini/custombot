@@ -1,10 +1,10 @@
-<!-- Context: project-intelligence/errors/known-issues | Priority: high | Version: 5.0 | Updated: 2026-05-04 -->
+<!-- Context: project-intelligence/errors/known-issues | Priority: high | Version: 5.2 | Updated: 2026-05-06 -->
 
 # Known Issues
 
 > Active technical debt, open questions, and current issues. Review weekly.
 
-## Technical Debt (from PLAN.md Round 10 — 23 items remaining)
+## Technical Debt (from PLAN.md Round 10 — 21 items remaining)
 
 ### Architecture & Refactoring (3 remaining)
 
@@ -14,14 +14,13 @@
 | Add `__slots__` to `QueuedMessage` dataclass | ~40% per-instance memory waste | Medium | Use `slots=True` like other high-frequency dataclasses |
 | Extract `MiddlewareChain` from `MessagePipeline` | Hard-to-debug closure stack in tracebacks | Low | Named class with `__repr__` showing middleware names |
 
-### Performance & Scalability (4 remaining)
+### Performance & Scalability (3 remaining)
 
 | Item | Impact | Priority | Mitigation |
 |------|--------|----------|------------|
 | Pre-warm `FileHandlePool` at startup | N serialized `open()` calls during crash recovery | Medium | Call `get_or_open()` for known chats after `db.connect()` |
 | Re-serialize tool call arguments in `execute_tool_call()` | Memory duplication for large payloads (base64) | Medium | Store raw JSON in `ToolLogEntry`, parse lazily on render |
 | No batch for `record_outbound()` writes | N individual dict ops during burst delivery | Medium | Buffer outbound recordings, flush in single batch |
-| Use `msgpack` for `MessageQueue` persistence | JSON ~3-5× slower than msgpack for 10-field objects | Low | Switch to msgpack-binary JSONL, keep JSON fallback for recovery |
 
 ### Error Handling & Resilience (4 remaining)
 
@@ -50,14 +49,11 @@
 | No `Content-Length` header validation on HealthServer | Large header causes memory allocation before path rejection | Low | Reject `Content-Length` > 0 on GET endpoints |
 | No `ToolLogEntry.name` length validation | Tool name >4096 chars causes OSError in audit log | Low | Truncate to 200 chars in constructor |
 
-### DevOps & CI (4 remaining)
+### DevOps & CI (2 remaining)
 
 | Item | Impact | Priority | Mitigation |
 |------|--------|----------|------------|
-| Missing `Ruff` `PERF` ruleset | Performance anti-patterns in hot paths undetected | Low | Add `PERF` as non-blocking initially |
 | No `pip-audit` SARIF upload to GitHub Security | Vulnerabilities only in job log, not Security tab | Low | Use `--format sarif` + `upload-sarif` action |
-| `ruff` version mismatch (CI vs pyproject.toml) | Local/CI linting may differ | Medium | Pin `ruff==0.15.12` in pyproject.toml |
-| No `pytest-timeout` in CI | Hung tests stall CI indefinitely | Medium | Add `--timeout=120` to CI pytest invocation |
 | No `PLAN.md` checkbox syntax validation | Malformed checkboxes invisible to tracking scripts | Low | Add `scripts/check_plan_syntax.py` to CI |
 
 ## Insights & Lessons Learned
@@ -85,6 +81,11 @@
 - **Resolved**: 2026-05-04
 - **Resolution**: All 11 remaining items from PLAN.md Round 9 completed
 - **Items**: Atomic file writes in TaskScheduler, stdin read timeout, _classify_main_loop_error test, timeout path queue state test, hot-reload denylist test, Application._transition() rollback test, retry sleep cap in RoutingEngine, task validation in TaskScheduler._load(), config.example.json CI sync, Docker BuildKit caching, coverage regression gate
+
+### Resolved: msgpack queue persistence (2026-05-06)
+- **Resolved**: 2026-05-06
+- **Resolution**: `message_queue_persistence.py` switched from JSON to msgpack+base64 serialization with JSON read fallback. Also added WAL-protected writes for crash safety.
+- **Files**: `src/message_queue_persistence.py`
 
 ## Codebase References
 

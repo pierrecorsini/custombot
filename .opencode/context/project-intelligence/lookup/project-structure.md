@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/project-structure | Priority: high | Version: 4.5 | Updated: 2026-05-04 -->
+<!-- Context: project-intelligence/lookup/project-structure | Priority: high | Version: 4.7 | Updated: 2026-05-06 -->
 
 # Project Structure
 
@@ -28,6 +28,8 @@ custombot/
 │   ├── llm_error_classifier.py  # Error classification + circuit breaker
 │   ├── memory.py           # Conversation memory management
 │   ├── message_queue.py    # Persistent queue for crash recovery
+│   ├── message_queue_buffer.py    # Queue buffer management
+│   ├── message_queue_persistence.py  # WAL-protected msgpack+base64 JSONL persistence
 │   ├── progress.py         # Progress tracking
 │   ├── rate_limiter.py     # Sliding window per-chat and per-skill rate limiting
 │   ├── routing.py          # Message routing engine
@@ -46,6 +48,8 @@ custombot/
 │   │
 │   ├── bot/                # Bot core (split from monolithic bot.py)
 │   │   ├── _bot.py         # Bot implementation
+│   │   ├── context_building.py  # LLM turn context assembly from routing match
+│   │   ├── response_delivery.py # Post-ReAct delivery pipeline (filter, dedup, persist)
 │   │   ├── crash_recovery.py  # Crash recovery
 │   │   ├── preflight.py    # Preflight checks
 │   │   └── react_loop.py   # ReAct agentic loop
@@ -109,10 +113,11 @@ custombot/
 │   │
 │   ├── ui/                 # User interface (cli_output, options_tui)
 │   │
-│   ├── utils/              # Utilities (19 modules)
+│   ├── utils/              # Utilities (20 modules)
 │   │   ├── async_executor, async_file, background_service, circuit_breaker
 │   │   ├── dag, disk, frontmatter, json_utils, locking, logging_utils
-│   │   ├── path, phone, protocols, retry, singleton, timing, type_guards
+│   │   ├── path, phone, protocols, registry, retry, singleton, timing
+│   │   ├── type_guards, validation
 │   │
 │   └── vector_memory/      # Semantic memory (sqlite-vec): __init__, _utils, batch, health
 │
@@ -142,7 +147,7 @@ custombot/
 | Directory | Purpose | Important |
 |-----------|---------|-----------|
 | `src/` | All application logic organized by module | Core codebase |
-| `src/bot/` | Bot orchestrator (split from monolith) | ReAct loop, crash recovery |
+| `src/bot/` | Bot orchestrator (split from monolith) | ReAct loop, context building, response delivery, crash recovery |
 | `src/config/` | Config system (split into 6 modules) | Schema, loader, watcher |
 | `src/core/` | Engine: event bus, pipeline, orchestration | 16 modules |
 | `src/channels/` | Communication channel implementations | WhatsApp, CLI |

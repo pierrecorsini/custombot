@@ -1,9 +1,9 @@
-<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.0 | Updated: 2026-05-05 -->
+<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.2 | Updated: 2026-05-06 -->
 
 # Technical Domain
 
 **Purpose**: Tech stack, architecture, and development patterns for custombot.
-**Last Updated**: 2026-05-05
+**Last Updated**: 2026-05-06
 
 ## Quick Reference
 
@@ -44,11 +44,11 @@ main.py (Click CLI)
         └── GracefulShutdown — ordered cleanup with timeouts
 ```
 
-### Key Modules (157 Python files, 18 packages)
+### Key Modules (158 Python files, 18 packages)
 
 | Module | Purpose | Key Files |
 |--------|---------|-----------|
-| `src/bot/` | ReAct loop, context building, crash recovery, preflight | `_bot.py`, `react_loop.py`, `context_building.py` |
+| `src/bot/` | ReAct loop, context building, crash recovery, preflight, response delivery | `_bot.py`, `react_loop.py`, `context_building.py`, `response_delivery.py` |
 | `src/channels/` | Abstract channel + WhatsApp/neonize + stealth mode | `base.py`, `whatsapp.py`, `neonize_backend.py` |
 | `src/config/` | Dataclass config + JSON schema validation + hot-reload | `config_schema_defs.py`, `config_watcher.py` |
 | `src/core/` | Orchestrator, event bus, pipeline, tool execution | `orchestrator.py`, `message_pipeline.py` |
@@ -99,6 +99,32 @@ class BaseChannel(ABC):
     async def start(self, on_message): ...
     async def send(self, chat_id, text): ...
     async def wait_connected(self): ...
+```
+
+### WAL-Protected Persistence
+
+Queue writes go through a write-ahead log for crash safety. Each flush writes to
+`.wal.tmp`, atomically commits to `.wal`, then appends to the main file. On
+startup, `_replay_wal()` re-applies any committed but unmerged entries.
+
+```python
+def _wal_append(self, lines):
+    self._wal_tmp_file.write_text(content)      # Step 1: temp write
+    self._wal_tmp_file.replace(self._wal_file)   # Step 2: atomic commit
+    # Step 3: append to main file + fsync
+    # Step 4: remove committed WAL
+```
+
+### Msgpack+Base64 Queue Serialization
+
+Message queue lines are base64-wrapped msgpack blobs (~3–5× faster than JSON
+for structured data). JSON fallback on read ensures backward compatibility.
+
+```python
+def _encode_record(data: dict) -> str:
+    return base64.b64encode(msgpack_dumps(data)).decode("ascii")
+def _decode_line(line: str) -> dict | None:
+    # try msgpack+base64 first, fallback to JSON
 ```
 
 ---

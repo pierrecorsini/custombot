@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/guides/optimization-patterns | Priority: high | Version: 1.1 | Updated: 2026-05-03 -->
+<!-- Context: project-intelligence/guides/optimization-patterns | Priority: high | Version: 1.3 | Updated: 2026-05-06 -->
 
 # Optimization Patterns
 
@@ -108,6 +108,61 @@ if len(rules) == 0 and len(previous_rules) > 0:
 ```
 
 📂 `src/routing.py` — `RoutingEngine.load_rules()`
+
+## Explicit SQLite Transactions for Batch Inserts
+
+When bulk inserts call `INSERT` per row without a transaction, each statement triggers an independent fsync. Wrapping in `BEGIN IMMEDIATE / COMMIT` reduces fsync overhead by 10–100x.
+
+```python
+cursor.execute("BEGIN IMMEDIATE")
+try:
+    for entry in entries:
+        cursor.execute("INSERT INTO ...", entry)
+    cursor.execute("COMMIT")
+except Exception:
+    cursor.execute("ROLLBACK")
+    raise
+```
+
+📂 `src/vector_memory/__init__.py` — `_insert_entries()`
+
+## WAL-Protected Append for Persistence
+
+When buffered appends can lose data on crash. Write to temp, atomically commit as WAL, append to main file, then remove WAL. On startup, replay committed entries.
+
+```python
+def _wal_append(self, lines):
+    self._wal_tmp_file.write_text(content)
+    self._wal_tmp_file.replace(self._wal_file)  # atomic commit
+    with self._queue_file.open("a") as f:
+        f.write(content); f.flush(); os.fsync(f.fileno())
+    self._wal_file.unlink()  # committed
+```
+
+📂 `src/message_queue_persistence.py` — `_wal_append()`, `_replay_wal()`
+
+## Msgpack+Base64 Serialization for Queue Lines
+
+When JSON serialization is ~3–5× slower than msgpack for structured data. Encode each line as base64(msgpack(dict)). JSON fallback on read for backward compat.
+
+```python
+def _encode_record(data):
+    return base64.b64encode(msgpack_dumps(data)).decode("ascii")
+```
+
+📂 `src/message_queue_persistence.py` — `_encode_record()`, `_decode_line()`
+
+## DB Error Graceful Degradation
+
+When sqlite-level errors (corruption, extension unavailable) should not crash the app. Catch `sqlite3.Error` separately from API errors — don't queue for retry (retrying won't fix DB corruption). Propagate search errors so callers can fall back to text-based search.
+
+```python
+except sqlite3.Error as exc:
+    log_noncritical(VECTOR_MEMORY_FALLBACK, f"DB error: {exc}")
+    return []  # or -1 for save, letting caller degrade gracefully
+```
+
+📂 `src/vector_memory/__init__.py` — `save()`, `save_batch()`, `search()`, `list_recent()`, `count()`
 
 ## Session 2 Optimizations (2026-05-02)
 
