@@ -2392,6 +2392,36 @@ class TestConnectCloseEdgeCases:
         await db.close()
         assert db._chats_dirty is False
 
+    async def test_close_flushes_chats_when_to_thread_unavailable(self, tmp_path: Path) -> None:
+        """close() falls back to sync chat write when default executor is unavailable."""
+        data_dir = tmp_path / ".data"
+        db = Database(str(data_dir))
+        await db.connect()
+
+        # Force a dirty chat flush on close.
+        db._chats_save_interval = 9999.0
+        await db.upsert_chat("c1", "Test")
+        db._chats_dirty = True
+
+        # Simulate: asyncio.to_thread cannot submit because executor is shut down.
+        import src.db.db as db_module
+
+        original_to_thread = db_module.asyncio.to_thread
+
+        async def _failing_to_thread(*_args, **_kwargs):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+        db_module.asyncio.to_thread = _failing_to_thread  # type: ignore[assignment]
+        try:
+            await db.close()
+        finally:
+            db_module.asyncio.to_thread = original_to_thread  # type: ignore[assignment]
+
+        assert db._initialized is False
+        assert db._chats_file.exists()
+        content = db._chats_file.read_text(encoding="utf-8")
+        assert "c1" in content
+
     async def test_close_resilient_to_index_flush_failure(self, tmp_path: Path) -> None:
         """close() completes cleanup even when index flush raises."""
         data_dir = tmp_path / ".data"

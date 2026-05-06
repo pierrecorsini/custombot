@@ -1,9 +1,14 @@
 # ==============================================================================
 # Multi-stage Dockerfile for CustomBot
 #
+# Supply-chain hardened:
+#   - Base images pinned by SHA256 digest for reproducible builds
+#   - Production deps installed with --require-hashes for integrity verification
+#   - Hash-locked deps in requirements-lock.txt (regenerate with: pip-compile --generate-hashes)
+#
 # Stages:
 #   1. builder  — install all deps (including dev) for optional test runs
-#   2. runtime  — production image with only runtime deps
+#   2. runtime  — production image with only hash-verified runtime deps
 #
 # Usage:
 #   docker build -t custombot .
@@ -17,7 +22,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Builder — installs dependencies
 # ---------------------------------------------------------------------------
-FROM python:3.11.12-slim-bookworm AS builder
+FROM python:3.11.12-slim-bookworm@sha256:dbf1de478a55d6763afaa39c2f3d7b54b25230614980276de5cacdde79529d0c AS builder
 
 WORKDIR /build
 
@@ -27,10 +32,11 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy dependency manifests first for layer caching
-COPY requirements.txt pyproject.toml ./
+COPY requirements.txt requirements-lock.txt pyproject.toml ./
 
-# Install production dependencies into a clean prefix
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# Install production dependencies into a clean prefix (hash-verified)
+RUN pip install --no-cache-dir --require-hashes --prefix=/install \
+      -r requirements-lock.txt
 
 # Install dev dependencies into a separate prefix (for optional test stage)
 RUN pip install --no-cache-dir --prefix=/install-dev \
@@ -39,7 +45,7 @@ RUN pip install --no-cache-dir --prefix=/install-dev \
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime — minimal production image
 # ---------------------------------------------------------------------------
-FROM python:3.11.12-slim-bookworm AS runtime
+FROM python:3.11.12-slim-bookworm@sha256:dbf1de478a55d6763afaa39c2f3d7b54b25230614980276de5cacdde79529d0c AS runtime
 
 LABEL org.opencontainers.image.title="CustomBot"
 LABEL org.opencontainers.image.description="A lightweight WhatsApp AI assistant"

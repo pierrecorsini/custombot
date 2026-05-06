@@ -272,8 +272,7 @@ def _strip_flags(pat: str) -> str:
 _REDACTABLE_COMBINED = re.compile(
     "(?i)"
     + "|".join(
-        f"(?P<_r{i}>{_strip_flags(p.pattern)})"
-        for i, (p, _) in enumerate(_REDACTABLE_ALL_PATTERNS)
+        f"(?P<_r{i}>{_strip_flags(p.pattern)})" for i, (p, _) in enumerate(_REDACTABLE_ALL_PATTERNS)
     )
 )
 _REDACTABLE_NAMES = [name for _, name in _REDACTABLE_ALL_PATTERNS]
@@ -310,9 +309,15 @@ _INJECTION_REPLACEMENTS_COMPILED: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)ignore\s+previous\s+instructions?"), "[injection attempt removed]"),
     (re.compile(r"(?i)ignore\s+all\s+previous"), "[injection attempt removed]"),
     (re.compile(r"(?i)forget\s+previous\s+instructions?"), "[injection attempt removed]"),
-    (re.compile(r"(?i)disregard\s+(all\s+)?previous\s+(instructions?|rules?)"), "[injection attempt removed]"),
+    (
+        re.compile(r"(?i)disregard\s+(all\s+)?previous\s+(instructions?|rules?)"),
+        "[injection attempt removed]",
+    ),
     (re.compile(r"(?i)override\s+(your\s+)?instructions?"), "[injection attempt removed]"),
-    (re.compile(r"(?i)you\s+are\s+now\s+(?:a\s+)?(?:DAN|unrestricted)"), "[injection attempt removed]"),
+    (
+        re.compile(r"(?i)you\s+are\s+now\s+(?:a\s+)?(?:DAN|unrestricted)"),
+        "[injection attempt removed]",
+    ),
     (re.compile(r"(?i)jailbreak"), "[blocked keyword]"),
     (re.compile(r"(?i)prompt\s+injection"), "[blocked keyword]"),
 ]

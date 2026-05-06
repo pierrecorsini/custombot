@@ -8,8 +8,7 @@ Round 11/12 items tracked in `.opencode/context/project/lookup/plan-progress.md`
 ## Architecture & Refactoring
 
 - [x] Extract `HealthCheckRegistry` — centralize all health checks (DB, vector_memory, LLM, scheduler) into a discoverable registry with standardized `HealthCheckResult` signatures, replacing the ad-hoc `validate_connection()` / `get_llm_status()` / `get_dedup_stats()` scattered accessors on `Bot` and `Database`
-- [x] Implement NullObject `MemoryMonitor` — replace the `None` + try/except `ImportError` pattern in `Bot.start_memory_monitoring()` with a `NullMemoryMonitor` that satisfies the `MemoryMonitor` protocol, eliminating downstream None-checks and simplifying test fixtures
-- [ ] Add structured logging filter — create a `logging.Filter` that auto-injects `correlation_id`, `chat_id`, `app_phase`, and `session_id` into every `LogRecord`, eliminating the manual `extra={"chat_id": ..., "message_id": ...}` dict construction repeated across 50+ log call sites
+- [x] Implement NullObject `MemoryMonitor` — replace the `None` + try/except `ImportError` pattern in `Bot.start_memory_monitoring()` with a `NullMemoryMonitor` that satisfies the `MemoryMonitor` protocol, eliminating downstream None-checks and simplifying test fixtures- [ ] Add structured logging filter — create a `logging.Filter` that auto-injects `correlation_id`, `chat_id`, `app_phase`, and `session_id` into every `LogRecord`, eliminating the manual `extra={"chat_id": ..., "message_id": ...}` dict construction repeated across 50+ log call sites
 - [ ] Refactor `IncomingMessage` boundary validation into `MessageValidator` — extract the 6 standalone `_validate_*()` functions from `channels/base.py` into a cohesive `MessageValidator` class with a single `validate(raw: dict) -> IncomingMessage` entry point, reducing the 90-line `__post_init__` validation surface
 
 ## Performance Optimization

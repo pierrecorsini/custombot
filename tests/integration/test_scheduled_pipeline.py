@@ -23,9 +23,8 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any, TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -40,6 +39,11 @@ from src.routing import RoutingEngine, RoutingRule
 from src.skills import SkillRegistry
 from src.skills.base import BaseSkill
 from tests.helpers.llm_mocks import make_text_response, make_tool_call_response
+
+if TYPE_CHECKING:
+    from src.core.event_bus import Event
+    from unittest.mock import MagicMock
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -130,7 +134,9 @@ class TestScheduledPipelineHappyPath:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         with patch("src.llm.AsyncOpenAI") as mock_openai:
@@ -175,7 +181,9 @@ class TestScheduledPipelineHappyPath:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         with patch("src.llm.AsyncOpenAI") as mock_openai:
@@ -212,15 +220,15 @@ class TestScheduledPipelineHappyPath:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         with patch("src.llm.AsyncOpenAI") as mock_openai:
             mock_client = AsyncMock()
             mock_openai.return_value = mock_client
-            mock_client.chat.completions.create = AsyncMock(
-                return_value=make_text_response("OK")
-            )
+            mock_client.chat.completions.create = AsyncMock(return_value=make_text_response("OK"))
 
             bot, db, memory, skills = _make_bot(workspace, config)
             await db.connect()
@@ -251,15 +259,15 @@ class TestScheduledPipelineHappyPath:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         with patch("src.llm.AsyncOpenAI") as mock_openai:
             mock_client = AsyncMock()
             mock_openai.return_value = mock_client
-            mock_client.chat.completions.create = AsyncMock(
-                return_value=make_text_response("Done")
-            )
+            mock_client.chat.completions.create = AsyncMock(return_value=make_text_response("Done"))
 
             bot, db, memory, skills = _make_bot(workspace, config)
             await db.connect()
@@ -366,7 +374,9 @@ class TestScheduledPipelineErrors:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         with patch("src.llm.AsyncOpenAI"):
@@ -393,7 +403,9 @@ class TestScheduledPipelineErrors:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         with patch("src.llm.AsyncOpenAI"):
@@ -465,15 +477,15 @@ class TestScheduledVsNormalDifferences:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         with patch("src.llm.AsyncOpenAI") as mock_openai:
             mock_client = AsyncMock()
             mock_openai.return_value = mock_client
-            mock_client.chat.completions.create = AsyncMock(
-                return_value=make_text_response("Done")
-            )
+            mock_client.chat.completions.create = AsyncMock(return_value=make_text_response("Done"))
 
             bot, db, memory, skills = _make_bot(workspace, config)
             await db.connect()
@@ -551,7 +563,9 @@ def _make_full_bot(
     registry = skills or SkillRegistry()
 
     # Minimal LLMConfig for LLMClient construction (transport will be mocked)
-    llm_config = LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+    llm_config = LLMConfig(
+        api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+    )
     llm = LLMClient(llm_config)
     dedup = DeduplicationService(db)
 
@@ -716,7 +730,9 @@ class TestScheduledWriteConflictDetection:
             bot._react_loop = _react_loop_with_conflict
 
             # Capture warning logs
-            with patch.object(bot._db, "check_generation", wraps=bot._db.check_generation) as spy_check:
+            with patch.object(
+                bot._db, "check_generation", wraps=bot._db.check_generation
+            ) as spy_check:
                 msg = IncomingMessage(
                     message_id="msg-gen-conflict-001",
                     chat_id=chat_id,
@@ -738,10 +754,7 @@ class TestScheduledWriteConflictDetection:
         assert gen_after > gen_before, "Generation should have increased"
 
         # (b) Verify warning was logged
-        conflict_warnings = [
-            r for r in warnings
-            if "Write conflict for" in r.getMessage()
-        ]
+        conflict_warnings = [r for r in warnings if "Write conflict for" in r.getMessage()]
         assert len(conflict_warnings) >= 1, (
             f"Expected 'Write conflict for' warning, got: {[r.getMessage() for r in warnings]}"
         )
@@ -816,7 +829,9 @@ class TestScheduledWriteConflictDetection:
             )
             assert sched_response is not None
             gen_after_sched = db.get_generation(chat_id)
-            assert gen_after_sched >= 2, "Generation should be >= 2 after scheduled task (user + assistant)"
+            assert gen_after_sched >= 2, (
+                "Generation should be >= 2 after scheduled task (user + assistant)"
+            )
 
             # 2. User message second
             msg = IncomingMessage(
@@ -976,9 +991,7 @@ class TestScheduledPipelineEventEmission:
             bot, db, memory, skills = _make_full_bot(workspace)
             await db.connect()
 
-            with patch.object(
-                memory, "ensure_workspace", side_effect=OSError("no space")
-            ):
+            with patch.object(memory, "ensure_workspace", side_effect=OSError("no space")):
                 result = await bot.process_scheduled(
                     chat_id=chat_id,
                     prompt="Should fail",
@@ -1004,7 +1017,7 @@ class TestScheduledPipelineEventEmission:
         The ``response_length`` in the completed event exactly matches the
         length of the response text returned by process_scheduled().
         """
-        from src.core.event_bus import Event, get_event_bus, reset_event_bus
+        from src.core.event_bus import get_event_bus, reset_event_bus
 
         reset_event_bus()
         bus = get_event_bus()

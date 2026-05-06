@@ -36,6 +36,7 @@ from src.monitoring.tracing import (
     tool_calls_span,
 )
 from src.utils import JSONDecodeError
+from src.utils.timing import elapsed as _elapsed, set_timer_start as _set_timer_start
 
 if TYPE_CHECKING:
     from openai.types.chat.chat_completion import Choice
@@ -90,6 +91,9 @@ class ReactIterationContext:
     # Optional — may be ``None`` depending on config
     stream_callback: StreamCallback | None = None
     channel: BaseChannel | None = None
+    # Monotonic deadline (``time.monotonic()``) for wall-clock timeout.
+    # ``None`` means no deadline (disabled).
+    deadline: float | None = None
 
 
 async def call_llm_with_retry(
@@ -182,6 +186,7 @@ async def react_loop(
     retryable_codes: frozenset[ErrorCode],
     stream_callback: StreamCallback | None = None,
     channel: BaseChannel | None = None,
+    react_loop_timeout: float = 0.0,
 ) -> tuple[str, list[ToolLogEntry], list[dict[str, Any]]]:
     """Run the ReAct loop and return response text, tool log, and buffered messages.
 
@@ -200,12 +205,18 @@ async def react_loop(
         retryable_codes: LLM error codes that are transient and worth retrying.
         stream_callback: Optional callback to stream tool executions in real-time.
         channel: Optional channel for media-sending callback injection.
+        react_loop_timeout: Wall-clock timeout in seconds for the full loop.
+            Checked between iterations; 0 disables the deadline.
 
     Returns:
         Tuple of (response_text, tool_log, buffered_persist).
     """
     tool_log: list[ToolLogEntry] = []
     buffered_persist: list[dict[str, Any]] = []
+
+    deadline: float | None = None
+    if react_loop_timeout and react_loop_timeout > 0:
+        deadline = time.monotonic() + react_loop_timeout
 
     ctx = ReactIterationContext(
         llm=llm,
@@ -221,9 +232,36 @@ async def react_loop(
         retryable_codes=retryable_codes,
         stream_callback=stream_callback,
         channel=channel,
+        deadline=deadline,
     )
 
     for iteration in range(max_tool_iterations):
+        # ── Wall-clock deadline check ────────────────────────────────────
+        if ctx.deadline is not None and time.monotonic() >= ctx.deadline:
+            elapsed = time.monotonic() - (ctx.deadline - react_loop_timeout)
+            log.warning(
+                "ReAct loop wall-clock timeout exceeded (%.1fs / %.1fs) at "
+                "iteration %d/%d for chat %s — terminating gracefully",
+                elapsed,
+                react_loop_timeout,
+                iteration,
+                max_tool_iterations,
+                chat_id,
+                extra={
+                    "chat_id": chat_id,
+                    "iteration": iteration,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "timeout_seconds": react_loop_timeout,
+                },
+            )
+            ctx.metrics.track_react_iterations(iteration)
+            ctx.metrics.track_conversation_depth(chat_id, iteration)
+            return (
+                format_timeout_message(react_loop_timeout, iteration, tool_log),
+                tool_log,
+                buffered_persist,
+            )
+
         with react_loop_span(chat_id, iteration + 1, max_tool_iterations) as span:
             result = await _react_iteration(
                 ctx,
@@ -273,7 +311,7 @@ async def _react_iteration(
     ``skill_execution_span``) are exercised via the helpers called from
     here, and per-iteration attributes are recorded on *span*.
     """
-    start_time = time.perf_counter()
+    _set_timer_start()
 
     # ── LLM call (wrapped in llm_call_span by call_llm_with_retry) ──────
     response = await call_llm_with_retry(
@@ -307,7 +345,7 @@ async def _react_iteration(
     has_tool_calls = choice.message.tool_calls is not None and len(choice.message.tool_calls) > 0
 
     # Record LLM latency and response metadata on the iteration span
-    llm_latency = time.perf_counter() - start_time
+    llm_latency = _elapsed()
     ctx.metrics.track_llm_latency(llm_latency)
     span.set_attribute("custombot.react.finish_reason", finish_reason or "unknown")
     span.set_attribute("custombot.llm.latency_ms", round(llm_latency * 1000, 2))
@@ -372,6 +410,25 @@ def format_max_iterations_message(iterations: int, tool_log: list[ToolLogEntry])
         tool_summary = f"\n\n🔧 Tools used ({len(tool_log)} calls): {', '.join(unique_tools)}"
     return (
         f"⚠️ Reached maximum tool iterations ({iterations}). "
+        f"The task may be too complex for a single request. "
+        f"Try breaking it into smaller steps.{tool_summary}"
+    )
+
+
+def format_timeout_message(
+    timeout_seconds: float,
+    iteration: int,
+    tool_log: list[ToolLogEntry],
+) -> str:
+    """Build an informative message when the ReAct loop exceeds the wall-clock timeout."""
+    tool_summary = ""
+    if tool_log:
+        tool_names = [entry.name for entry in tool_log]
+        unique_tools = dict.fromkeys(tool_names)
+        tool_summary = f"\n\n🔧 Tools used ({len(tool_log)} calls): {', '.join(unique_tools)}"
+    return (
+        f"⚠️ Processing timed out after {timeout_seconds:.0f}s "
+        f"(completed {iteration} iteration{'s' if iteration != 1 else ''}). "
         f"The task may be too complex for a single request. "
         f"Try breaking it into smaller steps.{tool_summary}"
     )
@@ -577,14 +634,10 @@ async def execute_tool_call(
                 send_media=send_media,
             )
             span.set_attribute("custombot.skill.result_length", len(result))
-            try:
-                args = json.loads(tool_call.function.arguments or "{}")
-            except JSONDecodeError:
-                args = {}
             return (
                 tc_id,
                 result,
-                ToolLogEntry(name=tool_call.function.name, args=args, result=result),
+                ToolLogEntry(name=tool_call.function.name, args=raw_args, result=result),
             )
 
         except (AttributeError, TypeError) as exc:

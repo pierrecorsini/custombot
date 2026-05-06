@@ -212,11 +212,61 @@ class TestExtractMessage:
         assert result is None
 
     def test_exception_returns_none(self):
+        """When an unexpected error occurs during extraction, returns None."""
+
+        class _BrokenAttr:
+            """Object whose every attribute access raises RuntimeError."""
+
+            def __getattr__(self, name: str) -> Any:
+                raise RuntimeError("protobuf decode error")
+
         ev = MagicMock()
-        ev.Info = MagicMock(side_effect=AttributeError("broken"))
-        del ev.Info.MessageSource  # force error
+        ev.Info = MagicMock()
+        ev.Info.MessageSource = MagicMock()
+        ev.Info.MessageSource.Chat = _BrokenAttr()
+        ev.Message = MagicMock()
         result = _extract_message(ev)
         assert result is None
+
+    def test_none_sender_falls_back_to_chat_user(self):
+        """When Sender JID is None, falls back to Chat.User for sender_id."""
+        ev = self._make_event(chat_user="1234", sender_user="5678")
+        # Set Sender to None to simulate unset protobuf field
+        ev.Info.MessageSource.Sender = None
+        result = _extract_message(ev)
+        assert result is not None
+        assert result["sender_id"] == "1234"  # falls back to chat user
+        assert result["chat_id"] == "1234@s.whatsapp.net"
+
+    def test_none_info_returns_none(self):
+        """When ev.Info is None, returns None gracefully."""
+        ev = MagicMock()
+        ev.Info = None
+        result = _extract_message(ev)
+        assert result is None
+
+    def test_none_message_source_returns_none(self):
+        """When MessageSource is None, returns None gracefully."""
+        ev = MagicMock()
+        ev.Info = MagicMock()
+        ev.Info.MessageSource = None
+        ev.Message = MagicMock()
+        result = _extract_message(ev)
+        assert result is None
+
+    def test_none_chat_jid_returns_none(self):
+        """When Chat JID is None, message is dropped (no chat_id)."""
+        ev = self._make_event()
+        ev.Info.MessageSource.Chat = None
+        result = _extract_message(ev)
+        assert result is None
+
+    def test_sender_with_empty_user_falls_back(self):
+        """Sender JID exists but User is empty string → falls back to chat user."""
+        ev = self._make_event(chat_user="9999", sender_user="")
+        result = _extract_message(ev)
+        assert result is not None
+        assert result["sender_id"] == "9999"
 
 
 # ── NeonizeBackend.is_connected ─────────────────────────────────────────────
@@ -325,9 +375,7 @@ class TestWatchdog:
 
         asyncio.get_event_loop().create_task(_bump_gen())
 
-        with patch(
-            "src.channels.neonize_backend._internet_available", return_value=False
-        ):
+        with patch("src.channels.neonize_backend._internet_available", return_value=False):
             await backend._watchdog(gen)
 
         assert backend._network_outage is True
@@ -354,7 +402,11 @@ class TestWatchdog:
         with (
             patch("src.channels.neonize_backend._internet_available", return_value=True),
             patch.object(backend, "_reconnect", side_effect=fake_reconnect),
-            patch("src.channels.neonize_backend.asyncio.sleep", new_callable=AsyncMock, return_value=None),
+            patch(
+                "src.channels.neonize_backend.asyncio.sleep",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             await backend._watchdog(gen)
 
@@ -412,7 +464,11 @@ class TestWatchdog:
         with (
             patch("src.channels.neonize_backend._internet_available", return_value=True),
             patch.object(backend, "_reconnect", side_effect=failing_reconnect),
-            patch("src.channels.neonize_backend.asyncio.sleep", new_callable=AsyncMock, side_effect=fake_sleep),
+            patch(
+                "src.channels.neonize_backend.asyncio.sleep",
+                new_callable=AsyncMock,
+                side_effect=fake_sleep,
+            ),
         ):
             await backend._watchdog(gen)
 
@@ -443,7 +499,11 @@ class TestWatchdog:
         with (
             patch("src.channels.neonize_backend._internet_available", return_value=True),
             patch.object(backend, "_reconnect", side_effect=succeed_reconnect),
-            patch("src.channels.neonize_backend.asyncio.sleep", new_callable=AsyncMock, return_value=None),
+            patch(
+                "src.channels.neonize_backend.asyncio.sleep",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             await backend._watchdog(gen)
 
@@ -513,7 +573,11 @@ class TestWatchdog:
         with (
             patch("src.channels.neonize_backend._internet_available", return_value=True),
             patch.object(backend, "_reconnect", side_effect=reconnect_with_cycle),
-            patch("src.channels.neonize_backend.asyncio.sleep", new_callable=AsyncMock, return_value=None),
+            patch(
+                "src.channels.neonize_backend.asyncio.sleep",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             await backend._watchdog(gen)
 
@@ -545,7 +609,11 @@ class TestWatchdog:
         with (
             patch("src.channels.neonize_backend._internet_available", return_value=True),
             patch.object(backend, "_reconnect", side_effect=failing_reconnect),
-            patch("src.channels.neonize_backend.asyncio.sleep", new_callable=AsyncMock, return_value=None),
+            patch(
+                "src.channels.neonize_backend.asyncio.sleep",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             await backend._watchdog(gen)
 
@@ -615,9 +683,7 @@ class TestReconnect:
         backend._loop = asyncio.get_event_loop()
 
         with (
-            patch(
-                "src.channels.neonize_backend.NeonizeBackend.start", MagicMock()
-            ),
+            patch("src.channels.neonize_backend.NeonizeBackend.start", MagicMock()),
             pytest.raises(RuntimeError, match="timed out"),
         ):
             # timeout=0 so ready_event.wait returns immediately (not set)
@@ -637,9 +703,7 @@ class TestReconnect:
 
         asyncio.get_event_loop().create_task(_set_ready())
 
-        with patch(
-            "src.channels.neonize_backend.NeonizeBackend.start", MagicMock()
-        ) as mock_start:
+        with patch("src.channels.neonize_backend.NeonizeBackend.start", MagicMock()) as mock_start:
             await backend._reconnect(timeout=2)
 
         mock_start.assert_called_once_with(backend._loop)
@@ -694,9 +758,7 @@ class TestSend:
         backend._client = client
 
         # First send raises a connection error, triggering reconnect+retry path
-        client.send_message = MagicMock(
-            side_effect=RuntimeError("usync: connection stale")
-        )
+        client.send_message = MagicMock(side_effect=RuntimeError("usync: connection stale"))
 
         with (
             patch("src.channels.neonize_backend._parse_jid", return_value=("u", "s.whatsapp.net")),

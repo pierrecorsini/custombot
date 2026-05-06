@@ -324,7 +324,8 @@ def start(ctx, config_path, health_port, health_host, log_llm, safe_mode):
     show_default=True,
     help="Path to config.json",
 )
-def diagnose(config_path):
+@click.option("--cleanup", is_flag=True, default=False, help="Remove orphaned workspace dirs")
+def diagnose(config_path, cleanup):
     """
     Run diagnostic checks and output a structured report.
 
@@ -336,10 +337,11 @@ def diagnose(config_path):
     Examples:
         python main.py diagnose
         python main.py diagnose --config my_config.json
+        python main.py diagnose --cleanup
     """
     from src.diagnose import run_diagnose_cli
 
-    run_diagnose_cli(Path(config_path))
+    run_diagnose_cli(Path(config_path), cleanup=cleanup)
 
 
 @cli.command()

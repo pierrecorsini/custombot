@@ -27,13 +27,14 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 import xxhash
 
 from src.constants import (
+    ROUTING_FRONTMATTER_CACHE_MAX_SIZE,
     ROUTING_MATCH_CACHE_MAX_SIZE,
     ROUTING_MATCH_CACHE_TTL_SECONDS,
     ROUTING_RETRY_SLEEP_BUDGET_SECONDS,
     ROUTING_WATCH_DEBOUNCE_SECONDS,
 )
-from src.utils import BoundedOrderedDict
-from src.utils.frontmatter import extract_routing_rules, parse_file
+from src.utils import BoundedOrderedDict, LRUDict
+from src.utils.frontmatter import ParsedFile, extract_routing_rules, parse_file
 
 if TYPE_CHECKING:
     from src.channels.base import ChannelType, IncomingMessage
@@ -134,13 +135,14 @@ def _match_compiled(compiled: Optional[re.Pattern], pattern: str, value: str) ->
     return pattern == value
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class RoutingRule:
     """
-    Immutable routing rule that matches messages and maps to an instruction file.
+    Routing rule that matches messages and maps to an instruction file.
 
-    Frozen dataclass: cannot be modified after creation. Enables use as
-    dict keys and in sets. Thread-safe by design.
+    All regex patterns are compiled eagerly in ``__post_init__`` so the
+    instance is fully initialised after construction — no lazy compilation
+    or frozen-dataclass workarounds needed.
 
     Uses slots=True for memory efficiency when many routing rules are loaded.
     Reduces memory footprint per rule instance and speeds up attribute access.
@@ -175,40 +177,25 @@ class RoutingRule:
     toMe: Optional[bool] = None
     skillExecVerbose: str = ""
     showErrors: bool = True
-    # Lazily-compiled regex patterns (populated on first match attempt)
-    _compiled_sender: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
-    _compiled_recipient: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
-    _compiled_channel: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
-    _compiled_content: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
+    # Pre-compiled regex patterns (computed eagerly in __post_init__)
+    _compiled_sender: Optional[re.Pattern] = field(init=False, default=None, repr=False, compare=False)
+    _compiled_recipient: Optional[re.Pattern] = field(init=False, default=None, repr=False, compare=False)
+    _compiled_channel: Optional[re.Pattern] = field(init=False, default=None, repr=False, compare=False)
+    _compiled_content: Optional[re.Pattern] = field(init=False, default=None, repr=False, compare=False)
     # Pre-computed flag: True when all four match patterns are "*"
-    _is_wildcard: bool = field(default=False, repr=False, compare=False)
-    # Tracks whether regex patterns have been compiled yet
-    _compiled: bool = field(default=False, repr=False, compare=False)
+    _is_wildcard: bool = field(init=False, default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        # Only compute cheap _is_wildcard flag; defer regex compilation to first match
-        object.__setattr__(
-            self,
-            "_is_wildcard",
+        self._is_wildcard = (
             self.sender == "*"
             and self.recipient == "*"
             and self.channel == "*"
-            and self.content_regex == "*",
+            and self.content_regex == "*"
         )
-
-    def _ensure_compiled(self) -> None:
-        """Compile regex patterns on first match attempt (lazy initialization).
-
-        Safe for concurrent use: ``_compile_pattern`` is deterministic, so
-        overlapping calls produce identical results (idempotent writes).
-        """
-        if self._compiled:
-            return
-        object.__setattr__(self, "_compiled_sender", _compile_pattern(self.sender))
-        object.__setattr__(self, "_compiled_recipient", _compile_pattern(self.recipient))
-        object.__setattr__(self, "_compiled_channel", _compile_pattern(self.channel))
-        object.__setattr__(self, "_compiled_content", _compile_pattern(self.content_regex))
-        object.__setattr__(self, "_compiled", True)
+        self._compiled_sender = _compile_pattern(self.sender)
+        self._compiled_recipient = _compile_pattern(self.recipient)
+        self._compiled_channel = _compile_pattern(self.channel)
+        self._compiled_content = _compile_pattern(self.content_regex)
 
     def __repr__(self) -> str:
         regex_preview = (
@@ -319,6 +306,10 @@ class RoutingEngine:
         # rebuild, avoiding per-message list allocation in match_with_rule).
         self._candidates_by_channel: dict[str, list[RoutingRule]] = {}
         self._default_candidates: list[RoutingRule] = []
+        # Single-rule fast-path reference: when only one rule exists the
+        # engine skips cache-key hashing, dict lookups, and list iteration
+        # entirely and evaluates the rule directly.
+        self._single_rule: RoutingRule | None = None
         # TTL-bounded LRU cache for match results (delegated to BoundedOrderedDict).
         # Key: (fromMe, toMe, sender_id, chat_id, channel_type, text[:100])
         # Value: (rule | None, instruction | None)
@@ -326,6 +317,12 @@ class RoutingEngine:
             max_size=ROUTING_MATCH_CACHE_MAX_SIZE,
             eviction="half",
             ttl=ROUTING_MATCH_CACHE_TTL_SECONDS,
+        )
+
+        # Parsed-frontmatter cache keyed by filename.  Stores (mtime, size, ParsedFile)
+        # so that unchanged .md files skip YAML re-parsing during hot-reload.
+        self._frontmatter_cache: LRUDict[str, tuple[float, int, Any]] = LRUDict(
+            max_size=ROUTING_FRONTMATTER_CACHE_MAX_SIZE,
         )
 
         # Watchdog-based file watching
@@ -384,8 +381,15 @@ class RoutingEngine:
 
     @_rules.setter
     def _rules(self, value: List[RoutingRule]) -> None:
-        """Set rules, rebuild the channel index, and invalidate the match cache."""
+        """Set rules, rebuild the channel index, and invalidate the match cache.
+
+        The frontmatter cache is intentionally NOT cleared here — it is
+        keyed by (mtime, size) so unchanged files naturally remain cached.
+        Entries are evicted by the LRU policy or refreshed when their
+        mtime/size changes on the next load_rules() call.
+        """
         self._rules_list = value
+        self._single_rule = value[0] if len(value) == 1 else None
         self._match_cache.clear()
         self._rebuild_channel_index(value)
 
@@ -473,6 +477,32 @@ class RoutingEngine:
                 pass
         return mtimes
 
+    def _cached_parse(self, path: Path) -> ParsedFile:
+        """Parse a file with mtime+size-based frontmatter caching.
+
+        Returns the cached ``ParsedFile`` when the file's mtime and size
+        match the cache entry, avoiding redundant YAML parsing.  On miss,
+        calls ``parse_file()`` and stores the result.
+        """
+        filename = path.name
+        try:
+            stat = path.stat()
+            mtime = stat.st_mtime
+            size = stat.st_size
+        except OSError:
+            return parse_file(path)
+
+        cached = self._frontmatter_cache.get(filename)
+        if cached is not None and cached[0] == mtime and cached[1] == size:
+            parsed = cached[2]
+            # Ensure source path points to the current file
+            parsed.source = path
+            return parsed
+
+        parsed = parse_file(path)
+        self._frontmatter_cache[filename] = (mtime, size, parsed)
+        return parsed
+
     def _is_stale(self) -> bool:
         """Check whether instruction files have changed since last load.
 
@@ -532,7 +562,7 @@ class RoutingEngine:
                 )
                 continue
             try:
-                parsed = await asyncio.to_thread(parse_file, md_file)
+                parsed = await asyncio.to_thread(self._cached_parse, md_file)
                 rule_dicts = extract_routing_rules(parsed.metadata)
             except Exception as exc:
                 # Retry once for transient parse failures (e.g. concurrent writes),
@@ -550,6 +580,8 @@ class RoutingEngine:
                 await asyncio.sleep(0.1)
                 retry_sleep_spent += 0.1
                 try:
+                    # Invalidate cache for this file before retry
+                    self._frontmatter_cache.pop(md_file.name, None)
                     parsed = await asyncio.to_thread(parse_file, md_file)
                     rule_dicts = extract_routing_rules(parsed.metadata)
                 except Exception as retry_exc:
@@ -659,6 +691,29 @@ class RoutingEngine:
         can call the hot-path matching directly without async overhead.
         Stale-check and reload must be performed *before* calling this.
         """
+        # ── Single-rule fast path ─────────────────────────────────────────
+        # When only one rule is loaded (common for simple deployments) the
+        # cache-key hashing, dict lookups, and list iteration are all
+        # unnecessary overhead.  Evaluate the single rule directly.
+        single = self._single_rule
+        if single is not None:
+            if not single.enabled:
+                return (None, None)
+            if single.fromMe is not None and single.fromMe != ctx.fromMe:
+                return (None, None)
+            if single.toMe is not None and single.toMe != ctx.toMe:
+                return (None, None)
+            if not single._is_wildcard:
+                if not _match_compiled(single._compiled_sender, single.sender, ctx.sender_id):
+                    return (None, None)
+                if not _match_compiled(single._compiled_recipient, single.recipient, ctx.chat_id):
+                    return (None, None)
+                if not _match_compiled(single._compiled_channel, single.channel, ctx.channel_type):
+                    return (None, None)
+                if not _match_compiled(single._compiled_content, single.content_regex, ctx.text):
+                    return (None, None)
+            return (single, single.instruction)
+
         cache_key = self._cache_key(ctx)
 
         # Check cache first
@@ -687,7 +742,6 @@ class RoutingEngine:
             # Wildcard-only rules skip all regex/exact matching — fromMe/toMe
             # (checked above) are the only discriminators.
             if not rule._is_wildcard:
-                rule._ensure_compiled()
                 if not _match_compiled(rule._compiled_sender, rule.sender, ctx.sender_id):
                     continue
 

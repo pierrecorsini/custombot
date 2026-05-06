@@ -103,3 +103,9 @@ MAX_CHAT_GENERATIONS: int = 10_000
 # read connections.  20 accommodates the main writer threads plus several read
 # threads without exhausting file descriptors.
 SQLITE_POOL_MAX_CONNECTIONS: int = 20
+
+# Maximum number of idle connections retained for reuse in the shared pool.
+# Idle connections are LRU-evicted when this cap is exceeded, reducing
+# connection setup overhead (directory creation, PRAGMA execution) for
+# repeated access to the same database paths.
+SQLITE_POOL_MAX_IDLE_CONNECTIONS: int = 5

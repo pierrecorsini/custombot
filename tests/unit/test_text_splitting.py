@@ -230,7 +230,9 @@ class TestReconstructionInvariant:
     def test_no_chunk_exceeds_limit(self, text, limit):
         result = _split_text(text, limit)
         for chunk in result:
-            assert len(chunk) <= limit, f"Chunk length {len(chunk)} exceeds limit {limit}: {chunk!r}"
+            assert len(chunk) <= limit, (
+                f"Chunk length {len(chunk)} exceeds limit {limit}: {chunk!r}"
+            )
 
 
 # ─── Formatting preservation ─────────────────────────────────────────────

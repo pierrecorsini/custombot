@@ -11,11 +11,14 @@ Tests that the start command:
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from click.testing import CliRunner
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from click.testing import CliRunner
+    from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: Create test config files

@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/guides/optimization-patterns | Priority: high | Version: 1.3 | Updated: 2026-05-06 -->
+<!-- Context: project-intelligence/guides/optimization-patterns | Priority: high | Version: 1.4 | Updated: 2026-05-06 -->
 
 # Optimization Patterns
 
@@ -163,6 +163,32 @@ except sqlite3.Error as exc:
 ```
 
 📂 `src/vector_memory/__init__.py` — `save()`, `save_batch()`, `search()`, `list_recent()`, `count()`
+
+## NullObject for Optional Dependencies
+
+When a dependency (e.g. psutil) may be unavailable. Replace `Optional[X]` + None-checks with a NullObject that satisfies the Protocol with safe no-ops.
+
+```python
+class NullMemoryMonitor:
+    """NullObject that satisfies the MemoryMonitor Protocol."""
+    def register_cache(self, name, size_fn): pass  # no-op
+    def start_periodic_check(self, interval=30): pass  # no-op
+    async def stop(self): pass  # no-op
+```
+
+📂 `src/monitoring/memory.py` — `NullMemoryMonitor`
+
+## Registry Pattern for Discoverable Health Checks
+
+When health checks are scattered across classes (Bot, Database, etc.). Centralize into a registry with standardized signatures.
+
+```python
+class HealthCheckRegistry:
+    def register(self, name: str, check_fn: Callable) -> None: ...
+    async def run_all(self) -> dict[str, HealthCheckResult]: ...
+```
+
+📂 `src/health/registry.py` — `HealthCheckRegistry`
 
 ## Session 2 Optimizations (2026-05-02)
 

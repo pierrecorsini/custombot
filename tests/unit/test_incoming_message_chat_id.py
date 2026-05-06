@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.channels.base import IncomingMessage, _CHAT_ID_RE, _validate_chat_id
+from src.channels.base import IncomingMessage
+from src.utils.validation import _CHAT_ID_RE, _validate_chat_id
 
 
 def _make_msg(chat_id: str = "chat_001", **overrides: object) -> IncomingMessage:

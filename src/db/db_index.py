@@ -12,10 +12,12 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, TYPE_CHECKING
 
 from src.utils import JSONDecodeError, json_dumps, json_loads
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 

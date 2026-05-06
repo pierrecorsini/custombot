@@ -18,7 +18,6 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
-from openai.types.chat.chat_completion_message_function_tool_call import ChatCompletionMessageFunctionToolCall
 
 from src.constants import DEFAULT_SKILL_TIMEOUT, SLOW_SKILL_THRESHOLD_SECONDS
 from src.core.errors import NonCriticalCategory, log_noncritical
@@ -35,9 +34,7 @@ _MAX_TOOL_NAME_LENGTH = 100
 
 # Control characters, newlines, ANSI escape sequences stripped from tool names
 # to prevent log forging and audit trail injection.
-_TOOL_NAME_SANITIZE_RE = re.compile(
-    r"\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f-\x9f]"
-)
+_TOOL_NAME_SANITIZE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f-\x9f]")
 
 
 def _sanitize_tool_name(name: str) -> str:
@@ -47,7 +44,11 @@ def _sanitize_tool_name(name: str) -> str:
         cleaned = cleaned[:_MAX_TOOL_NAME_LENGTH]
     return cleaned or "unknown"
 
+
 if TYPE_CHECKING:
+    from openai.types.chat.chat_completion_message_function_tool_call import (
+        ChatCompletionMessageFunctionToolCall,
+    )
     from src.monitoring import PerformanceMetrics
     from src.rate_limiter import RateLimiter
     from src.skills import SkillRegistry
@@ -73,15 +74,13 @@ class ToolExecutor:
         self._rate_limiter = rate_limiter
         self._metrics = metrics
         self._on_skill_executed = on_skill_executed
-        # Audit state: None = disabled; Path = pending lazy-init on first
-        # _audit() call; SkillAuditLogger = initialized and ready.
-        self._audit_logger: SkillAuditLogger | Path | None = (
-            Path(audit_log_dir) if audit_log_dir else None
+        self._audit_logger: SkillAuditLogger | None = (
+            SkillAuditLogger(Path(audit_log_dir)) if audit_log_dir else None
         )
 
     def close(self) -> None:
         """Flush and close the audit logger. Safe to call multiple times."""
-        if isinstance(self._audit_logger, SkillAuditLogger):
+        if self._audit_logger is not None:
             self._audit_logger.close()
             log.debug("ToolExecutor audit logger closed")
         self._audit_logger = None
@@ -98,10 +97,6 @@ class ToolExecutor:
         logger = self._audit_logger
         if logger is None:
             return
-        # First call — lazily create the logger from the stored path
-        if isinstance(logger, Path):
-            logger = SkillAuditLogger(logger)
-            self._audit_logger = logger
         logger.log(
             chat_id=chat_id,
             skill_name=skill_name,
@@ -275,15 +270,17 @@ class ToolExecutor:
 
                 # Emit skill_executed event for plugins/subscribers
                 try:
-                    await get_event_bus().emit(Event(
-                        name="skill_executed",
-                        data={
-                            "skill_name": name,
-                            "chat_id": chat_id,
-                            "duration_ms": round(timing_result.duration_ms, 2),
-                        },
-                        source="ToolExecutor",
-                    ))
+                    await get_event_bus().emit(
+                        Event(
+                            name="skill_executed",
+                            data={
+                                "skill_name": name,
+                                "chat_id": chat_id,
+                                "duration_ms": round(timing_result.duration_ms, 2),
+                            },
+                            source="ToolExecutor",
+                        )
+                    )
                 except Exception:
                     log_noncritical(
                         NonCriticalCategory.EVENT_EMISSION,

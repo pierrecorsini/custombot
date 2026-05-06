@@ -13,12 +13,15 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict
-from pathlib import Path
 
 import pytest
 
 from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
 from src.config.config import _apply_env_overrides, load_config
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,7 +91,9 @@ class TestApplyEnvOverrides:
         _apply_env_overrides(base_config)
         assert base_config.llm.base_url == "https://custom.api.local/v1"
 
-    def test_both_env_vars_applied(self, base_config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_both_env_vars_applied(
+        self, base_config: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Both env vars are applied simultaneously."""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-env-key")
         monkeypatch.setenv("OPENAI_BASE_URL", "https://env.api.local/v1")
@@ -96,7 +101,9 @@ class TestApplyEnvOverrides:
         assert base_config.llm.api_key == "sk-env-key"
         assert base_config.llm.base_url == "https://env.api.local/v1"
 
-    def test_no_env_vars_leaves_config_unchanged(self, base_config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_env_vars_leaves_config_unchanged(
+        self, base_config: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """When neither env var is set, config values remain unchanged."""
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
@@ -106,7 +113,9 @@ class TestApplyEnvOverrides:
         assert base_config.llm.api_key == original_key
         assert base_config.llm.base_url == original_url
 
-    def test_empty_env_var_ignored(self, base_config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_empty_env_var_ignored(
+        self, base_config: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """An empty-string env var is falsy and does NOT override the config."""
         monkeypatch.setenv("OPENAI_API_KEY", "")
         monkeypatch.setenv("OPENAI_BASE_URL", "")

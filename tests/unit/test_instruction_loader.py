@@ -7,12 +7,15 @@ Covers mtime caching, frontmatter stripping, file I/O, and cache invalidation.
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import pytest
 
 from src.core.instruction_loader import InstructionLoader
 from src.security import PathSecurityError
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture()

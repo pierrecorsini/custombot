@@ -12,11 +12,13 @@ import logging
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from src.db.db_utils import _validate_chat_id
+from src.utils.validation import _validate_chat_id
 from src.utils import JSONDecodeError, json_loads
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 

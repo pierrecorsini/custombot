@@ -11,7 +11,6 @@ Tests all validation functions including:
 from __future__ import annotations
 
 from dataclasses import asdict
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,6 +25,10 @@ from src.channels.validation import (
 )
 from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
 from src.health import HealthStatus
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures

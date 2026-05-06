@@ -46,11 +46,7 @@ def format_prometheus_metric(
     if labels:
         parts = [f'{k}="{v}"' for k, v in labels.items()]
         label_str = "{" + ",".join(parts) + "}"
-    return (
-        f"# HELP {name} {help_text}\n"
-        f"# TYPE {name} {metric_type}\n"
-        f"{name}{label_str} {value}\n"
-    )
+    return f"# HELP {name} {help_text}\n# TYPE {name} {metric_type}\n{name}{label_str} {value}\n"
 
 
 def format_prometheus_summary(
@@ -122,9 +118,7 @@ def format_prometheus_histogram(
         f"# TYPE {name} histogram\n",
     ]
     for le_label, count in histogram.get("buckets", {}).items():
-        lines.append(
-            f'{name}_bucket{{{bucket_prefix}le="{le_label}"}} {count}\n'
-        )
+        lines.append(f'{name}_bucket{{{bucket_prefix}le="{le_label}"}} {count}\n')
 
     sum_suffix = f"_sum{suffix_labels}" if suffix_labels else "_sum"
     lines.append(f"{name}{sum_suffix} {histogram.get('sum_ms', 0)}\n")
@@ -284,9 +278,7 @@ def build_prometheus_output(
             "custombot_react_iterations",
             "Number of ReAct loop iterations per conversation",
             count=react_iters.count,
-            sum_ms=round(react_iters.mean_ms * react_iters.count, 2)
-            if react_iters.count
-            else 0,
+            sum_ms=round(react_iters.mean_ms * react_iters.count, 2) if react_iters.count else 0,
             quantiles={
                 "0.5": round(react_iters.median_ms, 2),
                 "0.95": round(react_iters.p95_ms, 2),
@@ -488,9 +480,7 @@ def build_prometheus_output(
                 "custombot_skill_latency_milliseconds",
                 "Skill execution latency in milliseconds",
                 count=skill_lat.count,
-                sum_ms=round(skill_lat.mean_ms * skill_lat.count, 2)
-                if skill_lat.count
-                else 0,
+                sum_ms=round(skill_lat.mean_ms * skill_lat.count, 2) if skill_lat.count else 0,
                 quantiles={
                     "0.5": round(skill_lat.median_ms, 2),
                     "0.95": round(skill_lat.p95_ms, 2),
@@ -502,9 +492,7 @@ def build_prometheus_output(
             )
         )
         # Per-skill call count as a labeled metric
-        lines.append(
-            f'custombot_skill_calls_total{{skill="{skill_name}"}} {skill_lat.count}\n'
-        )
+        lines.append(f'custombot_skill_calls_total{{skill="{skill_name}"}} {skill_lat.count}\n')
 
     # ── Per-Skill Execution & Error Metrics ──────────────────────────────────
     for skill_name, sm in snapshot.skill_metrics.items():

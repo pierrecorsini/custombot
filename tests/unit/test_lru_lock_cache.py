@@ -288,9 +288,7 @@ class TestActiveCountAndConfigurableSize:
                     await cache.get_or_create("C")
                     cache.release("C")
 
-                assert any(
-                    "under pressure" in r.message.lower() for r in caplog.records
-                )
+                assert any("under pressure" in r.message.lower() for r in caplog.records)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

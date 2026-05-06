@@ -20,3 +20,11 @@ CLEANUP_STEP_TIMEOUT: float = 10.0
 # Caps memory usage and LLM rate-limit pressure under load without blocking the
 # event loop — excess messages wait for a free slot via asyncio.Semaphore.
 DEFAULT_MAX_CONCURRENT_MESSAGES: int = 10
+
+# Default per-chat processing timeout (in seconds).
+# Wraps the entire _process() call (context assembly + ReAct loop + response
+# delivery) inside asyncio.wait_for().  When exceeded, the stuck turn is
+# cancelled and the per-chat lock is released so subsequent messages can be
+# processed.  300s (5 min) accommodates multi-tool ReAct turns while preventing
+# indefinite blocking from hung LLM calls or tool executions.
+DEFAULT_PER_CHAT_TIMEOUT: float = 300.0

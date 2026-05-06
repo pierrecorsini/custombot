@@ -170,9 +170,7 @@ class TestSqliteHelperRetry:
 
     def test_successful_operation(self, helper: _ConcreteHelper) -> None:
         """Normal operation succeeds without retry."""
-        cur = helper._execute_and_commit(
-            "INSERT INTO t (id, v) VALUES (?, ?)", (1, "hello")
-        )
+        cur = helper._execute_and_commit("INSERT INTO t (id, v) VALUES (?, ?)", (1, "hello"))
         assert cur.rowcount == 1
 
         rows = helper._execute("SELECT v FROM t WHERE id = ?", (1,)).fetchall()
@@ -195,30 +193,22 @@ class TestSqliteHelperRetry:
         helper._db = mock_db
 
         with patch("src.db.sqlite_utils.time.sleep"):
-            cur = helper._execute_and_commit(
-                "INSERT INTO t (id, v) VALUES (?, ?)", (1, "retried")
-            )
+            cur = helper._execute_and_commit("INSERT INTO t (id, v) VALUES (?, ?)", (1, "retried"))
 
         assert call_count == 3  # 2 transient + 1 success
 
     def test_raises_after_exhausting_retries(self, helper: _ConcreteHelper) -> None:
         """OperationalError is raised after all retries are exhausted."""
         mock_db = MagicMock()
-        mock_db.execute = MagicMock(
-            side_effect=sqlite3.OperationalError("database is locked")
-        )
-        mock_db.commit = MagicMock(
-            side_effect=sqlite3.OperationalError("database is locked")
-        )
+        mock_db.execute = MagicMock(side_effect=sqlite3.OperationalError("database is locked"))
+        mock_db.commit = MagicMock(side_effect=sqlite3.OperationalError("database is locked"))
         helper._db = mock_db
 
         with (
             patch("src.db.sqlite_utils.time.sleep"),
             pytest.raises(sqlite3.OperationalError, match="database is locked"),
         ):
-            helper._execute_and_commit(
-                "INSERT INTO t (id, v) VALUES (?, ?)", (1, "fail")
-            )
+            helper._execute_and_commit("INSERT INTO t (id, v) VALUES (?, ?)", (1, "fail"))
 
     def test_non_transient_error_not_retried(self, helper: _ConcreteHelper) -> None:
         """Non-transient OperationalError is raised immediately without retry."""
@@ -234,57 +224,41 @@ class TestSqliteHelperRetry:
         helper._db = mock_db
 
         with pytest.raises(sqlite3.OperationalError, match="no such table"):
-            helper._execute_and_commit(
-                "INSERT INTO nonexistent (id) VALUES (?)", (1,)
-            )
+            helper._execute_and_commit("INSERT INTO nonexistent (id) VALUES (?)", (1,))
 
         # Non-transient: should have only been called once (no retry)
         assert call_count == 1
 
-    def test_circuit_breaker_opens_after_sustained_failures(
-        self, helper: _ConcreteHelper
-    ) -> None:
+    def test_circuit_breaker_opens_after_sustained_failures(self, helper: _ConcreteHelper) -> None:
         """Breaker opens after threshold consecutive failures."""
         # Exhaust retries multiple times to trip the breaker
         for _ in range(helper._sqlite_breaker._failure_threshold):
             mock_db = MagicMock()
-            mock_db.execute = MagicMock(
-                side_effect=sqlite3.OperationalError("database is locked")
-            )
-            mock_db.commit = MagicMock(
-                side_effect=sqlite3.OperationalError("database is locked")
-            )
+            mock_db.execute = MagicMock(side_effect=sqlite3.OperationalError("database is locked"))
+            mock_db.commit = MagicMock(side_effect=sqlite3.OperationalError("database is locked"))
             helper._db = mock_db
 
             with (
                 patch("src.db.sqlite_utils.time.sleep"),
                 pytest.raises(sqlite3.OperationalError),
             ):
-                helper._execute_and_commit(
-                    "INSERT INTO t (id, v) VALUES (?, ?)", (1, "x")
-                )
+                helper._execute_and_commit("INSERT INTO t (id, v) VALUES (?, ?)", (1, "x"))
 
         assert helper._sqlite_breaker.state == _SyncCircuitState.OPEN
 
-    def test_circuit_breaker_fast_fails_when_open(
-        self, helper: _ConcreteHelper
-    ) -> None:
+    def test_circuit_breaker_fast_fails_when_open(self, helper: _ConcreteHelper) -> None:
         """When breaker is open, operations are rejected immediately."""
         _force_breaker_open(helper._sqlite_breaker)
 
         with pytest.raises(sqlite3.OperationalError, match="circuit breaker open"):
-            helper._execute_and_commit(
-                "INSERT INTO t (id, v) VALUES (?, ?)", (1, "blocked")
-            )
+            helper._execute_and_commit("INSERT INTO t (id, v) VALUES (?, ?)", (1, "blocked"))
 
     def test_circuit_breaker_records_success(self, helper: _ConcreteHelper) -> None:
         """Successful operation resets breaker failure count."""
         helper._sqlite_breaker.record_failure()
         assert helper._sqlite_breaker.failure_count == 1
 
-        helper._execute_and_commit(
-            "INSERT INTO t (id, v) VALUES (?, ?)", (1, "ok")
-        )
+        helper._execute_and_commit("INSERT INTO t (id, v) VALUES (?, ?)", (1, "ok"))
 
         assert helper._sqlite_breaker.failure_count == 0
         assert helper._sqlite_breaker.state == _SyncCircuitState.CLOSED
@@ -344,21 +318,15 @@ class TestSqliteHelperRetry:
             sleep_args.append(duration)
 
         mock_db = MagicMock()
-        mock_db.execute = MagicMock(
-            side_effect=sqlite3.OperationalError("database is locked")
-        )
-        mock_db.commit = MagicMock(
-            side_effect=sqlite3.OperationalError("database is locked")
-        )
+        mock_db.execute = MagicMock(side_effect=sqlite3.OperationalError("database is locked"))
+        mock_db.commit = MagicMock(side_effect=sqlite3.OperationalError("database is locked"))
         helper._db = mock_db
 
         with (
             patch("src.db.sqlite_utils.time.sleep", side_effect=capture_sleep),
             pytest.raises(sqlite3.OperationalError),
         ):
-            helper._execute_and_commit(
-                "INSERT INTO t (id, v) VALUES (?, ?)", (1, "x")
-            )
+            helper._execute_and_commit("INSERT INTO t (id, v) VALUES (?, ?)", (1, "x"))
 
         # With SQLITE_WRITE_MAX_RETRIES=3, we get 3 sleep calls
         assert len(sleep_args) == 3

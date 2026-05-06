@@ -21,10 +21,12 @@ Return ONLY the bullet points, nothing else.
 from __future__ import annotations
 
 import re
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.skills.base import BaseSkill
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class PromptSkill(BaseSkill):

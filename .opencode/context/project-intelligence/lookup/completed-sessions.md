@@ -1,8 +1,39 @@
-<!-- Context: project-intelligence/lookup/completed-sessions | Priority: medium | Version: 6.0 | Updated: 2026-05-04 -->
+<!-- Context: project-intelligence/lookup/completed-sessions | Priority: medium | Version: 6.1 | Updated: 2026-05-06 -->
 
 # Completed Sessions
 
 > History of completed development sessions and their deliverables.
+
+## 2026-05-06: HealthCheckRegistry + NullMemoryMonitor
+
+**Status**: Completed
+
+**Deliverables**:
+- `HealthCheckRegistry` extracted — centralized health checks (DB, vector_memory, LLM, scheduler) into discoverable registry
+- `NullMemoryMonitor` implemented — NullObject pattern eliminates all downstream None-checks
+- Bot._memory_monitor now typed `MemoryMonitor` (not Optional)
+- HealthServer builds registry from constructor dependencies
+
+**Files affected**: `src/health/registry.py` (new), `src/health/server.py`, `src/monitoring/memory.py`, `src/bot/_bot.py`
+
+**Commits**: `e7e0471`, `39f4599`
+
+## 2026-05-05: Performance Batch (PLAN items)
+
+**Status**: Completed
+
+**Deliverables**:
+- Vector memory batch inserts wrapped in explicit SQLite `BEGIN IMMEDIATE / COMMIT` (10-100x fsync reduction)
+- React loop list concatenation → `list.extend()` (avoid allocations)
+- Batch recovered messages during crash recovery with `asyncio.gather`
+- ComponentRegistry DI pattern replacing mutable context bags
+- chat_id validation consolidated into `src/utils/validation.py`
+- Message queue buffer extraction into `message_queue_buffer.py`
+- Scheduler decomposition into `scheduler/engine.py`, `scheduler/cron.py`, `scheduler/persistence.py`
+
+**Files affected**: `src/vector_memory/__init__.py`, `src/bot/react_loop.py`, `src/utils/registry.py`, `src/utils/validation.py`, `src/message_queue_buffer.py`, `src/scheduler/`
+
+**Commits**: `1ce8920`, `6bf41b2`, `1a94c2d`, `55e2fdc`, `d9d36fb`, `fb18403`, `18bc7a7`
 
 ## 2026-05-04: WhatsApp Voice Note Fix
 

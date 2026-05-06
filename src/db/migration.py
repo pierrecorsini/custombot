@@ -11,12 +11,14 @@ on raw Path / str values with no Database class dependency.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.db.db_utils import _JSONL_MIGRATIONS, _JSONL_SCHEMA_VERSION, _build_jsonl_header
 from src.utils import json_dumps, json_loads
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -132,9 +134,7 @@ def apply_jsonl_migrations(
             continue
 
         if msg.get("type") == "header" and not header_written:
-            new_header = json_dumps(
-                {"_version": _JSONL_SCHEMA_VERSION, "type": "header"}
-            )
+            new_header = json_dumps({"_version": _JSONL_SCHEMA_VERSION, "type": "header"})
             migrated.append(new_header)
             header_written = True
             continue

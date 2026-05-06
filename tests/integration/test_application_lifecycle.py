@@ -18,8 +18,7 @@ shutdown signalling works through the actual event-wait mechanism.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -31,6 +30,9 @@ from src.channels.base import BaseChannel, IncomingMessage
 from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig, save_config
 from src.config.config_watcher import ConfigChangeApplier, ConfigWatcher
 from src.shutdown import GracefulShutdown
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -79,9 +81,7 @@ def _make_mock_bot_components() -> MagicMock:
     components.bot = AsyncMock()
     components.bot.validate_wiring = MagicMock()
     components.bot.recover_pending_messages = AsyncMock()
-    components.bot.preflight_check = AsyncMock(
-        return_value=PreflightResult(passed=True)
-    )
+    components.bot.preflight_check = AsyncMock(return_value=PreflightResult(passed=True))
     components.bot.handle_message = AsyncMock(return_value="Bot reply")
     components.bot.process_scheduled = AsyncMock()
     components.bot.stop_memory_monitoring = MagicMock()
@@ -207,9 +207,7 @@ class TestApplicationRunLifecycle:
         mock_scheduler.set_on_trigger.assert_called_once()
 
         # Verify crash recovery was attempted
-        mock_components.bot.recover_pending_messages.assert_awaited_once_with(
-            channel=mock_channel
-        )
+        mock_components.bot.recover_pending_messages.assert_awaited_once_with(channel=mock_channel)
 
         # Verify channel.start was called with the message handler
         assert "channel_start_called" in lifecycle_events
@@ -222,9 +220,7 @@ class TestApplicationRunLifecycle:
         mock_channel.send_typing.assert_awaited_once()
 
         # Verify response was sent to the user
-        mock_channel.send_message.assert_awaited_once_with(
-            _make_msg().chat_id, "Bot reply"
-        )
+        mock_channel.send_message.assert_awaited_once_with(_make_msg().chat_id, "Bot reply")
 
         # Verify message was delivered before shutdown
         assert "message_delivered" in lifecycle_events
@@ -334,9 +330,7 @@ class TestApplicationRunLifecycle:
         app = Application(config)
 
         mock_components = _make_mock_bot_components()
-        mock_components.bot.handle_message = AsyncMock(
-            side_effect=RuntimeError("LLM timeout")
-        )
+        mock_components.bot.handle_message = AsyncMock(side_effect=RuntimeError("LLM timeout"))
         mock_channel = _make_mock_channel()
         mock_scheduler = _make_mock_scheduler()
 
@@ -438,11 +432,9 @@ class TestApplicationRunSchedulerWiring:
     """Verify scheduler callbacks are wired correctly during the lifecycle."""
 
     @pytest.mark.asyncio
-    async def test_on_send_callback_uses_channel_with_skip_delays(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_on_send_callback_uses_channel_send_and_track_with_skip_delays(self, tmp_path: Path) -> None:
         """
-        The scheduler's on_send callback calls channel.send_message
+        The scheduler's on_send callback calls channel.send_and_track
         with skip_delays=True, verified through the full lifecycle.
         """
         config = _make_config(tmp_path)
@@ -476,14 +468,12 @@ class TestApplicationRunSchedulerWiring:
         on_send = mock_scheduler.set_on_send.call_args[0][0]
         await on_send("chat-1", "Scheduled message")
 
-        mock_channel.send_message.assert_awaited_once_with(
+        mock_channel.send_and_track.assert_awaited_once_with(
             "chat-1", "Scheduled message", skip_delays=True
         )
 
     @pytest.mark.asyncio
-    async def test_on_trigger_callback_calls_process_scheduled(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_on_trigger_callback_calls_process_scheduled(self, tmp_path: Path) -> None:
         """
         The scheduler's on_trigger callback calls bot.process_scheduled
         with the channel passed in, verified through the full lifecycle.
@@ -528,9 +518,7 @@ class TestApplicationRunHealthServer:
     """Verify health server integration during the lifecycle."""
 
     @pytest.mark.asyncio
-    async def test_health_server_started_when_port_configured(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_health_server_started_when_port_configured(self, tmp_path: Path) -> None:
         """
         When health_port is provided, the health server is started during
         the lifecycle and passed to perform_shutdown.
@@ -579,9 +567,7 @@ class TestApplicationRunHealthServer:
         assert ps_kwargs["health_server"] is mock_health_server
 
     @pytest.mark.asyncio
-    async def test_no_health_server_when_port_not_configured(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_no_health_server_when_port_not_configured(self, tmp_path: Path) -> None:
         """
         When no health_port is provided, no health server is started.
         """
@@ -621,9 +607,7 @@ class TestApplicationRunShutdownDuringQRWait:
     """Verify clean shutdown when Ctrl+C is pressed during QR-wait phase."""
 
     @pytest.mark.asyncio
-    async def test_shutdown_during_qr_wait_cleans_up_without_leaks(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_shutdown_during_qr_wait_cleans_up_without_leaks(self, tmp_path: Path) -> None:
         """
         When shutdown is requested while the QR code is displayed (before
         WhatsApp connects), the channel exits cleanly and ``_shutdown_cleanup()``
@@ -687,9 +671,7 @@ class TestApplicationRunShutdownDuringQRWait:
         mock_channel.send_message.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_shutdown_during_qr_wait_no_unhandled_exceptions(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_shutdown_during_qr_wait_no_unhandled_exceptions(self, tmp_path: Path) -> None:
         """
         Shutdown during QR-wait does not propagate exceptions — ``run()``
         returns cleanly even though the channel never connected.
@@ -705,9 +687,7 @@ class TestApplicationRunShutdownDuringQRWait:
             await app.shutdown_mgr.wait_for_shutdown()
 
         mock_channel.start = _channel_start_wait_for_shutdown
-        mock_channel.wait_connected = AsyncMock(
-            side_effect=asyncio.Event().wait
-        )
+        mock_channel.wait_connected = AsyncMock(side_effect=asyncio.Event().wait)
 
         async def _trigger_shutdown():
             await asyncio.sleep(0.05)
@@ -751,9 +731,7 @@ class TestApplicationRunShutdownDuringQRWait:
             raise ConnectionError("neonize process exited unexpectedly")
 
         mock_channel.start = _channel_start_crash
-        mock_channel.wait_connected = AsyncMock(
-            side_effect=asyncio.Event().wait
-        )
+        mock_channel.wait_connected = AsyncMock(side_effect=asyncio.Event().wait)
 
         app._health_server = None
 
@@ -779,9 +757,7 @@ class TestApplicationRunShutdownDuringQRWait:
         mock_components.bot.handle_message.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_startup_timeout_cancels_poll_task_and_cleans_up(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_startup_timeout_cancels_poll_task_and_cleans_up(self, tmp_path: Path) -> None:
         """
         When the channel hangs during startup (neither connects nor exits
         within the timeout), ``run()`` cancels the poll task, cleans up,
@@ -851,9 +827,7 @@ class TestApplicationRunShutdownDuringQRWait:
         assert app.shutdown_mgr.accepting_messages is True
 
     @pytest.mark.asyncio
-    async def test_shutdown_during_qr_wait_rejects_incoming_messages(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_shutdown_during_qr_wait_rejects_incoming_messages(self, tmp_path: Path) -> None:
         """
         After shutdown is requested during QR-wait, the ``_on_message()``
         handler rejects any queued messages because ``accepting_messages``
@@ -928,9 +902,7 @@ class TestConfigHotReload:
     """
 
     @pytest.mark.asyncio
-    async def test_max_tool_iterations_change_applied_without_restart(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_max_tool_iterations_change_applied_without_restart(self, tmp_path: Path) -> None:
         """
         Changing ``max_tool_iterations`` in config.json is detected by the
         watcher and applied to the bot's ``BotConfig`` without restart.
@@ -1032,9 +1004,7 @@ class TestConfigHotReload:
             await watcher.stop()
 
     @pytest.mark.asyncio
-    async def test_temperature_change_applied_to_llm_without_restart(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_temperature_change_applied_to_llm_without_restart(self, tmp_path: Path) -> None:
         """
         Changing ``llm.temperature`` in config.json is applied to the
         LLM client's config reference without restart.
@@ -1120,9 +1090,7 @@ class TestConfigHotReload:
             await watcher.stop()
 
     @pytest.mark.asyncio
-    async def test_destructive_field_change_not_applied(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_destructive_field_change_not_applied(self, tmp_path: Path) -> None:
         """
         Changing a destructive field (e.g., ``llm.model``) is NOT applied
         to live components — only a warning is logged.
@@ -1206,3 +1174,184 @@ class TestConfigHotReload:
             assert mock_llm._cfg.model == original_model
         finally:
             await watcher.stop()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test: Timed-out message through full _on_message → pipeline → _handle_message_inner
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestOnMessageTimeoutIntegration:
+    """Integration test for the full message path with per-chat timeout.
+
+    Exercises the critical production path:
+
+        _on_message(msg)
+          → semaphore acquire
+          → pipeline.execute(ctx)              # REAL pipeline
+            → OperationTrackerMiddleware
+            → MetricsMiddleware
+            → InboundLoggingMiddleware
+            → PreflightMiddleware
+            → TypingMiddleware
+            → ErrorHandlerMiddleware
+            → HandleMessageMiddleware
+              → bot.handle_message(msg)         # REAL Bot
+                → _handle_message_inner(msg)    # REAL timeout wrapping
+                  → asyncio.wait_for(_process(...), timeout=0.05)
+                    → TIMEOUT (mocked _process hangs)
+                  → queue.complete(best-effort)
+                  → return None
+              → response is None → no send
+          → semaphore release
+
+    Verifies: (a) semaphore released, (b) timeout logged with correct
+    attributes, (c) subsequent messages still processed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_timed_out_message_releases_semaphore_and_logs(self, tmp_path: Path) -> None:
+        """
+        A message that times out inside ``_handle_message_inner`` releases
+        the concurrency semaphore, logs the timeout with correct attributes,
+        and does not prevent subsequent messages from being processed.
+        """
+        import dataclasses as dc
+
+        from src.app import AppComponents, AppPhase
+        from src.bot import Bot
+        from src.bot._bot import BotDeps
+        from src.core.message_pipeline import PipelineDependencies, build_pipeline_from_config
+
+        # ── Arrange: real Bot with tiny per_chat_timeout ──
+        config = _make_config(tmp_path)
+        bot_config = BotConfig(
+            max_tool_iterations=5,
+            memory_max_history=50,
+            system_prompt_prefix="",
+            stream_response=False,
+            per_chat_timeout=0.05,
+        )
+
+        mock_db = AsyncMock()
+        mock_db.get_generation = MagicMock(return_value=0)
+        mock_llm = AsyncMock()
+        mock_memory = AsyncMock()
+        mock_memory.ensure_workspace = AsyncMock()
+        mock_memory.read_memory = AsyncMock(return_value=None)
+        mock_skills = MagicMock()
+        mock_skills.all = MagicMock(return_value=[])
+        mock_skills.tool_definitions = []
+        mock_queue = AsyncMock()
+
+        bot = Bot(
+            BotDeps(
+                config=bot_config,
+                db=mock_db,
+                llm=mock_llm,
+                memory=mock_memory,
+                skills=mock_skills,
+                message_queue=mock_queue,
+            )
+        )
+
+        # Mock _process to hang so it exceeds per_chat_timeout (0.05s)
+        async def _hanging_process(*_args: Any, **_kwargs: Any) -> str:
+            await asyncio.sleep(10)
+
+        with patch.object(bot, "_process", side_effect=_hanging_process):
+            # ── Arrange: real pipeline + Application in RUNNING phase ──
+            mock_channel = _make_mock_channel()
+            mock_shutdown = MagicMock()
+            mock_shutdown.accepting_messages = True
+            mock_shutdown.enter_operation = AsyncMock(return_value=1)
+            mock_shutdown.exit_operation = AsyncMock()
+
+            pipeline = build_pipeline_from_config(
+                middleware_order=[
+                    "operation_tracker",
+                    "metrics",
+                    "inbound_logging",
+                    "preflight",
+                    "typing",
+                    "error_handler",
+                    "handle_message",
+                ],
+                extra_middleware_paths=[],
+                deps=PipelineDependencies(
+                    shutdown_mgr=mock_shutdown,
+                    session_metrics=MagicMock(),
+                    bot=bot,
+                    channel=mock_channel,
+                    verbose=False,
+                ),
+            )
+
+            mock_bot_components = _make_mock_bot_components()
+            # Replace the mock bot with our real bot
+            mock_bot_components.bot = bot
+
+            state = AppComponents(
+                shutdown_mgr=mock_shutdown,
+                components=mock_bot_components,
+                scheduler=_make_mock_scheduler(),
+                channel=mock_channel,
+                pipeline=pipeline,
+                executor=MagicMock(),
+                workspace_monitor=MagicMock(),
+                config_watcher=MagicMock(),
+            )
+            app = Application(config)
+            app._state = state
+            app._health_server = None
+            app._phase = AppPhase.RUNNING
+
+            msg = _make_msg(message_id="msg-timeout-1", chat_id="chat-timeout")
+
+            # ── Act: send message through _on_message ──
+            with (
+                patch("src.bot._bot.log") as mock_bot_log,
+                patch("src.core.message_pipeline.log_message_flow"),
+            ):
+                await app._on_message(msg)
+
+                # ── Assert (b): timeout logged with correct attributes ──
+                timeout_calls = [
+                    c for c in mock_bot_log.error.call_args_list if "TIMED OUT" in str(c)
+                ]
+                assert len(timeout_calls) == 1, (
+                    f"Expected exactly 1 TIMED OUT log, got {len(timeout_calls)}"
+                )
+                call = timeout_calls[0]
+                extra = call[1]["extra"]
+                assert extra["chat_id"] == "chat-timeout"
+                assert extra["message_id"] == "msg-timeout-1"
+                assert extra["timeout_seconds"] == 0.05
+
+            # ── Assert: no response sent ──
+            mock_channel.send_message.assert_not_called()
+
+            # ── Assert: queue complete was called (best-effort) ──
+            mock_queue.complete.assert_awaited_once_with("msg-timeout-1")
+
+            # ── Assert (a): semaphore is released — value restored ──
+            assert app._message_semaphore._value == config.max_concurrent_messages
+
+        # ── Assert (c): subsequent messages still process ──
+        mock_queue.complete.reset_mock()
+        fast_msg = _make_msg(message_id="msg-fast-1", chat_id="chat-fast")
+
+        # Replace _process with a fast implementation
+        async def _fast_process(*_args: Any, **_kwargs: Any) -> str:
+            return "Fast reply"
+
+        with (
+            patch.object(bot, "_process", side_effect=_fast_process),
+            patch("src.bot._bot.log"),
+            patch("src.core.message_pipeline.log_message_flow"),
+        ):
+            await app._on_message(fast_msg)
+
+        # Fast message was processed — response sent
+        mock_channel.send_message.assert_awaited_once_with("chat-fast", "Fast reply")
+        mock_queue.complete.assert_awaited_once_with("msg-fast-1")

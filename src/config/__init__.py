@@ -10,6 +10,7 @@ Provides:
 
 from src.config.config_schema_defs import (
     CONFIG_PATH,
+    ConfigValidationError,
     DEPRECATED_OPTIONS,
     RENAMED_OPTIONS,
     Config,
@@ -18,15 +19,12 @@ from src.config.config_schema_defs import (
     NeonizeConfig,
     ShellConfig,
     WhatsAppConfig,
-)
-from src.config.config_loader import load_config, save_config
-from src.config.config_schema import (
-    ConfigValidationError,
     add_schema_version,
     format_validation_errors,
     validate_config,
     validate_config_dict,
 )
+from src.config.config_loader import load_config, save_config
 
 __all__ = [
     "Config",

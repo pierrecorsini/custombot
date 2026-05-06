@@ -21,8 +21,7 @@ are real instances operating on ``tmp_path``.
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -36,6 +35,9 @@ from src.message_queue import MessageQueue
 from src.routing import RoutingEngine, RoutingRule
 from src.skills import SkillRegistry
 from src.skills.base import BaseSkill
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,7 +133,9 @@ class _AppendSkill(BaseSkill):
         notes_file = workspace_dir / "notes.txt"
         content = kwargs.get("content", "")
         notes_file.parent.mkdir(parents=True, exist_ok=True)
-        notes_file.write_text(notes_file.read_text(encoding="utf-8") + content + "\n", encoding="utf-8")
+        notes_file.write_text(
+            notes_file.read_text(encoding="utf-8") + content + "\n", encoding="utf-8"
+        )
         return f"Appended: {content}"
 
 
@@ -192,7 +196,9 @@ class TestFullPipelineHappyPath:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         with patch("src.llm.AsyncOpenAI") as mock_openai:
@@ -363,9 +369,7 @@ class TestPreflightGate:
         with patch("src.llm.AsyncOpenAI") as mock_openai:
             mock_client = AsyncMock()
             mock_openai.return_value = mock_client
-            mock_client.chat.completions.create = AsyncMock(
-                return_value=_make_text_response("OK")
-            )
+            mock_client.chat.completions.create = AsyncMock(return_value=_make_text_response("OK"))
 
             bot, db, *_ = _make_bot(workspace, config, None)
             await db.connect()
@@ -460,9 +464,7 @@ class TestMessageQueueIntegration:
                 return_value=_make_text_response("Done!")
             )
 
-            bot, db, memory, skills, queue = _make_bot(
-                workspace, config, None, with_queue=True
-            )
+            bot, db, memory, skills, queue = _make_bot(workspace, config, None, with_queue=True)
             await db.connect()
             assert queue is not None
             await queue.connect()
@@ -690,9 +692,7 @@ class TestPreflightHandleDedupConsistency:
     """
 
     @pytest.mark.asyncio
-    async def test_duplicate_rejected_by_both_preflight_and_handle(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_duplicate_rejected_by_both_preflight_and_handle(self, tmp_path: Path) -> None:
         """
         After a message is processed, BOTH preflight_check and
         handle_message must reject the same message_id as a duplicate.
@@ -702,7 +702,9 @@ class TestPreflightHandleDedupConsistency:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         llm_call_count = [0]
@@ -744,19 +746,14 @@ class TestPreflightHandleDedupConsistency:
 
             response_dup = await bot.handle_message(msg)
             assert response_dup is None, (
-                "handle_message must return None for duplicate, "
-                "ensuring no second LLM call"
+                "handle_message must return None for duplicate, ensuring no second LLM call"
             )
-            assert llm_call_count[0] == 1, (
-                "LLM must NOT be called again for a duplicate message"
-            )
+            assert llm_call_count[0] == 1, "LLM must NOT be called again for a duplicate message"
 
         await db.close()
 
     @pytest.mark.asyncio
-    async def test_concurrent_preflight_pass_then_handle_rejects(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_concurrent_preflight_pass_then_handle_rejects(self, tmp_path: Path) -> None:
         """
         Race condition: preflight_check passes, but between preflight and
         handle_message, another coroutine processes the same message_id.
@@ -766,7 +763,9 @@ class TestPreflightHandleDedupConsistency:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         llm_call_count = [0]
@@ -795,9 +794,7 @@ class TestPreflightHandleDedupConsistency:
 
             # Step 1: preflight passes (message not yet in DB)
             preflight = await bot.preflight_check(msg)
-            assert preflight.passed, (
-                "Preflight should pass before any processing has occurred"
-            )
+            assert preflight.passed, "Preflight should pass before any processing has occurred"
 
             # Step 2: simulate another coroutine processing the message
             # between preflight and handle_message
@@ -812,16 +809,12 @@ class TestPreflightHandleDedupConsistency:
                 "handle_message must return None when the message was already "
                 "processed between preflight and handle_message"
             )
-            assert llm_call_count[0] == 1, (
-                "No second LLM call should happen for the duplicate"
-            )
+            assert llm_call_count[0] == 1, "No second LLM call should happen for the duplicate"
 
         await db.close()
 
     @pytest.mark.asyncio
-    async def test_double_handle_message_no_duplicate_llm_calls(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_double_handle_message_no_duplicate_llm_calls(self, tmp_path: Path) -> None:
         """
         Calling handle_message() twice with the same message_id must only
         produce one LLM call. The second call returns None.
@@ -830,7 +823,9 @@ class TestPreflightHandleDedupConsistency:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         llm_call_count = [0]
@@ -875,9 +870,7 @@ class TestPreflightHandleDedupConsistency:
         await db.close()
 
     @pytest.mark.asyncio
-    async def test_different_message_ids_both_processed(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_different_message_ids_both_processed(self, tmp_path: Path) -> None:
         """
         Two different message_ids from the same chat should both be
         processed independently — dedup must not over-reject.
@@ -886,7 +879,9 @@ class TestPreflightHandleDedupConsistency:
         workspace.mkdir()
 
         config = Config(
-            llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
+            llm=LLMConfig(
+                api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
+            )
         )
 
         llm_call_count = [0]

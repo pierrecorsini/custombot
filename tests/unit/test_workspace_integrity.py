@@ -11,7 +11,6 @@ import json
 import os
 import sqlite3
 import time
-from pathlib import Path
 
 import pytest
 
@@ -24,6 +23,10 @@ from src.workspace_integrity import (
     _spot_check_jsonl,
     check_workspace_integrity,
 )
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ── _check_data_dir ──────────────────────────────────────────────────────────
@@ -119,6 +122,7 @@ class TestCleanStaleTemps:
         boundary.write_text("just under 1 hour old")
         # Set mtime to 1 second newer than the cutoff (should be kept)
         from src.constants import WORKSPACE_STALE_TEMP_MAX_AGE_HOURS
+
         just_under = time.time() - (WORKSPACE_STALE_TEMP_MAX_AGE_HOURS * 3600) + 1
         os.utime(boundary, (just_under, just_under))
 
@@ -200,7 +204,8 @@ class TestSpotCheckJsonl:
         msg_file = messages / "chat-123.jsonl"
         lines = [
             json.dumps({"role": "user", "content": "hi", "id": "1", "timestamp": 1.0}) + "\n",
-            json.dumps({"role": "assistant", "content": "hello", "id": "2", "timestamp": 2.0}) + "\n",
+            json.dumps({"role": "assistant", "content": "hello", "id": "2", "timestamp": 2.0})
+            + "\n",
         ]
         msg_file.write_text("".join(lines))
 
@@ -224,7 +229,9 @@ class TestSpotCheckJsonl:
         messages.mkdir()
         msg_file = messages / "chat-tail.jsonl"
         # Write a file larger than 1024 bytes with corrupt last line
-        good_line = json.dumps({"role": "user", "content": "x" * 200, "id": "1", "timestamp": 1.0}) + "\n"
+        good_line = (
+            json.dumps({"role": "user", "content": "x" * 200, "id": "1", "timestamp": 1.0}) + "\n"
+        )
         content = good_line * 10 + "BROKEN LAST LINE"
         msg_file.write_text(content)
 

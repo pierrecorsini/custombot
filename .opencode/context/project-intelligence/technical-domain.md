@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.2 | Updated: 2026-05-06 -->
+<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.4 | Updated: 2026-05-06 -->
 
 # Technical Domain
 
@@ -44,23 +44,23 @@ main.py (Click CLI)
         └── GracefulShutdown — ordered cleanup with timeouts
 ```
 
-### Key Modules (158 Python files, 18 packages)
+### Key Modules (159 Python files, 18 packages)
 
 | Module | Purpose | Key Files |
 |--------|---------|-----------|
 | `src/bot/` | ReAct loop, context building, crash recovery, preflight, response delivery | `_bot.py`, `react_loop.py`, `context_building.py`, `response_delivery.py` |
 | `src/channels/` | Abstract channel + WhatsApp/neonize + stealth mode | `base.py`, `whatsapp.py`, `neonize_backend.py` |
 | `src/config/` | Dataclass config + JSON schema validation + hot-reload | `config_schema_defs.py`, `config_watcher.py` |
-| `src/core/` | Orchestrator, event bus, pipeline, tool execution | `orchestrator.py`, `message_pipeline.py` |
-| `src/db/` | JSONL storage, file pool, compression, migration | `db.py`, `file_pool.py`, `sqlite_pool.py` |
+| `src/core/` | Orchestrator, event bus, pipeline, tool execution | `orchestrator.py`, `message_pipeline.py`, `dedup.py` |
+| `src/db/` | JSONL storage, file pool, compression, validation, migration | `db.py`, `file_pool.py`, `sqlite_pool.py` |
 | `src/llm/` | Async OpenAI client, circuit breaker, streaming | `_client.py`, `_provider.py`, `_error_classifier.py` |
 | `src/scheduler/` | Cron expressions, persistence, result comparison | `engine.py`, `cron.py`, `persistence.py` |
 | `src/security/` | Path validation, prompt injection detection, signing | `path_validator.py`, `prompt_injection.py` |
 | `src/skills/` | BaseSkill ABC + builtins + prompt skill loader | `base.py`, `prompt_skill.py`, `builtin/` |
 | `src/vector_memory/` | sqlite-vec embeddings, batch indexing, health checks | `batch.py`, `health.py` |
-| `src/monitoring/` | Metrics, tracing, workspace monitoring | `performance.py`, `tracing.py`, `memory.py` |
-| `src/health/` | HTTP /health endpoint, Prometheus metrics | `server.py`, `checks.py`, `prometheus.py` |
-| `src/utils/` | Circuit breaker, DAG, locking, retry, singleton | `circuit_breaker.py`, `dag.py`, `retry.py` |
+| `src/monitoring/` | Metrics, tracing, workspace monitoring, NullMemoryMonitor | `performance.py`, `tracing.py`, `memory.py` |
+| `src/health/` | HTTP /health endpoint, HealthCheckRegistry, Prometheus metrics | `server.py`, `registry.py`, `checks.py`, `prometheus.py` |
+| `src/utils/` | Circuit breaker, DAG, locking, retry, registry, validation | `circuit_breaker.py`, `dag.py`, `retry.py`, `registry.py` |
 
 ---
 

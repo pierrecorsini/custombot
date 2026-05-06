@@ -20,6 +20,13 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Optional
 
 from src.constants import CLEANUP_STEP_TIMEOUT, DEFAULT_CHANNEL_STARTUP_TIMEOUT
+from src.constants.app import (
+    MAIN_LOOP_BACKOFF_MULTIPLIER,
+    MAIN_LOOP_CHANNEL_DISCONNECT_MAX_RETRIES,
+    MAIN_LOOP_CHANNEL_DISCONNECT_RETRY_DELAY,
+    MAIN_LOOP_LLM_TRANSIENT_INITIAL_DELAY,
+    MAIN_LOOP_LLM_TRANSIENT_MAX_RETRIES,
+)
 from src.core.event_bus import EVENT_STARTUP_COMPLETED, emit_error_event, get_event_bus
 from src.core.message_pipeline import MessageContext
 from src.core.startup import StartupContext, StartupOrchestrator
@@ -38,6 +45,7 @@ from src.logging.logging_config import (
 )
 from src.monitoring import SessionMetrics
 from src.ui.cli_output import cli as cli_output
+from src.utils.retry import calculate_delay_with_jitter
 
 if TYPE_CHECKING:
     from src.core.message_pipeline import MessagePipeline
@@ -194,6 +202,48 @@ def _classify_main_loop_error(exc: Exception) -> str:
         return _MainLoopErrorCategory.CONFIGURATION
 
     return _MainLoopErrorCategory.UNKNOWN
+
+
+# ── Per-category retry policies ────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _RetryPolicy:
+    """Retry configuration for a specific error category.
+
+    Attributes:
+        max_retries: Maximum retry attempts (0 = fail fast).
+        initial_delay: Seconds before first retry (exponential backoff base)
+            or fixed interval when ``use_exponential_backoff`` is False.
+        use_exponential_backoff: If True, delay doubles on each attempt;
+            if False, the delay stays constant.
+    """
+
+    max_retries: int
+    initial_delay: float = 0.0
+    use_exponential_backoff: bool = True
+
+
+# Fail-fast sentinel — no retries, immediate shutdown.
+_NO_RETRY = _RetryPolicy(max_retries=0)
+
+_RETRY_POLICIES: dict[str, _RetryPolicy] = {
+    _MainLoopErrorCategory.LLM_TRANSIENT: _RetryPolicy(
+        max_retries=MAIN_LOOP_LLM_TRANSIENT_MAX_RETRIES,
+        initial_delay=MAIN_LOOP_LLM_TRANSIENT_INITIAL_DELAY,
+        use_exponential_backoff=True,
+    ),
+    _MainLoopErrorCategory.CHANNEL_DISCONNECT: _RetryPolicy(
+        max_retries=MAIN_LOOP_CHANNEL_DISCONNECT_MAX_RETRIES,
+        initial_delay=MAIN_LOOP_CHANNEL_DISCONNECT_RETRY_DELAY,
+        use_exponential_backoff=False,
+    ),
+}
+
+
+def _get_retry_policy(category: str) -> _RetryPolicy:
+    """Return the retry policy for a classified main-loop error category."""
+    return _RETRY_POLICIES.get(category, _NO_RETRY)
 
 
 class Application:
@@ -360,28 +410,84 @@ class Application:
 
         try:
             cli_output.info("Listening...  (Ctrl+C to stop)")
-            await self.shutdown_mgr.wait_for_shutdown()
-        except Exception as exc:
-            category = _classify_main_loop_error(exc)
-            log.error(
-                "Unexpected error in main loop [%s]: %s",
-                category,
-                exc,
-                exc_info=self._verbose,
-            )
-            self._session_metrics.increment_errors()
-            from src.monitoring.performance import get_metrics_collector
-
-            get_metrics_collector().track_error()
-
-            # Emit structured error event for monitoring subscribers.
-            await emit_error_event(
-                exc,
-                "Application.run",
-                extra_data={"category": category, "source": "main_loop"},
-            )
+            await self._run_with_retry()
         finally:
             await self._shutdown_cleanup()
+
+    async def _run_with_retry(self) -> None:
+        """Run the main wait loop with per-category retry policies.
+
+        On each error the exception is classified via
+        ``_classify_main_loop_error()`` and the corresponding
+        ``_RetryPolicy`` determines whether to retry (and with what
+        delay strategy) or to log, emit an error event, and return
+        (triggering the ``finally`` block in ``run()`` which calls
+        ``_shutdown_cleanup()``).
+        """
+        delay: float = 0.0
+        attempt = 0
+
+        while True:
+            try:
+                await self.shutdown_mgr.wait_for_shutdown()
+                return  # Normal shutdown — no error.
+            except Exception as exc:
+                category = _classify_main_loop_error(exc)
+                policy = _get_retry_policy(category)
+
+                attempt += 1
+
+                # ── Fail-fast: no retries ──────────────────────────────
+                if attempt > policy.max_retries:
+                    if policy.max_retries > 0:
+                        log.error(
+                            "Main loop [%s] exhausted %d retries: %s",
+                            category,
+                            policy.max_retries,
+                            exc,
+                        )
+                    else:
+                        log.error(
+                            "Unexpected error in main loop [%s]: %s",
+                            category,
+                            exc,
+                            exc_info=self._verbose,
+                        )
+                    self._session_metrics.increment_errors()
+                    from src.monitoring.performance import get_metrics_collector
+
+                    get_metrics_collector().track_error()
+
+                    await emit_error_event(
+                        exc,
+                        "Application.run",
+                        extra_data={
+                            "category": category,
+                            "source": "main_loop",
+                            "retry_attempt": attempt,
+                        },
+                    )
+                    return
+
+                # ── Retry with appropriate delay ───────────────────────
+                if attempt == 1:
+                    delay = policy.initial_delay
+                elif policy.use_exponential_backoff:
+                    delay *= MAIN_LOOP_BACKOFF_MULTIPLIER
+
+                actual_delay = calculate_delay_with_jitter(delay)
+
+                log.warning(
+                    "Main loop [%s] error (attempt %d/%d), retrying in %.1fs: %s",
+                    category,
+                    attempt,
+                    policy.max_retries,
+                    actual_delay,
+                    exc,
+                )
+                self._session_metrics.increment_errors()
+
+                await asyncio.sleep(actual_delay)
 
     # ── Startup Phase ───────────────────────────────────────────────────
 
@@ -524,9 +630,11 @@ class Application:
         Takes explicit parameters so it can be called during the
         ``STARTING`` phase before ``self._state`` is populated.
         """
-        # skip_delays=True bypasses human-like stealth delays for scheduled messages
+        # skip_delays=True bypasses human-like stealth delays for scheduled messages.
+        # Uses send_and_track to centralize send → event emission; dedup is handled
+        # by the scheduler itself via check_and_record_outbound before this callback.
         scheduler.set_on_send(
-            lambda chat_id, text: channel.send_message(chat_id, text, skip_delays=True)
+            lambda chat_id, text: channel.send_and_track(chat_id, text, skip_delays=True)
         )
 
         scheduler.set_on_trigger(

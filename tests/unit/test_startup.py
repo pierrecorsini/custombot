@@ -170,6 +170,7 @@ class TestRunAllOrder:
             async def _step(ctx: StartupContext) -> str | None:
                 execution_order.append(name)
                 return None
+
             return _step
 
         steps = [

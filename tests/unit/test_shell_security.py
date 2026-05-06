@@ -18,8 +18,7 @@ Also covers:
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -33,6 +32,9 @@ from src.skills.builtin.shell import (
     _is_command_blocked,
     _is_env_access_blocked,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -200,7 +202,7 @@ class TestCommandInjection:
         [
             "python -c 'import os; os.system(\"rm -rf /\")'",
             "python -c 'exec(\"malicious code\")'",
-            "python -c 'import subprocess; subprocess.run([\"rm\", \"-rf\", \"/\"])'",
+            'python -c \'import subprocess; subprocess.run(["rm", "-rf", "/"])\'',
         ],
     )
     def test_python_one_liner_blocked(self, command: str) -> None:
@@ -355,7 +357,9 @@ class TestEnvAccessBlocked:
     )
     def test_non_sensitive_env_var_access_allowed(self, command: str) -> None:
         reason = _is_env_access_blocked(command)
-        assert reason is None, f"Non-sensitive env access should be allowed: {command!r}, got {reason}"
+        assert reason is None, (
+            f"Non-sensitive env access should be allowed: {command!r}, got {reason}"
+        )
 
     @pytest.mark.parametrize(
         "command",
@@ -532,9 +536,7 @@ class TestExecuteSecurityIntegration:
         skill = _make_skill(allowlist=[r"\bsudo\b"])
         with patch("src.skills.builtin.shell.AsyncExecutor") as mock_exec_cls:
             mock_instance = AsyncMock()
-            mock_instance.run = AsyncMock(
-                return_value=_mock_executor_result(stdout="ok")
-            )
+            mock_instance.run = AsyncMock(return_value=_mock_executor_result(stdout="ok"))
             mock_exec_cls.return_value = mock_instance
 
             result = await skill.execute(
@@ -562,9 +564,7 @@ class TestTimeoutHandling:
         skill = _make_skill()
         with patch("src.skills.builtin.shell.AsyncExecutor") as mock_exec_cls:
             mock_instance = AsyncMock()
-            mock_instance.run = AsyncMock(
-                return_value=_mock_executor_result(timed_out=True)
-            )
+            mock_instance.run = AsyncMock(return_value=_mock_executor_result(timed_out=True))
             mock_exec_cls.return_value = mock_instance
 
             result = await skill.execute(
@@ -578,9 +578,7 @@ class TestTimeoutHandling:
         skill = _make_skill()
         with patch("src.skills.builtin.shell.AsyncExecutor") as mock_exec_cls:
             mock_instance = AsyncMock()
-            mock_instance.run = AsyncMock(
-                return_value=_mock_executor_result(stdout="")
-            )
+            mock_instance.run = AsyncMock(return_value=_mock_executor_result(stdout=""))
             mock_exec_cls.return_value = mock_instance
 
             await skill.execute(
@@ -596,9 +594,7 @@ class TestTimeoutHandling:
         skill = _make_skill()
         with patch("src.skills.builtin.shell.AsyncExecutor") as mock_exec_cls:
             mock_instance = AsyncMock()
-            mock_instance.run = AsyncMock(
-                return_value=_mock_executor_result(stdout="")
-            )
+            mock_instance.run = AsyncMock(return_value=_mock_executor_result(stdout=""))
             mock_exec_cls.return_value = mock_instance
 
             await skill.execute(
@@ -619,9 +615,7 @@ class TestOutputHandling:
         skill = _make_skill()
         with patch("src.skills.builtin.shell.AsyncExecutor") as mock_exec_cls:
             mock_instance = AsyncMock()
-            mock_instance.run = AsyncMock(
-                return_value=_mock_executor_result(stdout="hello world")
-            )
+            mock_instance.run = AsyncMock(return_value=_mock_executor_result(stdout="hello world"))
             mock_exec_cls.return_value = mock_instance
 
             result = await skill.execute(
@@ -650,9 +644,7 @@ class TestOutputHandling:
         skill = _make_skill()
         with patch("src.skills.builtin.shell.AsyncExecutor") as mock_exec_cls:
             mock_instance = AsyncMock()
-            mock_instance.run = AsyncMock(
-                return_value=_mock_executor_result(return_code=1)
-            )
+            mock_instance.run = AsyncMock(return_value=_mock_executor_result(return_code=1))
             mock_exec_cls.return_value = mock_instance
 
             result = await skill.execute(
@@ -706,9 +698,7 @@ class TestAuditLogging:
     """Verify security events emit audit logs."""
 
     @patch("src.skills.builtin.shell._audit_log")
-    async def test_blocked_command_emits_audit(
-        self, mock_audit: MagicMock, tmp_path: Path
-    ) -> None:
+    async def test_blocked_command_emits_audit(self, mock_audit: MagicMock, tmp_path: Path) -> None:
         skill = _make_skill()
         await skill.execute(workspace_dir=tmp_path, command="rm -rf /")
 
@@ -731,9 +721,7 @@ class TestAuditLogging:
         assert any("env_access_blocked" in a for a in call_args_list)
 
     @patch("src.skills.builtin.shell._audit_log")
-    async def test_path_escape_emits_audit(
-        self, mock_audit: MagicMock, tmp_path: Path
-    ) -> None:
+    async def test_path_escape_emits_audit(self, mock_audit: MagicMock, tmp_path: Path) -> None:
         skill = _make_skill()
         await skill.execute(
             workspace_dir=tmp_path,
@@ -751,9 +739,7 @@ class TestAuditLogging:
         skill = _make_skill(allowlist=[r"\bsudo\b"])
         with patch("src.skills.builtin.shell.AsyncExecutor") as mock_exec_cls:
             mock_instance = AsyncMock()
-            mock_instance.run = AsyncMock(
-                return_value=_mock_executor_result(stdout="ok")
-            )
+            mock_instance.run = AsyncMock(return_value=_mock_executor_result(stdout="ok"))
             mock_exec_cls.return_value = mock_instance
 
             await skill.execute(
@@ -779,9 +765,7 @@ class TestWorkspaceDirectory:
         skill = _make_skill()
         with patch("src.skills.builtin.shell.AsyncExecutor") as mock_exec_cls:
             mock_instance = AsyncMock()
-            mock_instance.run = AsyncMock(
-                return_value=_mock_executor_result(stdout="")
-            )
+            mock_instance.run = AsyncMock(return_value=_mock_executor_result(stdout=""))
             mock_exec_cls.return_value = mock_instance
 
             await skill.execute(
@@ -826,9 +810,7 @@ class TestEdgeCases:
         skill = ShellSkill(config=None)
         with patch("src.skills.builtin.shell.AsyncExecutor") as mock_exec_cls:
             mock_instance = AsyncMock()
-            mock_instance.run = AsyncMock(
-                return_value=_mock_executor_result(stdout="output")
-            )
+            mock_instance.run = AsyncMock(return_value=_mock_executor_result(stdout="output"))
             mock_exec_cls.return_value = mock_instance
 
             result = await skill.execute(

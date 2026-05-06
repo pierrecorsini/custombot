@@ -22,9 +22,12 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from src.constants import WORKSPACE_STALE_TEMP_MAX_AGE_HOURS
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -79,12 +82,41 @@ def _clean_stale_temps(workspace: Path, result: IntegrityResult) -> None:
         log.info("Removed %d stale .tmp file(s)", count)
 
 
+def _repair_jsonl_last_line(filepath: Path) -> bool:
+    """Remove a corrupt last line from a JSONL file.
+
+    Returns True if repaired, False on failure.
+    """
+    try:
+        text = filepath.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        # Remove trailing corrupt line(s) until we find a valid JSON line or empty
+        while lines and lines[-1].strip():
+            try:
+                json.loads(lines[-1])
+                break  # Last line is valid — no repair needed
+            except json.JSONDecodeError:
+                lines.pop()
+        if not lines:
+            return False
+        filepath.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
 def _spot_check_jsonl(messages_dir: Path, result: IntegrityResult) -> None:
-    """Spot-check first and last line of JSONL files for parseability."""
+    """Spot-check first and last line of JSONL files for parseability.
+
+    Auto-repairs corrupt last lines (typically from truncated writes during
+    crashes). First-line corruption is flagged as an error since it may
+    indicate deeper file damage.
+    """
     if not messages_dir.exists():
         return
 
     corrupted: list[str] = []
+    repaired: list[str] = []
     checked = 0
 
     try:
@@ -109,6 +141,7 @@ def _spot_check_jsonl(messages_dir: Path, result: IntegrityResult) -> None:
                         continue
 
                 # For last line, seek to end and read backwards
+                last_corrupt = False
                 if size > 1024:
                     f.seek(max(0, size - 1024))
                     tail = f.read()
@@ -119,7 +152,7 @@ def _spot_check_jsonl(messages_dir: Path, result: IntegrityResult) -> None:
                             try:
                                 json.loads(last_line)
                             except json.JSONDecodeError:
-                                corrupted.append(f"{jsonl_file.name}:(last)")
+                                last_corrupt = True
                 elif size > len(first_line):
                     # Small file — just read all and check last
                     remaining = f.read()
@@ -128,7 +161,13 @@ def _spot_check_jsonl(messages_dir: Path, result: IntegrityResult) -> None:
                         try:
                             json.loads(lines[-1])
                         except json.JSONDecodeError:
-                            corrupted.append(f"{jsonl_file.name}:(last)")
+                            last_corrupt = True
+
+                if last_corrupt:
+                    if _repair_jsonl_last_line(jsonl_file):
+                        repaired.append(jsonl_file.name)
+                    else:
+                        corrupted.append(f"{jsonl_file.name}:(last)")
 
                 checked += 1
                 if checked >= 20:
@@ -138,13 +177,14 @@ def _spot_check_jsonl(messages_dir: Path, result: IntegrityResult) -> None:
             result.warnings.append(f"Cannot read {jsonl_file.name}: {exc}")
 
     if corrupted:
-        result.warnings.append(
-            f"Corrupt JSONL detected (first/last line): {corrupted[:5]}"
-        )
+        result.warnings.append(f"Corrupt JSONL detected (first/last line): {corrupted[:5]}")
         log.warning(
             "Startup integrity: corrupt JSONL files detected: %s",
             corrupted,
         )
+    if repaired:
+        result.repaired.append(f"Auto-repaired corrupt last line in: {repaired[:5]}")
+        log.info("Startup integrity: auto-repaired %d JSONL file(s): %s", len(repaired), repaired)
 
 
 def _check_sqlite_not_locked(db_path: Path, result: IntegrityResult) -> None:
@@ -162,18 +202,14 @@ def _check_sqlite_not_locked(db_path: Path, result: IntegrityResult) -> None:
     except sqlite3.OperationalError as exc:
         msg = str(exc).lower()
         if "locked" in msg or "busy" in msg:
-            result.warnings.append(
-                f"SQLite database may be locked: {db_path.name} ({exc})"
-            )
+            result.warnings.append(f"SQLite database may be locked: {db_path.name} ({exc})")
             log.warning(
                 "Startup integrity: SQLite DB may be locked: %s — %s",
                 db_path.name,
                 exc,
             )
     except Exception as exc:
-        result.warnings.append(
-            f"Cannot verify SQLite DB {db_path.name}: {exc}"
-        )
+        result.warnings.append(f"Cannot verify SQLite DB {db_path.name}: {exc}")
 
 
 def _run_sync_checks(workspace: Path) -> IntegrityResult:
@@ -211,8 +247,7 @@ async def check_workspace_integrity(workspace: Path) -> IntegrityResult:
 
     if result.has_issues:
         log.warning(
-            "Workspace integrity check found issues: "
-            "%d warnings, %d errors, %d auto-repaired",
+            "Workspace integrity check found issues: %d warnings, %d errors, %d auto-repaired",
             len(result.warnings),
             len(result.errors),
             len(result.repaired),

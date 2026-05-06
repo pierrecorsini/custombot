@@ -405,9 +405,7 @@ class TestGracefulShutdownThreadSafety:
             import time as _time
 
             _time.sleep(0.1)
-            loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(gs.exit_operation(op_id))
-            )
+            loop.call_soon_threadsafe(lambda: asyncio.ensure_future(gs.exit_operation(op_id)))
 
         t = threading.Thread(target=_complete_from_thread)
         t.start()

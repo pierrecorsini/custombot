@@ -314,7 +314,7 @@ class TestStartup:
 class TestWireScheduler:
     """Tests for Application._wire_scheduler() callback wiring."""
 
-    async def test_set_on_send_calls_channel_send_with_skip_delays(
+    async def test_set_on_send_calls_channel_send_and_track_with_skip_delays(
         self, test_config: Config
     ) -> None:
         mock_bot = AsyncMock()
@@ -330,7 +330,7 @@ class TestWireScheduler:
         on_send = mock_scheduler.set_on_send.call_args[0][0]
         await on_send("chat-1", "hello")
 
-        mock_channel.send_message.assert_awaited_once_with("chat-1", "hello", skip_delays=True)
+        mock_channel.send_and_track.assert_awaited_once_with("chat-1", "hello", skip_delays=True)
 
     async def test_set_on_trigger_calls_bot_process_scheduled(self, test_config: Config) -> None:
         mock_bot = AsyncMock()

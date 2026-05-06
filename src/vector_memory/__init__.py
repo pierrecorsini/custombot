@@ -242,6 +242,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
                 self._client.embeddings.create(
                     model=self._embedding_model,
                     input="health",
+                    encoding_format="float",
                 ),
                 timeout=timeout,
             )
@@ -476,6 +477,7 @@ class VectorMemory(EmbeddingHealthMixin, BatchEmbedMixin, SqliteHelper):
                 resp = await self._client.embeddings.create(
                     model=self._embedding_model,
                     input=text,
+                    encoding_format="float",
                 )
                 embedding = resp.data[0].embedding
 

@@ -1,8 +1,8 @@
 """
 config.py — Backward-compatible re-export shim.
 
-The implementation has been split into focused modules:
-    - config_schema_defs.py  — Dataclass definitions (Config, LLMConfig, etc.)
+The implementation lives in focused modules:
+    - config_schema_defs.py  — Dataclass definitions + JSON Schema validation
     - config_validation.py   — Validation and logging helpers
     - config_loader.py       — Load/save logic and dict → dataclass construction
 

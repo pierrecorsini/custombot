@@ -86,7 +86,12 @@ class EmbeddingHealthMixin:
                 embedding = await self._batched_embed(text)
                 now = time.time()
                 await asyncio.to_thread(
-                    self._insert_entry, chat_id, text, category, now, embedding,
+                    self._insert_entry,
+                    chat_id,
+                    text,
+                    category,
+                    now,
+                    embedding,
                 )
                 retried += 1
                 age = round(now - queued_at, 1)

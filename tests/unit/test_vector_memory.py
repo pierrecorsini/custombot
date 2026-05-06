@@ -19,13 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import math
-import sqlite3
 import struct
 import threading
 import time
 from collections import OrderedDict
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.vector_memory._utils import _cache_key
@@ -38,6 +36,10 @@ sqlite_vec = pytest.importorskip("sqlite_vec")
 from src.utils import BoundedOrderedDict
 from src.utils.locking import ThreadLock
 from src.vector_memory import VectorMemory, _serialize_f32
+
+if TYPE_CHECKING:
+    from pathlib import Path
+    import sqlite3
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -866,9 +868,7 @@ class TestSaveBatchCoalescing:
         vm.connect()
 
         # Fire 5 saves concurrently — they should coalesce into 1 API call
-        await asyncio.gather(*[
-            vm.save("chat1", f"rapid text {i}") for i in range(5)
-        ])
+        await asyncio.gather(*[vm.save("chat1", f"rapid text {i}") for i in range(5)])
 
         assert call_count == 1
         assert vm.count("chat1") == 5
@@ -941,9 +941,7 @@ class TestSaveBatchCoalescing:
         vm = VectorMemory(str(db_path), client, EMBEDDING_MODEL, EMBEDDING_DIM)
         vm.connect()
 
-        results = await asyncio.gather(*[
-            vm.save("chat1", f"text {i}") for i in range(3)
-        ])
+        results = await asyncio.gather(*[vm.save("chat1", f"text {i}") for i in range(3)])
 
         # All saves should gracefully return -1 (queued for retry)
         assert all(r == -1 for r in results)
@@ -1040,9 +1038,7 @@ class TestSaveBatchCoalescing:
             vm.connect()
 
             # Fire 12 saves concurrently — should be chunked into 3 API calls (5+5+2)
-            await asyncio.gather(*[
-                vm.save("chat1", f"chunk text {i}") for i in range(12)
-            ])
+            await asyncio.gather(*[vm.save("chat1", f"chunk text {i}") for i in range(12)])
 
             assert call_count == 3  # 5 + 5 + 2
             assert vm.count("chat1") == 12
@@ -1602,9 +1598,7 @@ class TestEmbedBatchCacheInflight:
         assert call_count == 2
 
         # Batch: 2 cached + 2 fresh
-        results = await vm._embed_batch(
-            ["cached_a", "fresh_x", "cached_b", "fresh_y"]
-        )
+        results = await vm._embed_batch(["cached_a", "fresh_x", "cached_b", "fresh_y"])
         assert call_count == 3  # 2 pre-warm + 1 batch
         assert len(results) == 4
 
@@ -1967,13 +1961,18 @@ class TestReadConnectionPool:
         assert len(vm._read_connections) == 0
 
     def test_pooled_reads_return_correct_results(
-        self, vm_with_embeddings: tuple[VectorMemory, dict],
+        self,
+        vm_with_embeddings: tuple[VectorMemory, dict],
     ):
         """Read operations through the pool should return the same results."""
         vm, embeddings = vm_with_embeddings
         for text in embeddings:
             vm._insert_entry(
-                "chat1", text, "", time.time(), embeddings[text],
+                "chat1",
+                text,
+                "",
+                time.time(),
+                embeddings[text],
             )
 
         # Multiple reads from the same thread should be consistent
@@ -2057,7 +2056,8 @@ class TestReadConnectionPool:
         assert recent[0]["category"] == "test"
 
     def test_read_connection_from_other_thread_sees_committed_writes(
-        self, vm: VectorMemory,
+        self,
+        vm: VectorMemory,
     ):
         """A pooled read connection created in a separate thread should also
         see data committed by writes on the main connection."""
@@ -2089,7 +2089,8 @@ class TestReadConnectionPool:
         assert thread_results == [1]
 
     def test_multiple_threads_read_concurrently_without_blocking(
-        self, vm: VectorMemory,
+        self,
+        vm: VectorMemory,
     ):
         """Multiple threads performing concurrent reads through the pool should
         all succeed and see consistent data."""
@@ -2149,9 +2150,7 @@ class TestSchemaMigration:
     def test_fresh_db_records_schema_version(self, vm: VectorMemory):
         """A fresh database should have the current schema version in _schema_meta."""
         assert vm._db is not None
-        row = vm._db.execute(
-            "SELECT value FROM _schema_meta WHERE key = 'version'"
-        ).fetchone()
+        row = vm._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
         assert row is not None
         assert int(row[0]) == 1  # _SCHEMA_VERSION
 
@@ -2169,9 +2168,7 @@ class TestSchemaMigration:
         vm.connect()
         vm._migrate_schema()  # Second call — should be a no-op
         assert vm._db is not None
-        row = vm._db.execute(
-            "SELECT value FROM _schema_meta WHERE key = 'version'"
-        ).fetchone()
+        row = vm._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
         assert int(row[0]) == 1
         vm.close()
 
@@ -2199,9 +2196,7 @@ class TestSchemaMigration:
             vm._migrate_schema()
 
             # Version should now be 2
-            row = vm._db.execute(
-                "SELECT value FROM _schema_meta WHERE key = 'version'"
-            ).fetchone()
+            row = vm._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
             assert int(row[0]) == 2
 
             # The 'tags' column should exist
@@ -2234,9 +2229,7 @@ class TestSchemaMigration:
         try:
             vm._migrate_schema()
 
-            row = vm._db.execute(
-                "SELECT value FROM _schema_meta WHERE key = 'version'"
-            ).fetchone()
+            row = vm._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
             assert int(row[0]) == 3
 
             col_rows = vm._db.execute("PRAGMA table_info(memory_entries)").fetchall()
@@ -2248,9 +2241,7 @@ class TestSchemaMigration:
             vm_mod._MIGRATIONS = original_migrations
             vm.close()
 
-    def test_existing_db_without_meta_migrates_from_zero(
-        self, db_path: Path, mock_client
-    ):
+    def test_existing_db_without_meta_migrates_from_zero(self, db_path: Path, mock_client):
         """An existing database without _schema_meta should start at version 0 and migrate."""
         import src.vector_memory as vm_mod
 
@@ -2284,9 +2275,7 @@ class TestSchemaMigration:
             # Now ensure schema (which creates _schema_meta + migrates)
             vm._ensure_schema()
 
-            row = vm._db.execute(
-                "SELECT value FROM _schema_meta WHERE key = 'version'"
-            ).fetchone()
+            row = vm._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
             assert int(row[0]) == 2
         finally:
             vm_mod._SCHEMA_VERSION = original_version
@@ -2301,18 +2290,14 @@ class TestSchemaMigration:
 
         tables = [
             r[0]
-            for r in vm._db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in vm._db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         ]
         assert "memory_entries" in tables
         assert "memory_vec" in tables
         assert "_schema_meta" in tables
         vm.close()
 
-    def test_migration_with_multiple_statements_per_step(
-        self, db_path: Path, mock_client
-    ):
+    def test_migration_with_multiple_statements_per_step(self, db_path: Path, mock_client):
         """A single migration step with multiple SQL statements should apply all of them."""
         import src.vector_memory as vm_mod
 
@@ -2341,9 +2326,7 @@ class TestSchemaMigration:
             vm._migrate_schema()
 
             # Version should be 2
-            row = vm._db.execute(
-                "SELECT value FROM _schema_meta WHERE key = 'version'"
-            ).fetchone()
+            row = vm._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
             assert int(row[0]) == 2
 
             # Column 'tags' should exist
@@ -2392,9 +2375,7 @@ class TestSchemaMigration:
         try:
             vm._migrate_schema()
 
-            row = vm._db.execute(
-                "SELECT value FROM _schema_meta WHERE key = 'version'"
-            ).fetchone()
+            row = vm._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
             assert int(row[0]) == 2
 
             # The new table should exist
@@ -2421,9 +2402,7 @@ class TestSchemaMigration:
             vm_mod._MIGRATIONS = original_migrations
             vm.close()
 
-    def test_migration_from_mid_version_skips_older(
-        self, db_path: Path, mock_client
-    ):
+    def test_migration_from_mid_version_skips_older(self, db_path: Path, mock_client):
         """Starting from version 1 with v1→v2 and v2→v3 migrations should only apply v2 and v3."""
         import src.vector_memory as vm_mod
 
@@ -2445,9 +2424,7 @@ class TestSchemaMigration:
         try:
             vm._migrate_schema()
 
-            row = vm._db.execute(
-                "SELECT value FROM _schema_meta WHERE key = 'version'"
-            ).fetchone()
+            row = vm._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
             assert int(row[0]) == 3
 
             col_rows = vm._db.execute("PRAGMA table_info(memory_entries)").fetchall()
@@ -2493,9 +2470,7 @@ class TestSchemaMigration:
             vm._migrate_schema()
 
             # The pre-migration data should still be there
-            rows = vm._db.execute(
-                "SELECT chat_id, text FROM memory_entries"
-            ).fetchall()
+            rows = vm._db.execute("SELECT chat_id, text FROM memory_entries").fetchall()
             assert len(rows) == 1
             assert rows[0] == ("chat1", "pre-migration data")
         finally:
@@ -2503,9 +2478,7 @@ class TestSchemaMigration:
             vm_mod._MIGRATIONS = original_migrations
             vm.close()
 
-    def test_migration_failure_mid_way_preserves_partial_version(
-        self, db_path: Path, mock_client
-    ):
+    def test_migration_failure_mid_way_preserves_partial_version(self, db_path: Path, mock_client):
         """If the second migration fails, the first migration's version is preserved."""
         import src.vector_memory as vm_mod
 
@@ -2530,9 +2503,7 @@ class TestSchemaMigration:
                 vm._migrate_schema()
 
             # Version should be 2 (first migration succeeded and committed)
-            row = vm._db.execute(
-                "SELECT value FROM _schema_meta WHERE key = 'version'"
-            ).fetchone()
+            row = vm._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
             assert row is not None
             assert int(row[0]) == 2
 
@@ -2545,9 +2516,7 @@ class TestSchemaMigration:
             vm_mod._MIGRATIONS = original_migrations
             vm.close()
 
-    def test_migration_version_0_to_1_and_then_1_to_2(
-        self, db_path: Path, mock_client
-    ):
+    def test_migration_version_0_to_1_and_then_1_to_2(self, db_path: Path, mock_client):
         """Simulates the real lifecycle: v0→v1 migration, then a later v1→v2 migration."""
         import src.vector_memory as vm_mod
 
@@ -2571,9 +2540,7 @@ class TestSchemaMigration:
         try:
             vm._migrate_schema()
 
-            row = vm._db.execute(
-                "SELECT value FROM _schema_meta WHERE key = 'version'"
-            ).fetchone()
+            row = vm._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
             assert int(row[0]) == 1
 
             col_rows = vm._db.execute("PRAGMA table_info(memory_entries)").fetchall()
@@ -2589,9 +2556,7 @@ class TestSchemaMigration:
 
             vm._migrate_schema()
 
-            row = vm._db.execute(
-                "SELECT value FROM _schema_meta WHERE key = 'version'"
-            ).fetchone()
+            row = vm._db.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
             assert int(row[0]) == 2
 
             col_rows = vm._db.execute("PRAGMA table_info(memory_entries)").fetchall()
@@ -2809,9 +2774,7 @@ class TestEmbedBatchApiErrorPropagation:
         vm.close()
 
     @pytest.mark.asyncio
-    async def test_subsequent_batch_with_different_texts_after_failure(
-        self, db_path: Path
-    ):
+    async def test_subsequent_batch_with_different_texts_after_failure(self, db_path: Path):
         """After a failed batch, a batch with completely different texts should
         work, and the cache should only contain the successful texts."""
         client = _make_mock_client()
@@ -2876,9 +2839,7 @@ class TestEmbedBatchCountValidation:
     """
 
     @pytest.mark.asyncio
-    async def test_api_returns_fewer_embeddings_raises_value_error(
-        self, db_path: Path
-    ):
+    async def test_api_returns_fewer_embeddings_raises_value_error(self, db_path: Path):
         """When the API returns fewer embeddings than unique texts,
         _embed_batch() raises ValueError with a descriptive message."""
         client = _make_mock_client()
@@ -3117,7 +3078,8 @@ class TestConcurrentReadWriteIsolation:
         assert vm.count("chat1") == num_initial + num_new
 
     def test_list_recent_returns_consistent_snapshot_during_writes(
-        self, vm: VectorMemory,
+        self,
+        vm: VectorMemory,
     ):
         """list_recent() on a read connection within a transaction should return
         the same entries before and after concurrent writes."""
@@ -3441,18 +3403,12 @@ class TestEmbeddingModelTracking:
         vm1.close()
 
         with caplog.at_level(logging.WARNING, logger="src.vector_memory"):
-            vm2 = VectorMemory(
-                str(db_path), mock_client, EMBEDDING_MODEL, EMBEDDING_DIM
-            )
+            vm2 = VectorMemory(str(db_path), mock_client, EMBEDDING_MODEL, EMBEDDING_DIM)
             vm2.connect()
             vm2.close()
 
-        model_warnings = [
-            r for r in caplog.records if "Embedding model changed" in r.message
-        ]
-        dims_warnings = [
-            r for r in caplog.records if "Embedding dimensions changed" in r.message
-        ]
+        model_warnings = [r for r in caplog.records if "Embedding model changed" in r.message]
+        dims_warnings = [r for r in caplog.records if "Embedding dimensions changed" in r.message]
         assert len(model_warnings) == 0
         assert len(dims_warnings) == 0
 
@@ -3465,15 +3421,11 @@ class TestEmbeddingModelTracking:
         vm1.close()
 
         with caplog.at_level(logging.WARNING, logger="src.vector_memory"):
-            vm2 = VectorMemory(
-                str(db_path), mock_client, "text-embedding-3-large", EMBEDDING_DIM
-            )
+            vm2 = VectorMemory(str(db_path), mock_client, "text-embedding-3-large", EMBEDDING_DIM)
             vm2.connect()
             vm2.close()
 
-        model_warnings = [
-            r for r in caplog.records if "Embedding model changed" in r.message
-        ]
+        model_warnings = [r for r in caplog.records if "Embedding model changed" in r.message]
         assert len(model_warnings) == 1
         assert "text-embedding-3-small" in model_warnings[0].message
         assert "text-embedding-3-large" in model_warnings[0].message
@@ -3487,15 +3439,11 @@ class TestEmbeddingModelTracking:
         vm1.close()
 
         with caplog.at_level(logging.WARNING, logger="src.vector_memory"):
-            vm2 = VectorMemory(
-                str(db_path), mock_client, EMBEDDING_MODEL, 3072
-            )
+            vm2 = VectorMemory(str(db_path), mock_client, EMBEDDING_MODEL, 3072)
             vm2.connect()
             vm2.close()
 
-        dims_warnings = [
-            r for r in caplog.records if "Embedding dimensions changed" in r.message
-        ]
+        dims_warnings = [r for r in caplog.records if "Embedding dimensions changed" in r.message]
         assert len(dims_warnings) == 1
         assert str(EMBEDDING_DIM) in dims_warnings[0].message
         assert "3072" in dims_warnings[0].message
@@ -3507,9 +3455,7 @@ class TestEmbeddingModelTracking:
         vm1.close()
 
         # Connect with a different model — it should stamp the new model
-        vm2 = VectorMemory(
-            str(db_path), mock_client, "text-embedding-3-large", EMBEDDING_DIM
-        )
+        vm2 = VectorMemory(str(db_path), mock_client, "text-embedding-3-large", EMBEDDING_DIM)
         vm2.connect()
         assert vm2._db is not None
         row = vm2._db.execute(

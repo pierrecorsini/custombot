@@ -40,8 +40,8 @@ log = logging.getLogger(__name__)
 # Using a compiled regex delegates character matching to C level,
 # significantly faster than a Python-level per-character loop.
 _CJK_RE = re.compile(
-    r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff'
-    r'\uac00-\ud7af\u1100-\u11ff\uff00-\uffef]'
+    r"[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff"
+    r"\uac00-\ud7af\u1100-\u11ff\uff00-\uffef]"
 )
 
 
@@ -61,7 +61,7 @@ class ChatMessage:
     _cached_tokens: int = 0
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, '_cached_tokens', estimate_tokens(self.content))
+        object.__setattr__(self, "_cached_tokens", estimate_tokens(self.content))
 
     def to_api_dict(self) -> dict[str, Any]:
         """Convert to the OpenAI API wire-format dict."""
@@ -69,6 +69,7 @@ class ChatMessage:
         if self.name is not None:
             d["name"] = self.name
         return d
+
 
 @dataclass(slots=True)
 class HistoryBundle:
@@ -207,6 +208,7 @@ async def build_context(
     history_tokens = sum(m._cached_tokens for m in bundle.messages)
     total_used = system_tokens + history_tokens
     from src.monitoring.performance import get_metrics_collector
+
     try:
         get_metrics_collector().track_context_budget_utilization(
             total_used, DEFAULT_CONTEXT_TOKEN_BUDGET
@@ -286,15 +288,13 @@ def _trim_history_to_budget(
     # Decrement unsanitized counter for any user messages being dropped
     if unsanitized_count > 0 and drop_count > 0:
         dropped_unsanitized = sum(
-            1 for m in messages[:drop_count]
-            if m.role == "user" and not m._sanitized
+            1 for m in messages[:drop_count] if m.role == "user" and not m._sanitized
         )
         unsanitized_count -= dropped_unsanitized
 
     trimmed = messages[drop_count:]
     log.warning(
-        "History trimmed from %d to %d messages to fit token budget "
-        "(system=%d, budget=%d)",
+        "History trimmed from %d to %d messages to fit token budget (system=%d, budget=%d)",
         len(messages),
         len(trimmed),
         system_tokens,

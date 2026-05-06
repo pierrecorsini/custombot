@@ -2220,7 +2220,7 @@ class TestConcurrentEnqueueCompleteRaceConditions:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-# Alphabet matching _CHAT_ID_PATTERN: ^[a-zA-Z0-9_\-.@]+$
+# Alphabet matching _CHAT_ID_RE: ^[a-zA-Z0-9_\-.@]+$
 # Used by Hypothesis strategies so that generated chat_ids pass
 # _validate_chat_id() during from_dict() round-trip tests.
 _CHAT_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.@"

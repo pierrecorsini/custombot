@@ -259,7 +259,8 @@ class TestMtimeCacheMissingBounding:
         # Probe 10 nonexistent files — _missing should cap at max_size
         for i in range(10):
             result = await cache.read(
-                f"key-{i:04d}", Path(f"/tmp/nonexistent_{i}"),
+                f"key-{i:04d}",
+                Path(f"/tmp/nonexistent_{i}"),
             )
             assert result is None
 
@@ -280,7 +281,8 @@ class TestMtimeCacheMissingBounding:
         # Fill _missing with absent-file probes
         for i in range(10):
             await cache.read(
-                f"missing-{i:04d}", Path(f"/tmp/nonexistent_{i}"),
+                f"missing-{i:04d}",
+                Path(f"/tmp/nonexistent_{i}"),
             )
 
         # _missing is bounded
@@ -361,6 +363,96 @@ class TestEnsureWorkspace:
     def test_creates_parent_directories(self, mem: Memory):
         result = mem.ensure_workspace("deep/chat")
         assert result.is_dir()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Concurrent ensure_workspace
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestConcurrentEnsureWorkspace:
+    """Verify concurrent ensure_workspace calls for the same chat_id complete safely.
+
+    _atomic_seed uses os.O_EXCL for file creation, guaranteeing that only one
+    writer wins per seed file. Uses separate Memory instances sharing the same
+    workspace root to avoid LRUDict thread-safety issues — the test focuses on
+    filesystem-level atomicity.
+    """
+
+    def test_same_chat_id_no_error(self, workspace: Path):
+        """Multiple concurrent ensure_workspace calls for the same chat_id all
+        complete without error, producing a valid workspace."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        chat_id = "concurrent-chat"
+        num_workers = 8
+
+        # Each thread gets its own Memory instance (avoids LRUDict races)
+        # but they all share the same filesystem workspace.
+        instances = [Memory(str(workspace)) for _ in range(num_workers)]
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = [pool.submit(inst.ensure_workspace, chat_id) for inst in instances]
+            results = [f.result() for f in futures]
+
+        # All calls return the same path
+        assert all(r == results[0] for r in results)
+
+        # Directory exists
+        assert results[0].is_dir()
+
+        # AGENTS.md has correct content (not corrupted by concurrent writes)
+        agents = results[0] / AGENTS_FILENAME
+        assert agents.exists()
+        assert agents.read_text(encoding="utf-8") == _DEFAULT_AGENTS_MD
+
+        # .chat_id has correct content
+        chat_id_file = results[0] / Memory.ORIGIN_ID_FILENAME
+        assert chat_id_file.exists()
+        assert chat_id_file.read_text(encoding="utf-8") == chat_id
+
+        # No leftover .tmp files from failed atomic writes
+        tmp_files = list(results[0].glob("*.tmp"))
+        assert tmp_files == []
+
+    def test_different_chat_ids_isolated(self, workspace: Path):
+        """Concurrent calls for different chat_ids should not interfere."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        chat_ids = [f"chat{i}" for i in range(5)]
+        instances = [Memory(str(workspace)) for _ in chat_ids]
+
+        with ThreadPoolExecutor(max_workers=len(chat_ids)) as pool:
+            futures = [
+                pool.submit(inst.ensure_workspace, cid) for inst, cid in zip(instances, chat_ids)
+            ]
+            results = [f.result() for f in futures]
+
+        assert len(set(results)) == len(chat_ids)
+        for path in results:
+            assert path.is_dir()
+            assert (path / AGENTS_FILENAME).exists()
+
+    def test_mixed_same_and_different_chat_ids(self, workspace: Path):
+        """Mix of same and different chat_ids in concurrent calls."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        calls = ["shared"] * 5 + [f"unique{i}" for i in range(3)]
+        instances = [Memory(str(workspace)) for _ in calls]
+
+        with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+            futures = [
+                pool.submit(inst.ensure_workspace, cid) for inst, cid in zip(instances, calls)
+            ]
+            results = [f.result() for f in futures]
+
+        assert len(results) == len(calls)
+        for r in results:
+            assert r.is_dir()
+
+        # "shared" results all point to the same directory
+        shared = results[:5]
+        assert all(r == shared[0] for r in shared)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1097,30 +1189,23 @@ class TestPathTraversalValidation:
 
     def test_ensure_workspace_raises_on_escape(self, mem: Memory, monkeypatch):
         """If sanitize_path_component returned a traversal, _validate_path blocks it."""
-        monkeypatch.setattr(
-            "src.memory.sanitize_path_component", lambda x: "../../etc"
-        )
+        monkeypatch.setattr("src.memory.sanitize_path_component", lambda x: "../../etc")
         with pytest.raises(PathSecurityError, match="Workspace escape blocked"):
             mem.ensure_workspace("evil")
 
     def test_chat_dir_raises_on_escape(self, mem: Memory, monkeypatch):
         """_chat_dir also validates (read path protection)."""
-        monkeypatch.setattr(
-            "src.memory.sanitize_path_component", lambda x: "../../etc"
-        )
+        monkeypatch.setattr("src.memory.sanitize_path_component", lambda x: "../../etc")
         with pytest.raises(PathSecurityError, match="Workspace escape blocked"):
             mem._chat_dir("evil")
 
     def test_write_memory_raises_on_escape(self, mem: Memory, monkeypatch):
         """write_memory calls _ensure_chat_dir which validates."""
-        monkeypatch.setattr(
-            "src.memory.sanitize_path_component", lambda x: "../../etc"
-        )
+        monkeypatch.setattr("src.memory.sanitize_path_component", lambda x: "../../etc")
         with pytest.raises(PathSecurityError):
             import asyncio
-            asyncio.get_event_loop().run_until_complete(
-                mem.write_memory("evil", "data")
-            )
+
+            asyncio.get_event_loop().run_until_complete(mem.write_memory("evil", "data"))
 
     def test_symlink_escape_blocked(self, workspace: Path):
         """A symlink inside whatsapp_data pointing outside should be caught."""
@@ -1170,9 +1255,7 @@ class TestMtimeCacheConsistency:
         assert second == "externally modified"
 
     @pytest.mark.asyncio
-    async def test_multiple_external_modifications_detected(
-        self, mem: Memory, workspace: Path
-    ):
+    async def test_multiple_external_modifications_detected(self, mem: Memory, workspace: Path):
         """Each successive external modification is picked up independently."""
         _write_memory_raw(workspace, "chat1", "v1")
         assert await mem.read_memory("chat1") == "v1"
@@ -1186,9 +1269,7 @@ class TestMtimeCacheConsistency:
         assert await mem.read_memory("chat1") == "v3"
 
     @pytest.mark.asyncio
-    async def test_cache_hit_then_external_mod_returns_fresh(
-        self, mem: Memory, workspace: Path
-    ):
+    async def test_cache_hit_then_external_mod_returns_fresh(self, mem: Memory, workspace: Path):
         """After a cache hit (same mtime), an external modification still
         causes the next read to return fresh content."""
         _write_memory_raw(workspace, "chat1", "initial")
@@ -1221,9 +1302,7 @@ class TestMtimeCacheConsistency:
         assert result == "# Custom Agent\nNew instructions."
 
     @pytest.mark.asyncio
-    async def test_external_mod_to_empty_invalidates_cache(
-        self, mem: Memory, workspace: Path
-    ):
+    async def test_external_mod_to_empty_invalidates_cache(self, mem: Memory, workspace: Path):
         """External modification that empties the file returns None (stripped
         whitespace-only content is treated as missing)."""
         _write_memory_raw(workspace, "chat1", "has content")
@@ -1236,9 +1315,7 @@ class TestMtimeCacheConsistency:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_cache_entry_reflects_last_external_content(
-        self, mem: Memory, workspace: Path
-    ):
+    async def test_cache_entry_reflects_last_external_content(self, mem: Memory, workspace: Path):
         """After external modification and re-read, the internal cache entry
         stores the new content and mtime — not the old values."""
         _write_memory_raw(workspace, "chat1", "first")
@@ -1310,9 +1387,7 @@ class TestResolveChatPathCaching:
         assert cached is not None
         assert cached.is_dir()
 
-    def test_ensure_workspace_for_existing_chat_keeps_valid_cache(
-        self, mem: Memory
-    ):
+    def test_ensure_workspace_for_existing_chat_keeps_valid_cache(self, mem: Memory):
         """For an already-created chat, ensure_workspace still works."""
         mem.ensure_workspace("chat1")
         cached_after_first = mem._path_cache.get("chat1")
@@ -1326,24 +1401,18 @@ class TestResolveChatPathCaching:
 
     def test_invalid_chat_id_raises_before_caching(self, mem: Memory, monkeypatch):
         """If _validate_path raises, the invalid entry must NOT be cached."""
-        monkeypatch.setattr(
-            "src.memory.sanitize_path_component", lambda x: "../../etc"
-        )
+        monkeypatch.setattr("src.memory.sanitize_path_component", lambda x: "../../etc")
         with pytest.raises(PathSecurityError):
             mem._resolve_chat_path("evil")
 
         assert mem._path_cache.get("evil") is None
 
-    def test_valid_id_cached_even_after_invalid_attempt(
-        self, mem: Memory, monkeypatch
-    ):
+    def test_valid_id_cached_even_after_invalid_attempt(self, mem: Memory, monkeypatch):
         """A failed validation for one chat_id doesn't affect others."""
         mem._resolve_chat_path("good-chat")
         assert mem._path_cache.get("good-chat") is not None
 
-        monkeypatch.setattr(
-            "src.memory.sanitize_path_component", lambda x: "../../etc"
-        )
+        monkeypatch.setattr("src.memory.sanitize_path_component", lambda x: "../../etc")
         with pytest.raises(PathSecurityError):
             mem._resolve_chat_path("evil")
 

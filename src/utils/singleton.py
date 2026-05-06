@@ -50,7 +50,7 @@ def get_or_create_singleton(
     with _registry_lock:
         if cls not in _singleton_registry:
             _singleton_registry[cls] = cls(*args, **kwargs)
-        return cast(T, _singleton_registry[cls])
+        return cast("T", _singleton_registry[cls])
 
 
 def reset_singleton(cls: type) -> None:

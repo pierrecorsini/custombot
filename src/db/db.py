@@ -63,7 +63,6 @@ from src.db.db_utils import (
     _db_log_extra,
     _track_db_latency,
     _track_db_write_latency,
-    _validate_chat_id,
 )
 from src.db.file_pool import FileHandlePool, ReadHandlePool
 from src.db.generations import GenerationCounter
@@ -78,6 +77,7 @@ from src.utils import (
     safe_json_parse,
 )
 from src.utils.path import sanitize_path_component as _sanitize_chat_id_for_path
+from src.utils.validation import _validate_chat_id
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +96,6 @@ __all__ = [
     "CorruptionResult",
     "Database",
     "get_database",
-    "_validate_chat_id",
     "_sanitize_chat_id_for_path",
 ]
 
@@ -554,6 +553,19 @@ class Database:
             log.info("FileHandlePool pre-warmed %d handles for known chats", count)
         return count
 
+    def _save_chats_sync(self) -> None:
+        """Synchronous fallback for saving chats when asyncio is unavailable.
+
+        Used during shutdown when the event loop executor has already been
+        torn down and ``asyncio.to_thread`` raises RuntimeError.
+        """
+        from src.utils.json_utils import json_dumps
+
+        content = json_dumps(self._chats, indent=2, ensure_ascii=False)
+        self._atomic_write(self._chats_file, content)
+        self._chats_dirty = False
+        log.info("Saved chats via synchronous fallback during shutdown")
+
     async def close(self) -> None:
         """Flush any pending writes and close database.
 
@@ -563,27 +575,38 @@ class Database:
         ``close()`` always releases OS file descriptors.
         """
         # Flush any debounced chat writes — best-effort during shutdown.
+        # Try async path first, fall back to direct synchronous write when
+        # the event loop executor is already shut down.
         if self._chats_dirty:
             try:
                 await self._save_chats()
                 self._chats_dirty = False
             except Exception:
-                log.warning(
-                    "Failed to flush dirty chats during close — data may be lost",
-                    exc_info=True,
-                    extra=_db_log_extra(),
-                )
+                log.debug("Async save_chats failed during close, trying sync fallback")
+                try:
+                    self._save_chats_sync()
+                except Exception:
+                    log.warning(
+                        "Failed to flush dirty chats during close — data may be lost",
+                        exc_info=True,
+                        extra=_db_log_extra(),
+                    )
         # Flush debounced index writes via MessageStore
         if self._message_store.index_dirty:
             try:
                 await self._message_store.save_message_index()
                 self._message_store.index_dirty = False
             except Exception:
-                log.warning(
-                    "Failed to flush message index during close",
-                    exc_info=True,
-                    extra=_db_log_extra(),
-                )
+                log.debug("Async save_message_index failed during close, trying sync fallback")
+                try:
+                    self._message_store.save_message_index_sync()
+                    self._message_store.index_dirty = False
+                except Exception:
+                    log.warning(
+                        "Failed to flush message index during close",
+                        exc_info=True,
+                        extra=_db_log_extra(),
+                    )
         # Close all pooled file handles to release OS file descriptors
         self._file_pool.close_all()
         self._read_pool.close_all()
@@ -630,7 +653,18 @@ class Database:
         _db_start = time.monotonic()
 
         async def _write_chats():
-            await asyncio.to_thread(self._atomic_write, self._chats_file, content)
+            try:
+                await asyncio.to_thread(self._atomic_write, self._chats_file, content)
+            except RuntimeError as exc:
+                # During teardown, the loop default executor can already be
+                # shutting down. Keep close() best-effort by falling back to a
+                # direct synchronous write of the small chats index.
+                if "cannot schedule new futures after shutdown" not in str(exc):
+                    raise
+                log.warning(
+                    "Default executor unavailable while saving chats; using synchronous fallback"
+                )
+                self._atomic_write(self._chats_file, content)
 
         await self._guarded_write(
             _write_chats,

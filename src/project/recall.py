@@ -12,12 +12,14 @@ into the LLM system prompt.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from src.project.dates import fmt_ts
-from src.project.graph import ProjectGraph
-from src.project.store import ProjectStore
-from src.vector_memory import VectorMemory
+
+if TYPE_CHECKING:
+    from src.project.graph import ProjectGraph
+    from src.vector_memory import VectorMemory
+    from src.project.store import ProjectStore
 
 log = logging.getLogger(__name__)
 

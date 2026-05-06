@@ -11,11 +11,13 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, TYPE_CHECKING
 
 from src.db.db_integrity import validate_checksum
 from src.utils import JsonParseMode, safe_json_parse
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 

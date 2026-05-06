@@ -1,9 +1,9 @@
-<!-- Context: project/lookup/plan-progress | Priority: high | Version: 14.0 | Updated: 2026-05-04 -->
+<!-- Context: project/lookup/plan-progress | Priority: high | Version: 15.0 | Updated: 2026-05-05 -->
 
 # Lookup: PLAN.md Progress Tracker
 
 **Purpose**: Quick-reference status of all improvement plan items across 11 rounds
-**Source**: `PLAN.md` (61 lines) — Round 11 senior code review (fresh slate, 219 previous completed)
+**Source**: `PLAN.md` (64 lines) — Round 12 comprehensive review
 
 ---
 
@@ -22,7 +22,8 @@
 | Round 9 | 20 | 20 | 0 |
 | Round 10 | 27 | 27 | 0 |
 | Round 11 | 15 | 10 | **5** |
-| **Total** | **234** | **229** | **5** |
+| Round 12 | 37 | 14 | **23** |
+| **Total** | **271** | **243** | **28** |
 
 ---
 
@@ -136,6 +137,70 @@
 
 ---
 
+## Round 12 — In Progress (14/37)
+
+*Comprehensive review (2026-05-05). Source: `PLAN.md` (64 lines)*
+
+### Architecture & Refactoring (6/6 ✅)
+
+- [x] Split `_bot.py` (1280 lines) into focused sub-modules — extract context-building, response delivery, per-chat lock management
+- [x] Decompose `scheduler.py` (941 lines) into `scheduler/engine.py`, `scheduler/persistence.py`, `scheduler/cron.py`
+- [x] Extract remaining concerns from `message_queue.py` (638 lines) — buffer management into `message_queue_buffer.py`
+- [x] Consolidate duplicate `chat_id` validation — unify into `src/utils/validation.py`
+- [x] Replace mutable context bags (`BuilderContext`, `StartupContext`) with protocol-based DI registry
+- [x] Extract `ErrorHandlerMiddleware._send_error_reply` pattern into shared `send_and_track()` helper on `BaseChannel`
+
+### Performance Optimization (6/6 ✅)
+
+- [x] Cache parsed YAML frontmatter in routing engine keyed by `(filename, mtime, size)`
+- [x] Batch recovered messages during crash recovery — group into `max_concurrent_messages` batches
+- [x] Add managed SQLite connection pooling — bounded pool mirroring `FileHandlePool`
+- [x] Wrap vector memory batch inserts in explicit SQLite transactions — `BEGIN IMMEDIATE / COMMIT`
+- [x] Replace list-concatenation with `list.extend()` in ReAct loop hot path
+- [x] Evaluate `TokenUsage._per_chat` dict → `BoundedOrderedDict` with configurable cap
+
+### Error Handling & Resilience (2/4)
+
+- [x] Implement per-category retry policies in `app.py` main loop — LLM transient exponential backoff, channel fixed-interval, filesystem fail-fast
+- [x] Add active LLM circuit-breaker recovery — active probe for provider recovery detection
+- [ ] Add atomic writes (write-to-temp → `os.replace()`) for message queue persistence
+- [ ] Add configurable wall-clock timeout for full ReAct loop
+
+### Test Coverage & Quality (0/6)
+
+- [ ] Increase test coverage floor from 75% to 80%
+- [ ] Add Hypothesis property-based tests for routing engine
+- [ ] Add integration test for config hot-reload end-to-end
+- [ ] Add end-to-end crash recovery pipeline test
+- [ ] Create contract test suite for `BaseChannel` subclasses
+- [ ] Add mutation testing to CI (non-blocking)
+
+### Security Hardening (0/5)
+
+- [ ] Add HTTP-level rate limiting to `LLMClient`
+- [ ] Implement configurable skill sandboxing with resource limits
+- [ ] Make HMAC signature verification mandatory for scheduled task execution
+- [ ] Apply `filter_response_content()` consistently to all LLM response paths
+- [ ] Add audit logging for config changes
+
+### Observability & Monitoring (0/4)
+
+- [ ] Add token cost estimation to `TokenUsage` and health endpoint
+- [ ] Implement full OpenTelemetry metrics instruments
+- [ ] Complete distributed tracing correlation across full message lifecycle
+- [ ] Add structured alerting thresholds to health check
+
+### Developer Experience & Code Hygiene (0/6)
+
+- [ ] Incrementally fix Ruff `PLC0415` violations (618 total, import-outside-top-level)
+- [ ] Incrementally fix Ruff `PLR2004` violations (549 total, magic-value-comparison)
+- [ ] Enable strict mypy for `src/core/` and `src/llm/`
+- [ ] Add `make lint-fix` and `make typecheck-strict` Makefile targets
+- [ ] Add `make test-coverage` target for HTML coverage report
+- [ ] Reduce `PLR0913` violations (63 total, too-many-arguments) — extract typed dataclasses
+
+---
+
 ## Rounds 4-10 Completed (159/159)
 
 ### Round 4 (25/25) — 2026-05-02
@@ -228,6 +293,7 @@
 - Source code changes (20 commits) — 2026-05-04
 - PLAN.md full sync (all 219/219 complete) — 2026-05-04
 - PLAN.md Round 11 (10/15 done, 5 remaining) — 2026-05-04
+- PLAN.md Round 12 (14/37 done, 23 remaining) — 2026-05-05
 
 ## Related
 

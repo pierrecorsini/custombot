@@ -81,7 +81,7 @@ class TestSanitizeCorrelationId:
 
     def test_complex_injection_attempt(self) -> None:
         """Simulate a log injection attempt with newlines and ANSI."""
-        malicious = 'valid_id\nERROR [CRITICAL] Database deleted\x1b[0m'
+        malicious = "valid_id\nERROR [CRITICAL] Database deleted\x1b[0m"
         result = _sanitize_correlation_id(malicious)
         assert "\n" not in result
         assert "\x1b" not in result

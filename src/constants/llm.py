@@ -67,6 +67,14 @@ REACT_LOOP_MAX_RETRIES: int = 2
 # Uses exponential backoff with jitter (see calculate_delay_with_jitter).
 REACT_LOOP_RETRY_INITIAL_DELAY: float = 1.0
 
+# Wall-clock timeout (seconds) for the full ReAct loop — a single stuck LLM
+# call or infinite tool loop can block the event loop indefinitely.  The
+# deadline is checked between iterations; when exceeded the loop terminates
+# gracefully with a user-facing message.  Set to 0 to disable.  Must be less
+# than per_chat_timeout (default 300s) so the outer asyncio.wait_for() is the
+# last resort, not the primary guard.
+DEFAULT_REACT_LOOP_TIMEOUT: float = 180.0  # 3 minutes
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Retry Configuration
 # ─────────────────────────────────────────────────────────────────────────────
@@ -92,3 +100,25 @@ LLM_LOG_MAX_AGE_DAYS: int = 30
 # Number of writes between automatic cleanup sweeps. Avoids scanning the directory
 # on every single write while still keeping the log count bounded.
 LLM_LOG_CLEANUP_INTERVAL: int = 20
+
+# Maximum serialized payload size (bytes) for a single LLM request/response log file.
+# If exceeded, payload is recursively truncated (long strings/lists/dicts) until it fits.
+LLM_LOG_MAX_JSON_BYTES: int = 64 * 1024
+
+# Maximum characters retained for any string field in LLM request/response logs.
+LLM_LOG_MAX_STRING_CHARS: int = 2000
+
+# Maximum items retained per list/tuple and dict in LLM request/response logs.
+# Additional entries are replaced with explicit truncation markers.
+LLM_LOG_MAX_COLLECTION_ITEMS: int = 40
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-Chat Token Tracking
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of distinct chat_ids tracked in TokenUsage._per_chat before
+# LRU eviction kicks in.  Uses BoundedOrderedDict with half-eviction: when
+# exceeded, the oldest 50% of entries are evicted.  1000 is generous for most
+# deployments; raise for high-volume setups with >1000 concurrent chats.
+# Configurable via ``per_chat_token_tracking_size`` in config.json.
+DEFAULT_PER_CHAT_TOKEN_TRACKING_SIZE: int = 1000

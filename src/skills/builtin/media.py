@@ -156,9 +156,10 @@ class SendVoiceNote(BaseSkill):
                 voice,
             )
 
-            # Send via callback if available
+            # Convert MP3 → OGG/Opus before sending (WhatsApp requires Opus for PTT)
             if send_media:
-                await send_media("audio", mp3_path, "")
+                ogg_path = _convert_to_ogg(mp3_path)
+                await send_media("audio", ogg_path, "")
                 return f"Voice note sent ({char_count} characters, voice: {voice})"
             else:
                 return f"Voice note generated at {mp3_path} (no send_media callback)"

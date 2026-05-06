@@ -41,8 +41,7 @@ def _small_payload() -> dict[str, Any]:
 
 def _medium_payload() -> dict[str, Any]:
     """Typical tool result (e.g., a short file read, ~2KB)."""
-    text = "Line {}\n".join(f"Sample content row {i} with typical data."
-                            for i in range(30))
+    text = "Line {}\n".join(f"Sample content row {i} with typical data." for i in range(30))
     return _make_tool_result(text)
 
 
@@ -113,8 +112,12 @@ class TestSerializationBenchmark:
             msgpack_size = len(msgpack.packb(payload, use_bin_type=True))
 
             print(f"\n  {name.upper()} payload:")
-            print(f"    orjson  — median: {o['median']:.1f}µs, p95: {o['p95']:.1f}µs, size: {orjson_size}B")
-            print(f"    msgpack — median: {m['median']:.1f}µs, p95: {m['p95']:.1f}µs, size: {msgpack_size}B")
+            print(
+                f"    orjson  — median: {o['median']:.1f}µs, p95: {o['p95']:.1f}µs, size: {orjson_size}B"
+            )
+            print(
+                f"    msgpack — median: {m['median']:.1f}µs, p95: {m['p95']:.1f}µs, size: {msgpack_size}B"
+            )
             print(f"    size ratio (msgpack/orjson): {msgpack_size / orjson_size:.2f}x")
 
             # Verify both produce round-trippable data
@@ -157,7 +160,7 @@ class TestSerializationBenchmark:
             print(f"\n  {name.upper()} pipeline:")
             print(f"    orjson path  — median: {o['median']:.1f}µs, p95: {o['p95']:.1f}µs")
             print(f"    msgpack path — median: {m['median']:.1f}µs, p95: {m['p95']:.1f}µs")
-            ratio = m['median'] / o['median'] if o['median'] > 0 else float('inf')
+            ratio = m["median"] / o["median"] if o["median"] > 0 else float("inf")
             print(f"    msgpack/orjson ratio: {ratio:.2f}x (lower is better)")
 
             # Verify both paths produce equivalent final output
@@ -202,5 +205,7 @@ class TestSerializationBenchmark:
 
         # orjson should be faster or comparable for text-heavy data
         # msgpack adds overhead for text-heavy dicts (string encoding is not its strength)
-        print(f"\n  Conclusion: orjson {'is' if o['median'] <= m['median'] else 'is NOT'} "
-              f"faster for text-heavy tool results.")
+        print(
+            f"\n  Conclusion: orjson {'is' if o['median'] <= m['median'] else 'is NOT'} "
+            f"faster for text-heavy tool results."
+        )

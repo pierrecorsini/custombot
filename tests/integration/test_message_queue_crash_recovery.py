@@ -11,12 +11,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 
-import pytest
 
 from src.message_queue import MessageQueue, MessageStatus, get_message_queue
 from tests.unit.test_message_queue import FakeIncomingMessage, make_incoming
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pytest
+    from pathlib import Path
 
 
 class TestCrashRecoveryPartialWrite:
@@ -65,10 +68,9 @@ class TestCrashRecoveryPartialWrite:
                 assert "crash-mid-write" not in queue2._pending
 
         # Corruption recovery must be logged
-        assert any(
-            "recovered" in r.message and "corrupted" in r.message
-            for r in caplog.records
-        ), f"Expected corruption recovery log, got: {[r.message for r in caplog.records]}"
+        assert any("recovered" in r.message and "corrupted" in r.message for r in caplog.records), (
+            f"Expected corruption recovery log, got: {[r.message for r in caplog.records]}"
+        )
 
     async def test_corruption_result_tracks_truncated_line(self, tmp_path: Path):
         """_last_corruption_result records line number of the truncated entry."""

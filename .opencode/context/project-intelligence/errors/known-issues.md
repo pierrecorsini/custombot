@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/errors/known-issues | Priority: high | Version: 5.2 | Updated: 2026-05-06 -->
+<!-- Context: project-intelligence/errors/known-issues | Priority: high | Version: 6.1 | Updated: 2026-05-06 -->
 
 # Known Issues
 
@@ -86,6 +86,16 @@
 - **Resolved**: 2026-05-06
 - **Resolution**: `message_queue_persistence.py` switched from JSON to msgpack+base64 serialization with JSON read fallback. Also added WAL-protected writes for crash safety.
 - **Files**: `src/message_queue_persistence.py`
+
+### Resolved: DB shutdown flush + executor deadlock + JSONL auto-repair (2026-05-06)
+- **Resolved**: 2026-05-06
+- **Resolution**: Three shutdown/startup bugs fixed: (1) DB `close()` now has sync fallback when executor is shut down, (2) executor shutdown catches "cannot join current thread" deadlock, (3) corrupt JSONL last lines auto-repaired on startup
+- **Files**: `src/db/db.py`, `src/lifecycle.py`, `src/workspace_integrity.py`
+
+### Resolved: Diagnostic errors — dependency checker, embeddings, config schema, sender_id (2026-05-06)
+- **Resolved**: 2026-05-06
+- **Resolution**: Six diagnostic bugs fixed: package name normalization, encoding_format for embeddings, config schema field sync, sender_id AttributeError (212 occurrences), embedding probe for non-OpenAI providers
+- **Files**: `src/dependency_check.py`, `src/vector_memory/__init__.py`, `src/config/config_schema_defs.py`, `src/bot/`, `src/diagnose.py`
 
 ## Codebase References
 

@@ -13,12 +13,14 @@ Security measures:
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, TYPE_CHECKING
 
 from src.security.audit import audit_log
 from src.security.path_validator import PathSecurityError, validate_path
 from src.skills.base import BaseSkill, validate_input
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 

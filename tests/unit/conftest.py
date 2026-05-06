@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.bot import Bot, BotConfig
+from src.bot import Bot, BotConfig, BotDeps
 from src.channels.base import IncomingMessage
 
 
@@ -50,9 +50,7 @@ def mock_llm() -> AsyncMock:
 def mock_memory() -> AsyncMock:
     """AsyncMock Memory with workspace/memory stubs."""
     memory = AsyncMock()
-    memory.ensure_workspace = MagicMock(
-        return_value=Path("/tmp/workspace/chat_123")
-    )
+    memory.ensure_workspace = MagicMock(return_value=Path("/tmp/workspace/chat_123"))
     memory.read_memory = AsyncMock(return_value="")
     memory.read_agents_md = AsyncMock(return_value="")
     return memory
@@ -107,12 +105,14 @@ def bot(
         system_prompt_prefix="",
     )
     return Bot(
-        config=cfg,
-        db=mock_db,
-        llm=mock_llm,
-        memory=mock_memory,
-        skills=mock_skills,
-        dedup=mock_dedup,
+        BotDeps(
+            config=cfg,
+            db=mock_db,
+            llm=mock_llm,
+            memory=mock_memory,
+            skills=mock_skills,
+            dedup=mock_dedup,
+        )
     )
 
 

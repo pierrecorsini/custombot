@@ -173,7 +173,9 @@ class MtimeCache:
         cached_mtime = cached[0] if cached else None
         try:
             mtime, content = await asyncio.to_thread(
-                _stat_and_read, path, cached_mtime,
+                _stat_and_read,
+                path,
+                cached_mtime,
             )
         except OSError as exc:
             raise OSError(f"Read failed for {path}: {exc}") from exc
@@ -323,7 +325,8 @@ class Memory:
     async def read_memory(self, chat_id: str) -> Optional[str]:
         """Return the contents of MEMORY.md, or None if it doesn't exist."""
         content = await self._memory_cache.read(
-            chat_id, self._chat_dir(chat_id) / MEMORY_FILENAME,
+            chat_id,
+            self._chat_dir(chat_id) / MEMORY_FILENAME,
         )
         if content is None:
             return None
@@ -476,7 +479,9 @@ class Memory:
         return result
 
     async def arepair_memory_file(
-        self, chat_id: str, backup: bool = True,
+        self,
+        chat_id: str,
+        backup: bool = True,
     ) -> MemoryCorruptionResult:
         """Async counterpart of _repair_memory_file_sync — offloads I/O to a thread."""
         result = await asyncio.to_thread(self.detect_memory_corruption, chat_id)
@@ -553,7 +558,8 @@ class Memory:
     async def read_agents_md(self, chat_id: str) -> str:
         """Return AGENTS.md content (system persona / extra instructions)."""
         content = await self._agents_cache.read(
-            chat_id, self._chat_dir(chat_id) / AGENTS_FILENAME,
+            chat_id,
+            self._chat_dir(chat_id) / AGENTS_FILENAME,
         )
         if content is None:
             raise FileNotFoundError(
@@ -618,9 +624,7 @@ class Memory:
         entry_lines.append("")
         entry = "\n".join(entry_lines)
 
-        await asyncio.to_thread(
-            self._write_recovery_log_sync, recovery_path, entry
-        )
+        await asyncio.to_thread(self._write_recovery_log_sync, recovery_path, entry)
 
         log.info(
             "Logged recovery event for chat %s: %d total entries recovered",

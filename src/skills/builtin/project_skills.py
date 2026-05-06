@@ -12,14 +12,16 @@ for dependency injection and not-found checks.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from src.project.dates import fmt_ts
-from src.project.graph import ProjectGraph
-from src.project.recall import ProjectRecall
-from src.project.store import ProjectStore
 from src.skills.base import BaseSkill, validate_input
+
+if TYPE_CHECKING:
+    from src.project.graph import ProjectGraph
+    from src.project.store import ProjectStore
+    from src.project.recall import ProjectRecall
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 

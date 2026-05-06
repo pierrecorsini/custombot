@@ -1,5 +1,5 @@
 """
-Tests for src/config/config_schema.py — URI format validation.
+Tests for URI format validation in config_schema_defs.py.
 
 Verifies that the hand-rolled validator enforces format: "uri" on base_url,
 accepting valid URIs and rejecting malformed ones per RFC 3986.
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.config.config_schema import validate_config_dict
+from src.config.config_schema_defs import validate_config_dict
 
 
 def _make_config(base_url: str) -> dict:
@@ -74,7 +74,9 @@ def test_invalid_uri_rejected(uri: str) -> None:
 
 def test_empty_string_base_url_passes() -> None:
     result = validate_config_dict(_make_config(""))
-    assert result["valid"], f"Empty base_url should pass (means provider default), got: {result['errors']}"
+    assert result["valid"], (
+        f"Empty base_url should pass (means provider default), got: {result['errors']}"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

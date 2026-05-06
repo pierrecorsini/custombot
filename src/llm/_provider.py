@@ -36,6 +36,7 @@ from typing import (
 if TYPE_CHECKING:
     from src.config import LLMConfig
 
+from src.constants.llm import DEFAULT_PER_CHAT_TOKEN_TRACKING_SIZE
 from src.utils.locking import ThreadLock
 
 if TYPE_CHECKING:
@@ -62,18 +63,21 @@ class TokenUsage:
     completion_tokens: int = 0
     total_tokens: int = 0
     request_count: int = 0
+    # Maximum distinct chat_ids tracked before LRU half-eviction.
+    max_per_chat_size: int = DEFAULT_PER_CHAT_TOKEN_TRACKING_SIZE
     _lock: ThreadLock = field(default_factory=ThreadLock, repr=False)
     # Per-chat token tracking — bounded LRU with half-eviction policy.
-    _per_chat: dict[str, dict[str, int]] = field(
-        default_factory=lambda: _make_per_chat_map(),
-        repr=False,
-    )
+    # Initialized in __post_init__ from max_per_chat_size.
+    _per_chat: dict[str, dict[str, int]] = field(init=False, repr=False)
     # Pre-sorted leaderboard: (total_tokens, chat_id) ascending.
     # Updated incrementally in add_for_chat() via bisect — O(log n) search.
     _leaderboard: list[tuple[int, str]] = field(default_factory=list, repr=False)
     # Reverse index: chat_id -> set of totals present in _leaderboard.
     # Enables O(k·log n) purge instead of O(n) full scan.
     _leaderboard_idx: dict[str, set[int]] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        self._per_chat = _make_per_chat_map(self.max_per_chat_size)
 
     def to_dict(self) -> Dict[str, int]:
         """Convert to dictionary for serialization."""
@@ -148,7 +152,7 @@ class TokenUsage:
             return result
 
 
-def _make_per_chat_map() -> dict[str, dict[str, int]]:
+def _make_per_chat_map(max_size: int = DEFAULT_PER_CHAT_TOKEN_TRACKING_SIZE) -> dict[str, dict[str, int]]:
     """Factory for the per-chat LRU tracking dict.
 
     Uses ``BoundedOrderedDict`` when available (production); falls back to a
@@ -158,7 +162,7 @@ def _make_per_chat_map() -> dict[str, dict[str, int]]:
     try:
         from src.utils import BoundedOrderedDict
 
-        return BoundedOrderedDict(max_size=1000, eviction="half")  # type: ignore[arg-type]
+        return BoundedOrderedDict(max_size=max_size, eviction="half")  # type: ignore[arg-type]
     except ImportError:
         return {}
 

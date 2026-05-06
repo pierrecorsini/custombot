@@ -12,7 +12,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from src.constants import SCHEDULER_HMAC_SIG_EXT
-from src.db.db import _validate_chat_id
+from src.utils.validation import _validate_chat_id
 from src.security.signing import (
     get_scheduler_secret,
     read_signature_file,
@@ -91,5 +91,5 @@ def write_tasks_file(path: Path, data: list[dict]) -> None:
 def read_tasks_file(path: Path) -> str | None:
     """Synchronous helper: check exists + read (runs in thread pool)."""
     if path.exists():
-        return path.read_text()
+        return path.read_text(encoding="utf-8")
     return None

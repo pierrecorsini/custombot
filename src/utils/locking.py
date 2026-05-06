@@ -81,8 +81,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from types import TracebackType
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 __all__ = ["AsyncLock", "ThreadLock", "AsyncLockMixin", "ThreadLockMixin"]
 

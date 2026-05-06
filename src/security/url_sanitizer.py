@@ -39,14 +39,16 @@ def sanitize_url_for_logging(url: str | None) -> str:
     try:
         parsed = urlparse(url)
         # Rebuild with empty query and fragment
-        sanitized = urlunparse((
-            parsed.scheme,
-            parsed.netloc,
-            parsed.path,
-            "",   # params
-            "",   # query  ← this is where API keys can hide
-            "",   # fragment
-        ))
+        sanitized = urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                "",  # params
+                "",  # query  ← this is where API keys can hide
+                "",  # fragment
+            )
+        )
         return sanitized
     except Exception:
         # If parsing fails for any reason, return a safe placeholder

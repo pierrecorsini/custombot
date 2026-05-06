@@ -51,9 +51,7 @@ class StreamAccumulator:
     _accumulated_content: str = field(default="", init=False, repr=False)
     _buffered_chunk: str = field(default="", init=False, repr=False)
     _finish_reason: Optional[str] = field(default=None, init=False, repr=False)
-    _tool_calls_data: list[dict[str, str]] = field(
-        default_factory=list, init=False, repr=False
-    )
+    _tool_calls_data: list[dict[str, str]] = field(default_factory=list, init=False, repr=False)
     _usage_data: Any = field(default=None, init=False, repr=False)
     _role: str = field(default="assistant", init=False, repr=False)
 

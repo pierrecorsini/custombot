@@ -18,6 +18,7 @@ import os
 import platform
 import shutil
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -193,7 +194,7 @@ def check_config_schema(config_path: Path) -> CheckResult:
         )
 
     try:
-        from src.config.config_schema import validate_config_dict
+        from src.config.config_schema_defs import validate_config_dict
 
         with open(config_path, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -206,9 +207,7 @@ def check_config_schema(config_path: Path) -> CheckResult:
                 message="All fields valid",
             )
 
-        errors_summary = "; ".join(
-            f"{e['path']}: {e['message']}" for e in result["errors"][:5]
-        )
+        errors_summary = "; ".join(f"{e['path']}: {e['message']}" for e in result["errors"][:5])
         return CheckResult(
             name="Config schema",
             passed=False,
@@ -327,25 +326,74 @@ async def check_llm_connectivity(config_path: Path) -> CheckResult:
 
 
 async def check_embedding_model(config_path: Path) -> CheckResult:
-    """Test embedding API reachability with a single embedding call."""
+    """Test embedding API reachability with a single embedding call.
 
-    async def _probe(client: Any, cfg: Any) -> _ProbeSuccess:
-        response = await client.embeddings.create(
-            model=cfg.llm.embedding_model,
-            input="health",
-        )
-        dims = len(response.data[0].embedding) if response.data else 0
-        return _ProbeSuccess(
-            message=f"Embedding API reachable (model={cfg.llm.embedding_model}, dims={dims})",
-            details={"dimensions": dims},
+    Uses the dedicated embedding base_url and api_key when configured,
+    falling back to the shared LLM credentials otherwise.
+    """
+    import time
+
+    from openai import AsyncOpenAI
+
+    try:
+        from src.config import load_config
+
+        cfg = load_config(config_path)
+    except Exception as exc:
+        return CheckResult(
+            name="Embedding model",
+            passed=False,
+            message=f"Cannot load config: {exc}",
         )
 
-    return await _probe_api_endpoint(
-        config_path,
-        check_name="Embedding model",
-        probe_fn=_probe,
-        timeout_label="Embedding API",
+    # Resolve embedding-specific credentials
+    embed_base_url = cfg.llm.embedding_base_url or cfg.llm.base_url
+    embed_api_key = cfg.llm.embedding_api_key or os.environ.get(
+        "OPENAI_API_KEY", cfg.llm.api_key
     )
+
+    if not embed_api_key or embed_api_key.startswith("sk-your"):
+        return CheckResult(
+            name="Embedding model",
+            passed=False,
+            message="Skipped — no valid API key for embeddings",
+        )
+
+    client: AsyncOpenAI | None = None
+    start = time.perf_counter()
+    try:
+        client = AsyncOpenAI(api_key=embed_api_key, base_url=embed_base_url)
+        response = await asyncio.wait_for(
+            client.embeddings.create(
+                model=cfg.llm.embedding_model,
+                input="health",
+                encoding_format="float",
+            ),
+            timeout=10.0,
+        )
+        latency_ms = (time.perf_counter() - start) * 1000
+        dims = len(response.data[0].embedding) if response.data else 0
+        return CheckResult(
+            name="Embedding model",
+            passed=True,
+            message=f"Embedding API reachable (model={cfg.llm.embedding_model}, dims={dims})",
+            details={"dimensions": dims, "latency_ms": round(latency_ms, 2)},
+        )
+    except TimeoutError:
+        return CheckResult(
+            name="Embedding model",
+            passed=False,
+            message="Embedding API timeout after 10s",
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="Embedding model",
+            passed=False,
+            message=f"Failed: {type(exc).__name__}",
+        )
+    finally:
+        if client is not None:
+            await client.close()
 
 
 def check_workspace_dir(config_path: Path) -> CheckResult:
@@ -541,11 +589,11 @@ def check_orphaned_workspace_dirs(config_path: Path) -> CheckResult:
             name="Orphaned workspace dirs",
             passed=False,
             message=f"{len(orphans)} orphaned director{'y' if len(orphans) == 1 else 'ies'} found "
-                    f"(scanned {scanned})",
+            f"(scanned {scanned})",
             details={
                 "orphans": shown,
                 "total_orphans": len(orphans),
-                "hint": "Orphaned directories can be safely deleted if the session is no longer needed",
+                "hint": "Run 'python main.py diagnose --cleanup' to remove orphaned directories",
             },
         )
 
@@ -554,6 +602,63 @@ def check_orphaned_workspace_dirs(config_path: Path) -> CheckResult:
         passed=True,
         message=f"All {scanned} director{'y' if scanned == 1 else 'ies'} healthy",
     )
+
+
+def cleanup_orphaned_workspace_dirs() -> int:
+    """Find and remove truly orphaned workspace directories after user confirmation.
+
+    Only deletes directories where BOTH conditions hold:
+      - Missing the ``.chat_id`` origin file, AND
+      - No corresponding JSONL message file exists.
+
+    Returns the number of directories removed.
+    """
+    from rich.prompt import Confirm
+
+    workspace = Path(WORKSPACE_DIR)
+    whatsapp_data = workspace / "whatsapp_data"
+
+    if not whatsapp_data.exists():
+        cli_output.dim("No workspace/whatsapp_data/ directory found — nothing to clean up.")
+        return 0
+
+    messages_dir = workspace / ".data" / "messages"
+    orphans: list[Path] = []
+
+    for entry in sorted(whatsapp_data.iterdir()):
+        if not entry.is_dir():
+            continue
+        has_chat_id = (entry / ".chat_id").exists()
+        has_jsonl = (messages_dir / f"{entry.name}.jsonl").exists()
+        if not has_chat_id and not has_jsonl:
+            orphans.append(entry)
+
+    if not orphans:
+        cli_output.success("No orphaned directories to clean up.")
+        return 0
+
+    cli_output.warning(
+        f"Found {len(orphans)} orphaned director{'y' if len(orphans) == 1 else 'ies'}:"
+    )
+    for orphan in orphans[:20]:
+        cli_output.dim(f"  • {orphan.name}")
+    if len(orphans) > 20:
+        cli_output.dim(f"  ... and {len(orphans) - 20} more")
+
+    if not Confirm.ask("Delete these directories?", default=False):
+        cli_output.dim("Cleanup cancelled.")
+        return 0
+
+    removed = 0
+    for orphan in orphans:
+        try:
+            shutil.rmtree(orphan)
+            removed += 1
+        except OSError as exc:
+            cli_output.warning(f"Failed to remove {orphan.name}: {exc}")
+
+    cli_output.success(f"Removed {removed} orphaned director{'y' if removed == 1 else 'ies'}.")
+    return removed
 
 
 def check_routing_rules(config_path: Path) -> CheckResult:
@@ -662,6 +767,111 @@ def check_dependencies(config_path: Path) -> CheckResult:
         )
 
 
+def check_whatsapp_session(config_path: Path) -> CheckResult:
+    """Check WhatsApp session DB exists, is valid SQLite, and not stale.
+
+    Validates the neonize/whatsmeow session database that stores the
+    device pairing credentials. A missing or corrupted DB means the bot
+    cannot connect without re-scanning the QR code.
+    """
+    import sqlite3
+
+    # Resolve db_path from config if possible
+    db_path: Path | None = None
+    try:
+        from src.config import load_config
+
+        cfg = load_config(config_path)
+        db_path = Path(cfg.whatsapp.neonize.db_path)
+        # db_path is relative to project root, not workspace/
+    except Exception:
+        # Fallback: try default location
+        db_path = Path("workspace") / "whatsapp_session.db"
+
+    if db_path is None or not db_path.exists():
+        return CheckResult(
+            name="WhatsApp session",
+            passed=False,
+            message=f"Session DB not found: {db_path}",
+            details={
+                "hint": (
+                    "Run 'python main.py start' to create a new session "
+                    "(requires QR scan from WhatsApp)"
+                ),
+            },
+        )
+
+    # Check file size (empty DB = broken)
+    size = db_path.stat().st_size
+    if size == 0:
+        return CheckResult(
+            name="WhatsApp session",
+            passed=False,
+            message="Session DB is empty (0 bytes)",
+            details={"hint": "Delete the empty file and re-run start to re-pair"},
+        )
+
+    # Check it's actually readable SQLite
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            table_names = [t[0] for t in tables]
+        finally:
+            conn.close()
+    except Exception as exc:
+        return CheckResult(
+            name="WhatsApp session",
+            passed=False,
+            message=f"Session DB corrupted: {exc}",
+            details={
+                "hint": (
+                    "Delete the corrupted DB and re-run start to re-pair. Backup first if needed."
+                ),
+            },
+        )
+
+    # Check last modification time
+    import datetime
+
+    mtime = datetime.datetime.fromtimestamp(db_path.stat().st_mtime, tz=datetime.timezone.utc)
+    age_hours = (time.time() - db_path.stat().st_mtime) / 3600
+
+    details: dict[str, Any] = {
+        "size_bytes": size,
+        "tables": len(table_names),
+        "last_modified": mtime.isoformat(),
+        "age_hours": round(age_hours, 1),
+    }
+
+    # Stale warning: session not modified in 7+ days (WhatsApp may
+    # have invalidated the linked device on the phone side)
+    if age_hours > 168:
+        return CheckResult(
+            name="WhatsApp session",
+            passed=True,
+            message=(
+                f"Session DB valid but stale ({age_hours:.0f}h since last write). "
+                "WhatsApp may have invalidated this linked device."
+            ),
+            details={
+                **details,
+                "hint": (
+                    "If the bot connects but receives no messages, the linked "
+                    "device may have been removed from your phone. Delete the "
+                    "session DB and re-scan the QR code."
+                ),
+            },
+        )
+
+    return CheckResult(
+        name="WhatsApp session",
+        passed=True,
+        message=f"Valid ({size} bytes, {len(table_names)} tables, {age_hours:.1f}h old)",
+        details=details,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Report runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -683,6 +893,7 @@ async def run_diagnose(config_path: Path) -> DiagnoseReport:
         check_routing_rules,
         check_python_env,
         check_dependencies,
+        check_whatsapp_session,
     ]
 
     for check_fn in sync_checks:
@@ -713,21 +924,24 @@ def print_report(report: DiagnoseReport) -> None:
 
     cli_output.separator()
     if report.all_passed:
-        cli_output.success(
-            f"All {report.total} checks passed — everything looks good!"
-        )
+        cli_output.success(f"All {report.total} checks passed — everything looks good!")
     else:
         cli_output.warning(
-            f"{report.passed}/{report.total} checks passed, "
-            f"{report.failed} issue(s) found"
+            f"{report.passed}/{report.total} checks passed, {report.failed} issue(s) found"
         )
-        cli_output.dim(
-            "Fix the issues above, then re-run 'python main.py diagnose' to verify."
-        )
+        cli_output.dim("Fix the issues above, then re-run 'python main.py diagnose' to verify.")
 
 
-def run_diagnose_cli(config_path: Path) -> None:
+def run_diagnose_cli(config_path: Path, *, cleanup: bool = False) -> None:
     """Entry point for the CLI diagnose command."""
     report = asyncio.run(run_diagnose(config_path))
     print_report(report)
+
+    if cleanup:
+        orphan_check = next(
+            (c for c in report.checks if c.name == "Orphaned workspace dirs"), None
+        )
+        if orphan_check and not orphan_check.passed:
+            cleanup_orphaned_workspace_dirs()
+
     sys.exit(0 if report.all_passed else 1)

@@ -13,14 +13,24 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, fields
-from pathlib import Path
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from src.config import Config, LLMConfig, MiddlewareConfig, NeonizeConfig, ShellConfig, WhatsAppConfig
+from src.config import (
+    Config,
+    LLMConfig,
+    MiddlewareConfig,
+    NeonizeConfig,
+    ShellConfig,
+    WhatsAppConfig,
+)
 from src.config.config import _from_dict, load_config, save_config
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,7 +103,9 @@ class TestConfigRoundTrip:
         # Compare the full dataclass dicts (excludes repr, methods, etc.)
         assert asdict(loaded) == asdict(original)
 
-    def test_optional_max_tokens_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_optional_max_tokens_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """max_tokens=None (the default) round-trips correctly."""
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
@@ -223,7 +235,9 @@ class TestConfigRoundTrip:
         for f in fields(Config):
             orig_val = getattr(original, f.name)
             load_val = getattr(loaded, f.name)
-            assert orig_val == load_val, f"Mismatch on Config.{f.name}: {orig_val!r} != {load_val!r}"
+            assert orig_val == load_val, (
+                f"Mismatch on Config.{f.name}: {orig_val!r} != {load_val!r}"
+            )
 
         # Also walk LLMConfig fields
         for f in fields(LLMConfig):
@@ -239,9 +253,9 @@ class TestConfigRoundTrip:
 
         # And NeonizeConfig fields
         for f in fields(NeonizeConfig):
-            assert getattr(original.whatsapp.neonize, f.name) == getattr(loaded.whatsapp.neonize, f.name), (
-                f"Mismatch on NeonizeConfig.{f.name}"
-            )
+            assert getattr(original.whatsapp.neonize, f.name) == getattr(
+                loaded.whatsapp.neonize, f.name
+            ), f"Mismatch on NeonizeConfig.{f.name}"
 
     def test_round_trip_preserves_unicode(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -417,7 +431,9 @@ class TestConfigUnknownKeyWarnings:
     def _write_config(data: dict, path: Path) -> None:
         path.write_text(json.dumps(data), encoding="utf-8")
 
-    def test_typo_gets_did_you_mean_suggestion(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    def test_typo_gets_did_you_mean_suggestion(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """A typo like 'temperture' suggests 'temperature' via fuzzy match."""
         from src.config.config import _check_unknown_keys
 
@@ -431,11 +447,16 @@ class TestConfigUnknownKeyWarnings:
         with caplog.at_level("WARNING"):
             _check_unknown_keys(data, config_path)
 
-        assert any("did you mean" in r.message.lower() and "temperature" in r.message.lower() for r in caplog.records), (
+        assert any(
+            "did you mean" in r.message.lower() and "temperature" in r.message.lower()
+            for r in caplog.records
+        ), (
             f"Expected 'did you mean … temperature' warning, got: {[r.message for r in caplog.records]}"
         )
 
-    def test_unknown_key_no_match_gets_not_recognised(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    def test_unknown_key_no_match_gets_not_recognised(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """A completely unfamiliar key logs 'not recognised'."""
         from src.config.config import _check_unknown_keys
 
@@ -449,11 +470,16 @@ class TestConfigUnknownKeyWarnings:
         with caplog.at_level("WARNING"):
             _check_unknown_keys(data, config_path)
 
-        assert any("not recognised" in r.message.lower() and "xylophone" in r.message.lower() for r in caplog.records), (
+        assert any(
+            "not recognised" in r.message.lower() and "xylophone" in r.message.lower()
+            for r in caplog.records
+        ), (
             f"Expected 'not recognised … xylophone' warning, got: {[r.message for r in caplog.records]}"
         )
 
-    def test_top_level_typo_gets_suggestion(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    def test_top_level_typo_gets_suggestion(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """A top-level typo like 'lod_history' suggests 'load_history'."""
         from src.config.config import _check_unknown_keys
 
@@ -467,7 +493,10 @@ class TestConfigUnknownKeyWarnings:
         with caplog.at_level("WARNING"):
             _check_unknown_keys(data, config_path)
 
-        assert any("did you mean" in r.message.lower() and "load_history" in r.message.lower() for r in caplog.records), (
+        assert any(
+            "did you mean" in r.message.lower() and "load_history" in r.message.lower()
+            for r in caplog.records
+        ), (
             f"Expected 'did you mean … load_history' warning, got: {[r.message for r in caplog.records]}"
         )
 
@@ -488,13 +517,19 @@ class TestConfigUnknownKeyWarnings:
         unknown_warnings = [r for r in caplog.records if "unknown config key" in r.message.lower()]
         assert unknown_warnings == []
 
-    def test_schema_dollar_key_ignored(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    def test_schema_dollar_key_ignored(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """The '$schema' metadata key does not trigger a warning."""
         from src.config.config import _check_unknown_keys
 
         config_path = tmp_path / "config.json"
         self._write_config(
-            {"$schema": "https://example.com/schema", "llm": {"model": "gpt-4o"}, "whatsapp": {"provider": "neonize"}},
+            {
+                "$schema": "https://example.com/schema",
+                "llm": {"model": "gpt-4o"},
+                "whatsapp": {"provider": "neonize"},
+            },
             config_path,
         )
 
@@ -520,68 +555,80 @@ _safe_float = st.floats(
 
 # ── Sub-config dict strategies ────────────────────────────────────────────────
 
-_neonize_dicts = st.fixed_dictionaries({
-    "db_path": st.text(min_size=1, max_size=300),
-})
+_neonize_dicts = st.fixed_dictionaries(
+    {
+        "db_path": st.text(min_size=1, max_size=300),
+    }
+)
 
-_shell_dicts = st.fixed_dictionaries({
-    "command_denylist": st.lists(st.text(min_size=1, max_size=100), max_size=10),
-    "command_allowlist": st.lists(st.text(min_size=1, max_size=100), max_size=10),
-})
+_shell_dicts = st.fixed_dictionaries(
+    {
+        "command_denylist": st.lists(st.text(min_size=1, max_size=100), max_size=10),
+        "command_allowlist": st.lists(st.text(min_size=1, max_size=100), max_size=10),
+    }
+)
 
-_middleware_dicts = st.fixed_dictionaries({
-    "middleware_order": st.lists(st.text(min_size=1, max_size=80), max_size=10),
-    "extra_middleware_paths": st.lists(st.text(min_size=1, max_size=120), max_size=10),
-})
+_middleware_dicts = st.fixed_dictionaries(
+    {
+        "middleware_order": st.lists(st.text(min_size=1, max_size=80), max_size=10),
+        "extra_middleware_paths": st.lists(st.text(min_size=1, max_size=120), max_size=10),
+    }
+)
 
-_llm_dicts = st.fixed_dictionaries({
-    "model": st.text(min_size=1, max_size=100),
-    "base_url": st.text(min_size=0, max_size=200),
-    "api_key": st.text(min_size=0, max_size=100),
-    "temperature": _safe_float,
-    "max_tokens": st.one_of(st.none(), st.integers(min_value=1, max_value=128_000)),
-    "timeout": _safe_float,
-    "system_prompt_prefix": st.text(min_size=0, max_size=500),
-    "max_tool_iterations": st.integers(min_value=1, max_value=50),
-    "embedding_model": st.text(min_size=1, max_size=100),
-    "embedding_dimensions": st.integers(min_value=1, max_value=8192),
-    "embedding_base_url": st.text(min_size=0, max_size=200),
-    "embedding_api_key": st.text(min_size=0, max_size=100),
-    "stream_response": st.booleans(),
-})
+_llm_dicts = st.fixed_dictionaries(
+    {
+        "model": st.text(min_size=1, max_size=100),
+        "base_url": st.text(min_size=0, max_size=200),
+        "api_key": st.text(min_size=0, max_size=100),
+        "temperature": _safe_float,
+        "max_tokens": st.one_of(st.none(), st.integers(min_value=1, max_value=128_000)),
+        "timeout": _safe_float,
+        "system_prompt_prefix": st.text(min_size=0, max_size=500),
+        "max_tool_iterations": st.integers(min_value=1, max_value=50),
+        "embedding_model": st.text(min_size=1, max_size=100),
+        "embedding_dimensions": st.integers(min_value=1, max_value=8192),
+        "embedding_base_url": st.text(min_size=0, max_size=200),
+        "embedding_api_key": st.text(min_size=0, max_size=100),
+        "stream_response": st.booleans(),
+    }
+)
 
-_whatsapp_dicts = st.fixed_dictionaries({
-    "provider": st.text(min_size=1, max_size=50),
-    "neonize": _neonize_dicts,
-    "allowed_numbers": st.lists(st.text(min_size=1, max_size=20), max_size=20),
-    "allow_all": st.booleans(),
-})
+_whatsapp_dicts = st.fixed_dictionaries(
+    {
+        "provider": st.text(min_size=1, max_size=50),
+        "neonize": _neonize_dicts,
+        "allowed_numbers": st.lists(st.text(min_size=1, max_size=20), max_size=20),
+        "allow_all": st.booleans(),
+    }
+)
 
 # ── Full Config dict strategy ─────────────────────────────────────────────────
 
-_config_dicts = st.fixed_dictionaries({
-    "llm": _llm_dicts,
-    "whatsapp": _whatsapp_dicts,
-    "shell": _shell_dicts,
-    "middleware": _middleware_dicts,
-    "load_history": st.booleans(),
-    "memory_max_history": st.integers(min_value=1, max_value=10000),
-    "skills_auto_load": st.booleans(),
-    "skills_user_directory": st.text(min_size=0, max_size=300),
-    "log_incoming_messages": st.booleans(),
-    "log_routing_info": st.booleans(),
-    "shutdown_timeout": _safe_float,
-    "log_format": st.sampled_from(["text", "json"]),
-    "log_file": st.text(min_size=0, max_size=300),
-    "log_max_bytes": st.integers(min_value=1024, max_value=100_000_000),
-    "log_backup_count": st.integers(min_value=0, max_value=100),
-    "log_verbosity": st.sampled_from(["quiet", "normal", "verbose"]),
-    "log_llm": st.booleans(),
-    "max_thread_pool_workers": st.one_of(st.none(), st.integers(min_value=1, max_value=256)),
-    "max_chat_lock_cache_size": st.integers(min_value=1, max_value=100_000),
-    "max_chat_lock_eviction_policy": st.sampled_from(["grow", "reject_on_full"]),
-    "max_concurrent_messages": st.integers(min_value=1, max_value=10000),
-})
+_config_dicts = st.fixed_dictionaries(
+    {
+        "llm": _llm_dicts,
+        "whatsapp": _whatsapp_dicts,
+        "shell": _shell_dicts,
+        "middleware": _middleware_dicts,
+        "load_history": st.booleans(),
+        "memory_max_history": st.integers(min_value=1, max_value=10000),
+        "skills_auto_load": st.booleans(),
+        "skills_user_directory": st.text(min_size=0, max_size=300),
+        "log_incoming_messages": st.booleans(),
+        "log_routing_info": st.booleans(),
+        "shutdown_timeout": _safe_float,
+        "log_format": st.sampled_from(["text", "json"]),
+        "log_file": st.text(min_size=0, max_size=300),
+        "log_max_bytes": st.integers(min_value=1024, max_value=100_000_000),
+        "log_backup_count": st.integers(min_value=0, max_value=100),
+        "log_verbosity": st.sampled_from(["quiet", "normal", "verbose"]),
+        "log_llm": st.booleans(),
+        "max_thread_pool_workers": st.one_of(st.none(), st.integers(min_value=1, max_value=256)),
+        "max_chat_lock_cache_size": st.integers(min_value=1, max_value=100_000),
+        "max_chat_lock_eviction_policy": st.sampled_from(["grow", "reject_on_full"]),
+        "max_concurrent_messages": st.integers(min_value=1, max_value=10000),
+    }
+)
 
 
 class TestFromDictPropertyBased:

@@ -15,8 +15,9 @@ import logging
 import socket
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from src.channels.stealth import (
     cooldown_remaining,
@@ -26,10 +27,12 @@ from src.channels.stealth import (
     type_delay,
     typing_pause_duration,
 )
-from src.config import WhatsAppConfig
 from src.ui.cli_output import cli as cli_output
 from src.utils import LRUDict
 from src.utils.retry import BACKOFF_MULTIPLIER, calculate_delay_with_jitter
+
+if TYPE_CHECKING:
+    from src.config import WhatsAppConfig
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +54,38 @@ _CONNECTION_ERROR_MARKERS = (
     "broken pipe",
     "no such session",
 )
+
+# Timeout for the active connection probe (seconds).
+_PROBE_TIMEOUT = 5.0
+
+
+def _generate_waveform(duration_seconds: int) -> bytes:
+    """Generate a fake waveform for WhatsApp voice note display.
+
+    WhatsApp expects a base64-encoded waveform byte array in the
+    ``waveform`` field of ``AudioMessage``. The exact waveform shape
+    is cosmetic — a flat mid-level waveform works fine.
+    """
+    import base64
+
+    # Number of samples proportional to duration (WhatsApp uses ~64 samples)
+    count = max(32, min(64, duration_seconds * 4))
+    # Mid-level amplitude bytes (cosmetic only)
+    samples = bytes([100] * count)
+    return base64.b64encode(samples)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Probe result
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(slots=True)
+class ProbeResult:
+    """Result of an active WhatsApp connection probe."""
+
+    alive: bool
+    reason: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,11 +160,25 @@ def _parse_jid(chat_id: str) -> tuple[str, str]:
 
 
 def _extract_message(ev: Any) -> Optional[dict[str, Any]]:
-    """Extract a normalized message dict from a neonize MessageEv."""
+    """Extract a normalized message dict from a neonize MessageEv.
+
+    Uses ``getattr`` for all protobuf field access so that missing or
+    ``None`` JIDs (e.g. when ``MessageSource.Sender`` is unset in
+    protobuf3) are handled gracefully instead of raising
+    ``AttributeError``.
+    """
     try:
-        info = ev.Info
-        source = info.MessageSource
-        msg = ev.Message
+        info = getattr(ev, "Info", None)
+        if info is None:
+            log.warning("Dropping message: event has no Info field")
+            return None
+
+        source = getattr(info, "MessageSource", None)
+        if source is None:
+            log.warning("Dropping message: Info has no MessageSource field")
+            return None
+
+        msg = getattr(ev, "Message", None)
 
         text = (
             getattr(msg, "conversation", None)
@@ -139,13 +188,20 @@ def _extract_message(ev: Any) -> Optional[dict[str, Any]]:
         if not text:
             return None
 
-        chat_jid = source.Chat  # e.g. "1234567890@s.whatsapp.net" (protobuf JID)
-        sender_jid = source.Sender
+        # JID fields may be None when protobuf3 message-type fields are
+        # unset (e.g. Sender is absent for status/broadcast messages).
+        chat_jid = getattr(source, "Chat", None)
+        sender_jid = getattr(source, "Sender", None)
 
-        # Extract user portion (number) from JID
-        chat_str = f"{chat_jid.User}@{chat_jid.Server}" if chat_jid.User else ""
-        sender_str = f"{sender_jid.User}@{sender_jid.Server}" if sender_jid.User else ""
-        sender_id = sender_jid.User or chat_jid.User or ""
+        # Extract user portion (number) from JID — guard against None JIDs
+        chat_user = getattr(chat_jid, "User", None) or ""
+        chat_server = getattr(chat_jid, "Server", None) or "s.whatsapp.net"
+        sender_user = getattr(sender_jid, "User", None) or ""
+        sender_server = getattr(sender_jid, "Server", None) or "s.whatsapp.net"
+
+        chat_str = f"{chat_user}@{chat_server}" if chat_user else ""
+        sender_str = f"{sender_user}@{sender_server}" if sender_user else ""
+        sender_id = sender_user or chat_user or ""
 
         if not chat_str or not sender_id:
             log.warning(
@@ -155,8 +211,8 @@ def _extract_message(ev: Any) -> Optional[dict[str, Any]]:
             )
             return None
 
-        is_group = source.IsGroup
-        from_me = bool(source.IsFromMe)
+        is_group = getattr(source, "IsGroup", False)
+        from_me = bool(getattr(source, "IsFromMe", False))
         log.debug(
             "Extracted message: chat=%s sender=%s is_group=%s fromMe=%s",
             chat_str,
@@ -165,12 +221,12 @@ def _extract_message(ev: Any) -> Optional[dict[str, Any]]:
             from_me,
         )
         return {
-            "id": info.ID,
+            "id": getattr(info, "ID", ""),
             "chat_id": chat_str,
             "sender_id": sender_id,
-            "sender_name": info.Pushname or "",
+            "sender_name": getattr(info, "Pushname", None) or "",
             "text": text,
-            "timestamp": info.Timestamp,
+            "timestamp": getattr(info, "Timestamp", 0),
             "fromMe": from_me,
             "toMe": not is_group and (not from_me or sender_str == chat_str),
         }
@@ -213,6 +269,32 @@ class _RateLimitFilter(logging.Filter):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# whatsmeow error handler (sets flag for watchdog probe)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _WhatsmeowErrorHandler(logging.Handler):
+    """Bridge whatsmeow WARNING+ logs to NeonizeBackend's error flag.
+
+    When whatsmeow logs a warning (untrusted identity, decrypt failure,
+    unexpected content, etc.), this handler sets a flag that the watchdog
+    reads on its next cycle. The watchdog then runs an active connection
+    probe and reconnects if the pipe is dead — purely event-driven.
+    """
+
+    def __init__(self, backend: NeonizeBackend) -> None:
+        super().__init__(logging.WARNING)
+        self._backend = backend
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno >= logging.WARNING:
+            self._backend._whatsmeow_error_flag = True
+
+    def __repr__(self) -> str:
+        return "<_WhatsmeowErrorHandler>"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # NeonizeBackend
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -244,8 +326,21 @@ class NeonizeBackend:
         # Bounded LRU cache for resolved JIDs — avoids redundant string
         # parsing and .chat_id file reads on every send/typing call.
         self._jid_cache: LRUDict = LRUDict(max_size=500)
+        # Diagnostic counters (thread-safe under GIL for simple increments)
+        self._messages_received: int = 0
+        self._last_probe_result: Optional[ProbeResult] = None
+        # Flag set from the whatsmeow thread when a non-trivial error occurs
+        # (untrusted identity, decrypt failure, etc.). The watchdog reads it
+        # from the asyncio thread to trigger a connection probe — event-driven,
+        # not timer-based.
+        self._whatsmeow_error_flag: bool = False
         # Rate-limit whatsmeow's internal reconnect-error spam (once per minute)
-        logging.getLogger("whatsmeow.Client").addFilter(_RateLimitFilter())
+        whatsmeow_logger = logging.getLogger("whatsmeow.Client")
+        whatsmeow_logger.addFilter(_RateLimitFilter())
+        # Install a handler that sets _whatsmeow_error_flag on WARNING+ events
+        # from whatsmeow. The watchdog reads this flag to trigger an active
+        # connection probe — event-driven, not timer-based.
+        whatsmeow_logger.addHandler(_WhatsmeowErrorHandler(self))
 
     @property
     def is_connected(self) -> bool:
@@ -262,6 +357,75 @@ class NeonizeBackend:
     def is_ready(self) -> bool:
         """True once the connection callback has fired (message loop is live)."""
         return self._ready_event.is_set()
+
+    @property
+    def messages_received(self) -> int:
+        """Total messages received since backend creation."""
+        return self._messages_received
+
+    @property
+    def connected_since(self) -> float:
+        """Timestamp of the last successful connection (0.0 if never connected)."""
+        return self._connected_at
+
+    def connection_diagnostics(self) -> dict[str, Any]:
+        """Return a snapshot of connection state for health endpoints and logging.
+
+        Not a probe — purely reads current state without sending data.
+        """
+        return {
+            "connected": self.is_connected,
+            "ready": self.is_ready,
+            "connected_since": self._connected_at,
+            "uptime_seconds": time.time() - self._connected_at if self._connected_at else 0,
+            "messages_received": self._messages_received,
+            "last_probe_alive": self._last_probe_result.alive if self._last_probe_result else None,
+            "last_probe_reason": self._last_probe_result.reason
+            if self._last_probe_result
+            else None,
+        }
+
+    async def probe_connection(self) -> ProbeResult:
+        """Actively test the WhatsApp pipe by sending data through it.
+
+        Sends a chat presence update (typing paused) through the live WebSocket.
+        If the underlying connection is dead (zombie state), this will fail or
+        timeout.  This is NOT a timer-based heuristic — it's a real outbound test.
+
+        Call this on-demand: from the health endpoint, after whatsmeow errors,
+        or when the user wants to verify connectivity.
+        """
+        if self._client is None or not self.is_connected:
+            result = ProbeResult(alive=False, reason="Client not connected")
+            self._last_probe_result = result
+            return result
+
+        try:
+            from neonize.utils.enum import ChatPresence, ChatPresenceMedia
+
+            # Send presence to "status@broadcast" — a built-in JID that's
+            # always available. The goal is testing the outbound pipe, not
+            # actually notifying anyone.
+            jid = _build_jid("status", "broadcast")
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._client.send_chat_presence,
+                    jid,
+                    ChatPresence.CHAT_PRESENCE_PAUSED,
+                    ChatPresenceMedia.CHAT_PRESENCE_MEDIA_TEXT,
+                ),
+                timeout=_PROBE_TIMEOUT,
+            )
+            result = ProbeResult(alive=True)
+        except TimeoutError:
+            result = ProbeResult(alive=False, reason=f"Probe timed out ({_PROBE_TIMEOUT}s)")
+        except Exception as exc:
+            result = ProbeResult(alive=False, reason=f"{type(exc).__name__}: {exc}")
+
+        self._last_probe_result = result
+        if not result.alive:
+            log.warning("WhatsApp connection probe failed: %s", result.reason)
+        return result
 
     def _resolve_jid(self, chat_id: str) -> Any:
         """Resolve a chat_id string to a neonize JID object (cached).
@@ -330,6 +494,7 @@ class NeonizeBackend:
             msg = _extract_message(ev)
             if msg is None or self._loop is None:
                 return
+            self._messages_received += 1
             # A message is historical if it arrived before the connected callback fired
             if not self._ready_event.is_set():
                 msg["is_historical"] = True
@@ -482,12 +647,34 @@ class NeonizeBackend:
         Uses a generation counter so stale watchdogs from old start() calls
         exit cleanly when a new client is created.
 
+        After whatsmeow errors (untrusted identity, decrypt failures, etc.),
+        actively probes the connection. If the probe fails, triggers a
+        reconnect — event-driven, not timer-based.
+
         Reconnection attempts use exponential backoff with jitter to avoid
         overwhelming the WhatsApp server during sustained outages. The backoff
         resets on successful reconnection or when already connected.
         """
         while self._watchdog_gen == gen and self._client is not None:
             await asyncio.sleep(_WATCHDOG_INTERVAL)
+
+            # Event-driven probe: whatsmeow logged a warning since last cycle
+            if self._whatsmeow_error_flag and self.is_connected:
+                self._whatsmeow_error_flag = False
+                log.info("whatsmeow error detected — probing connection...")
+                probe = await self.probe_connection()
+                if not probe.alive:
+                    log.warning(
+                        "Connection probe failed after whatsmeow error: %s — reconnecting",
+                        probe.reason,
+                    )
+                    try:
+                        await self._reconnect()
+                        self._reconnect_delay = _WATCHDOG_INTERVAL
+                    except Exception as exc:
+                        log.warning("Post-error reconnect failed: %s", exc)
+                continue
+
             if self.is_connected:
                 if self._network_outage:
                     self._network_outage = False
@@ -583,8 +770,72 @@ class NeonizeBackend:
         """
         if not self.is_connected or self._client is None:
             raise RuntimeError("WhatsApp not connected")
+        if ptt:
+            return await self._send_voice_note(chat_id, file_path)
         jid = self._resolve_jid(chat_id)
         return await asyncio.to_thread(self._client.send_audio, jid, file_path, ptt)
+
+    async def _send_voice_note(self, chat_id: str, file_path: str) -> Any:
+        """Send an OGG/Opus audio as a WhatsApp voice note (PTT).
+
+        Builds the AudioMessage manually with the correct mimetype,
+        streamingSidecar and waveform fields required by WhatsApp mobile
+        clients. The stock neonize ``send_audio`` omits these, causing
+        "audio not available" errors on the receiver's device.
+
+        Args:
+            chat_id: Target chat identifier.
+            file_path: Path to the OGG/Opus audio file.
+
+        Returns:
+            The neonize send result (with message_id attribute).
+        """
+        from io import BytesIO
+
+        import magic
+        from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
+            AudioMessage,
+            ContextInfo,
+            Message,
+        )
+        from neonize.utils.ffmpeg import FFmpeg
+        from neonize.utils.iofile import get_bytes_from_name_or_url
+
+        if not self.is_connected or self._client is None:
+            raise RuntimeError("WhatsApp not connected")
+        jid = self._resolve_jid(chat_id)
+
+        def _build_and_send() -> Any:
+            # Read file bytes
+            buff = get_bytes_from_name_or_url(file_path)
+
+            # Upload to WhatsApp servers
+            upload = self._client.upload(buff)
+
+            # Extract duration via ffprobe
+            with FFmpeg(buff) as ffmpeg:
+                info = ffmpeg.extract_info()
+                duration = int(info.format.duration or 0)
+
+            # Build AudioMessage with required fields for mobile playback
+            audio_msg = AudioMessage(
+                URL=upload.url,
+                mimetype="audio/ogg; codecs=opus",
+                seconds=duration,
+                directPath=upload.DirectPath,
+                fileEncSHA256=upload.FileEncSHA256,
+                fileLength=upload.FileLength,
+                fileSHA256=upload.FileSHA256,
+                mediaKey=upload.MediaKey,
+                PTT=True,
+                streamingSidecar=b"QpmXDsU7YLagdg==",
+                waveform=_generate_waveform(duration),
+                contextInfo=ContextInfo(),
+            )
+            message = Message(audioMessage=audio_msg)
+            return self._client.send_message(jid, message)
+
+        return await asyncio.to_thread(_build_and_send)
 
     async def send_document(
         self,

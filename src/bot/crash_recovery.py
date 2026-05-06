@@ -41,12 +41,12 @@ class MessageHandler(Protocol):
 
 def _resolve_sender_id(queued_msg: QueuedMessage) -> str | None:
     """Return the best available sender identifier, or *None* if absent."""
-    if (
-        hasattr(queued_msg, "sender_id")
-        and isinstance(queued_msg.sender_id, str)
-        and queued_msg.sender_id
-    ):
-        return queued_msg.sender_id
+    # QueuedMessage.sender_id is Optional[str] — check it directly.
+    # The isinstance guard also covers the None case and non-str edge
+    # cases from deserialized queue entries.
+    sender_id = getattr(queued_msg, "sender_id", None)
+    if isinstance(sender_id, str) and sender_id:
+        return sender_id
     return queued_msg.sender_name or None
 
 

@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
 
 from src.constants import MAX_QUEUED_TEXT_LENGTH
-from src.db.db_utils import _validate_chat_id
+from src.utils.validation import _validate_chat_id
 from src.message_queue_buffer import FlushManager
 from src.message_queue_persistence import QueuePersistence
 from src.utils.locking import AsyncLockMixin

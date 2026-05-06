@@ -15,8 +15,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, fields
-from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple, Type, get_type_hints
+from typing import Any, Dict, List, Set, Tuple, Type, get_type_hints, TYPE_CHECKING
 
 from src.config.config_schema_defs import (
     DEPRECATED_OPTIONS,
@@ -25,6 +24,9 @@ from src.config.config_schema_defs import (
 )
 from src.constants import DEFAULT_LLM_TIMEOUT, MAX_TOOL_ITERATIONS, WORKSPACE_DIR
 from src.core.errors import NonCriticalCategory, log_noncritical
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 

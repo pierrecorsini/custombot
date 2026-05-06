@@ -42,33 +42,38 @@ def _parse_requirements(path: Path) -> list[tuple[str, Optional[str]]]:
 
 
 def _pip_installed_versions(package_names: list[str]) -> dict[str, Optional[str]]:
-    """Query pip for currently installed versions of the given packages."""
+    """Query pip for currently installed versions of the given packages.
+
+    Uses ``pip list --format=json`` which reliably returns all installed
+    packages regardless of count — unlike ``pip show <names>`` which can
+    silently drop packages when given many names at once (Windows issue).
+    """
     if not package_names:
         return {}
-    cmd = [sys.executable, "-m", "pip", "show"] + package_names
+
+    # Build a normalized lookup from pip list (name_with_underscores -> version)
+    installed_map: dict[str, str] = {}
     try:
         result = subprocess.run(
-            cmd,
+            [sys.executable, "-m", "pip", "list", "--format=json"],
             capture_output=True,
             text=True,
             timeout=30,
         )
-    except OSError:
+        if result.returncode == 0:
+            import json
+
+            for entry in json.loads(result.stdout):
+                normalized = entry["name"].lower().replace("-", "_")
+                installed_map[normalized] = entry["version"]
+    except (OSError, ValueError, KeyError):
         return {n: None for n in package_names}
 
+    # Map requested names (may use hyphens) to their installed versions
     versions: dict[str, Optional[str]] = {}
-    current_name: Optional[str] = None
-    for raw_line in result.stdout.splitlines():
-        line = raw_line.strip()
-        if line.startswith("Name:"):
-            current_name = line.split(":", 1)[1].strip().lower()
-        elif line.startswith("Version:") and current_name:
-            versions[current_name] = line.split(":", 1)[1].strip()
-            current_name = None
-
-    for n in package_names:
-        if n not in versions:
-            versions[n] = None
+    for name in package_names:
+        normalized = name.replace("-", "_")
+        versions[name] = installed_map.get(normalized)
     return versions
 
 

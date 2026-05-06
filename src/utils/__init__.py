@@ -14,7 +14,7 @@ import logging
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Generic, TypeVar
+from typing import Any, AsyncIterator, Generic, Iterable, TypeVar
 
 from src.constants import (
     DEFAULT_LOCK_CACHE_PRESSURE_THRESHOLD,
@@ -313,6 +313,10 @@ class LRUDict:
         """Remove and return a value, or default if not found."""
         return self._cache.pop(key, default)
 
+    def clear(self) -> None:
+        """Remove all entries from the cache."""
+        self._cache.clear()
+
 
 _K = TypeVar("_K")
 _V = TypeVar("_V")
@@ -426,6 +430,21 @@ class BoundedOrderedDict(Generic[_K, _V]):
     def keys(self):
         """Return a view of the cache keys (delegates to internal OrderedDict)."""
         return self._cache.keys()
+
+    def batch_set(self, items: Iterable[tuple[_K, _V]]) -> None:
+        """Insert multiple items, amortising eviction to a single pass.
+
+        Unlike calling ``__setitem__`` in a loop (which runs the eviction
+        check on every insert), this method inserts all items first and
+        then evicts once, reducing per-item overhead for bulk writes.
+        """
+        now = time.monotonic()
+        for key, value in items:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            self._cache[key] = (value, now)
+        while len(self._cache) >= self._max_size:
+            self._evict()
 
     def clear(self) -> None:
         """Remove all entries."""

@@ -13,8 +13,7 @@ from __future__ import annotations
 import json
 import tempfile
 from dataclasses import asdict
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,6 +24,9 @@ from src.config import (
     NeonizeConfig,
     WhatsAppConfig,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures: Temporary directories

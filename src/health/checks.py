@@ -56,7 +56,15 @@ async def check_database(db: "Database") -> ComponentHealth:
 
 
 async def check_neonize(backend: Optional["NeonizeBackend"]) -> ComponentHealth:
-    """Check neonize WhatsApp connection state."""
+    """Check neonize WhatsApp connection with an active probe.
+
+    Instead of just checking ``is_connected`` (which returns True for zombie
+    connections where the WebSocket died silently), this sends a real chat
+    presence update through the pipe. If the send fails or times out, the
+    connection is reported as unhealthy even if ``is_connected`` is True.
+
+    Also exposes diagnostic info: uptime, messages received, last probe result.
+    """
     start = time.perf_counter()
     try:
         if backend is None:
@@ -65,20 +73,45 @@ async def check_neonize(backend: Optional["NeonizeBackend"]) -> ComponentHealth:
                 status=HealthStatus.UNHEALTHY,
                 message="WhatsApp backend not configured",
             )
-        connected = backend.is_connected
+
+        if not backend.is_connected:
+            latency = (time.perf_counter() - start) * 1000
+            return ComponentHealth(
+                name="whatsapp",
+                status=HealthStatus.UNHEALTHY,
+                message="WhatsApp not connected",
+                latency_ms=latency,
+            )
+
+        # Active probe: send data through the live WebSocket
+        probe = await backend.probe_connection()
         latency = (time.perf_counter() - start) * 1000
-        if connected:
+        diag = backend.connection_diagnostics()
+
+        details: dict[str, Any] = {
+            "uptime_seconds": round(diag["uptime_seconds"], 1),
+            "messages_received": diag["messages_received"],
+            "probe_alive": probe.alive,
+        }
+        if probe.reason:
+            details["probe_reason"] = probe.reason
+
+        if probe.alive:
             return ComponentHealth(
                 name="whatsapp",
                 status=HealthStatus.HEALTHY,
-                message="WhatsApp connected",
+                message="WhatsApp connected (probe OK)",
                 latency_ms=latency,
+                details=details,
             )
+
+        # is_connected is True but probe failed → zombie connection
         return ComponentHealth(
             name="whatsapp",
             status=HealthStatus.UNHEALTHY,
-            message="WhatsApp not connected",
+            message=f"Zombie connection detected: {probe.reason}",
             latency_ms=latency,
+            details=details,
         )
     except Exception as exc:
         latency = (time.perf_counter() - start) * 1000
@@ -461,10 +494,12 @@ def check_sqlite_pool(pool: Optional["SqliteConnectionPool"]) -> ComponentHealth
     count = pool.connection_count
     cap = pool.max_connections
     util = pool.utilization
+    idle = pool.idle_count
     parts = [f"{count}/{cap} connections ({util:.0%})"]
 
     details: dict[str, Any] = {
         "utilization": round(util, 2),
+        "idle_connections": idle,
         "per_database": pool.db_stats,
     }
     active = pool.active_connections

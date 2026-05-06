@@ -137,9 +137,9 @@ async def test_concurrent_emit_failing_handler_isolated(
     assert "c" in results, "handler_c should have completed"
 
     # The failure must have been logged with event metadata
-    assert any(
-        "test_event" in record.message for record in caplog.records
-    ), "error should be logged with event name"
+    assert any("test_event" in record.message for record in caplog.records), (
+        "error should be logged with event name"
+    )
 
 
 @pytest.mark.asyncio

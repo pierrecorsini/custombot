@@ -157,17 +157,18 @@ class SkillRegistry:
             self.register(RoutingAddSkill(routing_engine, instruction_loader))
             self.register(RoutingDeleteSkill(routing_engine, instruction_loader))
 
-        # Vector memory skills
-        if vector_memory is not None:
-            from src.skills.builtin.memory_vss import (
-                MemoryListSkill,
-                MemorySaveSkill,
-                MemorySearchSkill,
-            )
+        # Vector memory skills — always registered so the LLM can use them.
+        # When vector_memory is None the skills degrade to text-based search
+        # over MEMORY.md instead of being completely unavailable.
+        from src.skills.builtin.memory_vss import (
+            MemoryListSkill,
+            MemorySaveSkill,
+            MemorySearchSkill,
+        )
 
-            self.register(MemorySaveSkill(vector_memory))
-            self.register(MemorySearchSkill(vector_memory))
-            self.register(MemoryListSkill(vector_memory))
+        self.register(MemorySaveSkill(vector_memory))
+        self.register(MemorySearchSkill(vector_memory))
+        self.register(MemoryListSkill(vector_memory))
 
         # Project & Knowledge skills — reuse shared graph/recall from project_ctx
         if project_store is not None:

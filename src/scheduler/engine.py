@@ -30,8 +30,8 @@ from src.constants import (
     SCHEDULER_MIN_SLEEP_SECONDS,
     SCHEDULER_RETRY_INITIAL_DELAY,
 )
-from src.db.db import _validate_chat_id
-from src.security.signing import get_scheduler_secret, read_signature_file, sign_payload
+from src.utils.validation import _validate_chat_id
+from src.security.signing import get_scheduler_secret, read_signature_file, sign_payload, verify_payload
 from src.utils import JSONDecodeError, json_loads
 from src.utils.background_service import BaseBackgroundService
 from src.utils.retry import is_transient_error

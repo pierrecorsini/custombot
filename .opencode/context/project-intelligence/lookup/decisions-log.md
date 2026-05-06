@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/decisions-log | Priority: high | Version: 4.1 | Updated: 2026-05-05 -->
+<!-- Context: project-intelligence/lookup/decisions-log | Priority: high | Version: 4.2 | Updated: 2026-05-06 -->
 
 # Decisions Log
 
@@ -113,6 +113,38 @@ Related: [Links to PRs, issues, docs]
 **Decision**: Extract focused sub-modules — bot: `context_building.py`, `response_delivery.py`; queue: `message_queue_buffer.py`. Original files become thin coordinators.
 **Rationale**: Mirrors successful decomposition of `scheduler/` into engine/cron/persistence. Each module owns one concern.
 **Alternatives**: Keep monolithic (rejected: cognitive overhead), further micro-splitting (rejected: premature).
+
+---
+
+## Decision: HealthCheckRegistry for Centralized Health Checks
+
+**Date**: 2026-05-06 | **Status**: Decided
+
+**Context**: Health checks scattered across `Bot.validate_connection()`, `Bot.get_llm_status()`, `Database.get_dedup_stats()` — ad-hoc accessors duplicated check logic and made adding new checks error-prone.
+**Decision**: Extract `HealthCheckRegistry` — a discoverable registry with standardized `HealthCheckResult` signatures. HealthServer builds registry from constructor dependencies.
+**Rationale**: Single source of truth for health checks. Adding a new check = register it, no changes to HealthServer.
+**Alternatives**: Keep scattered accessors (rejected: duplication grows), Health check mixin (rejected: multiple inheritance complexity).
+
+**Impact**:
+- **Positive**: HealthServer decoupled from Bot internals, new checks are self-contained
+- **Negative**: One more abstraction layer
+- **Files**: `src/health/registry.py`, `src/health/server.py`
+
+---
+
+## Decision: NullMemoryMonitor NullObject Pattern
+
+**Date**: 2026-05-06 | **Status**: Decided
+
+**Context**: `Bot._memory_monitor` was `Optional[MemoryMonitor]` with `None` + `try/except ImportError` pattern. All downstream code needed None-guards.
+**Decision**: Replace `None` default with `NullMemoryMonitor` — a NullObject that satisfies the MemoryMonitor Protocol with safe no-ops.
+**Rationale**: Eliminates all downstream None-checks. Field is now typed `MemoryMonitor` (not `Optional`).
+**Alternatives**: Keep Optional (rejected: None-guards propagate), Sentinel value (rejected: less clear).
+
+**Impact**:
+- **Positive**: Simpler code, better type safety, easier testing
+- **Negative**: No-op methods could mask misconfiguration
+- **Files**: `src/monitoring/memory.py`, `src/bot/_bot.py`
 
 ---
 

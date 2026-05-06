@@ -21,11 +21,13 @@ from collections import OrderedDict
 
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.utils.locking import ThreadLock
-from pathlib import Path
-from typing import IO
+from typing import IO, TYPE_CHECKING
 
 from src.constants import MAX_FILE_HANDLES, MAX_READ_FILE_HANDLES
 from src.exceptions import DatabaseError, ErrorCode
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -72,15 +74,16 @@ class FileHandlePool:
                 log.warning(
                     "FileHandlePool: OSError opening %s (%s), "
                     "evicting all %d pooled handles and retrying",
-                    path, exc, len(self._handles),
+                    path,
+                    exc,
+                    len(self._handles),
                 )
                 self._evict_all_locked()
                 try:
                     handle = path.open("a", encoding="utf-8", buffering=1)
                 except OSError as retry_exc:
                     raise DatabaseError(
-                        f"Failed to open message file after handle eviction: "
-                        f"{retry_exc}",
+                        f"Failed to open message file after handle eviction: {retry_exc}",
                         suggestion="Check file descriptor limits (ulimit -n) "
                         "and filesystem permissions.",
                         error_code=ErrorCode.DB_WRITE_FAILED,
@@ -212,7 +215,9 @@ class ReadHandlePool:
                 log.warning(
                     "ReadHandlePool: OSError opening %s (%s), "
                     "evicting all %d pooled handles and retrying",
-                    path, exc, len(self._handles),
+                    path,
+                    exc,
+                    len(self._handles),
                 )
                 self._evict_all_locked()
                 try:

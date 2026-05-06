@@ -162,7 +162,9 @@ class TestToolCallAccumulation:
 
     async def test_single_tool_call_in_one_delta(self):
         acc = StreamAccumulator(model="gpt-4o")
-        tc = _make_tc_delta(index=0, tc_id="call_1", name="get_weather", arguments='{"city":"Paris"}')
+        tc = _make_tc_delta(
+            index=0, tc_id="call_1", name="get_weather", arguments='{"city":"Paris"}'
+        )
         await acc.process_event(_make_event(tool_calls=[tc]))
         assert len(acc._tool_calls_data) == 1
         assert acc._tool_calls_data[0]["id"] == "call_1"
@@ -459,16 +461,22 @@ class TestFullStreamSimulation:
         acc = StreamAccumulator(model="gpt-4o")
 
         # Tool call arrives in fragments
-        await acc.process_event(_make_event(
-            tool_calls=[_make_tc_delta(index=0, tc_id="call_1", name="search", arguments=None)],
-        ))
-        await acc.process_event(_make_event(
-            tool_calls=[_make_tc_delta(index=0, name=None, arguments='{"qu')],
-        ))
-        await acc.process_event(_make_event(
-            tool_calls=[_make_tc_delta(index=0, name=None, arguments='ery": "test"}')],
-            finish_reason="tool_calls",
-        ))
+        await acc.process_event(
+            _make_event(
+                tool_calls=[_make_tc_delta(index=0, tc_id="call_1", name="search", arguments=None)],
+            )
+        )
+        await acc.process_event(
+            _make_event(
+                tool_calls=[_make_tc_delta(index=0, name=None, arguments='{"qu')],
+            )
+        )
+        await acc.process_event(
+            _make_event(
+                tool_calls=[_make_tc_delta(index=0, name=None, arguments='ery": "test"}')],
+                finish_reason="tool_calls",
+            )
+        )
 
         completion = acc.build_completion()
         tc = completion.choices[0].message.tool_calls[0]
@@ -482,11 +490,13 @@ class TestFullStreamSimulation:
         acc = StreamAccumulator(model="gpt-4o")
 
         await acc.process_event(_make_event(content="Let me search for "))
-        await acc.process_event(_make_event(
-            content="that.",
-            tool_calls=[_make_tc_delta(index=0, tc_id="call_1", name="search", arguments='{}')],
-            finish_reason="tool_calls",
-        ))
+        await acc.process_event(
+            _make_event(
+                content="that.",
+                tool_calls=[_make_tc_delta(index=0, tc_id="call_1", name="search", arguments="{}")],
+                finish_reason="tool_calls",
+            )
+        )
 
         completion = acc.build_completion()
         assert completion.choices[0].message.content == "Let me search for that."

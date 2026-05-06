@@ -337,9 +337,7 @@ class TestMessageRateSlotConsumption:
 
         with patch("time.time", return_value=fake_time):
             for i in range(limit):
-                result = limiter.check_message_rate(
-                    "chat_1", limit=limit, window_seconds=60
-                )
+                result = limiter.check_message_rate("chat_1", limit=limit, window_seconds=60)
                 assert result.allowed is True, f"Call {i + 1}/{limit} should be allowed"
                 # remaining comes from check_only() BEFORE record(), so it
                 # reports limit - i  (the count of timestamps already present).
@@ -348,9 +346,7 @@ class TestMessageRateSlotConsumption:
                 )
 
             # The call that exhausts the limit must be denied
-            result = limiter.check_message_rate(
-                "chat_1", limit=limit, window_seconds=60
-            )
+            result = limiter.check_message_rate("chat_1", limit=limit, window_seconds=60)
             assert result.allowed is False
 
     @pytest.mark.parametrize("limit", [2, 5, 10])
@@ -365,14 +361,10 @@ class TestMessageRateSlotConsumption:
                 limiter.check_message_rate("chat_1", limit=limit, window_seconds=60)
 
             # Two denied calls at the same instant
-            denied_1 = limiter.check_message_rate(
-                "chat_1", limit=limit, window_seconds=60
-            )
+            denied_1 = limiter.check_message_rate("chat_1", limit=limit, window_seconds=60)
             assert denied_1.allowed is False
 
-            denied_2 = limiter.check_message_rate(
-                "chat_1", limit=limit, window_seconds=60
-            )
+            denied_2 = limiter.check_message_rate("chat_1", limit=limit, window_seconds=60)
             assert denied_2.allowed is False
 
             # retry_after must be identical — no new timestamps were recorded,
@@ -387,15 +379,11 @@ class TestMessageRateSlotConsumption:
 
         with patch("time.time", return_value=fake_time):
             for i in range(limit):
-                result = limiter.check_message_rate(
-                    "chat_1", limit=limit, window_seconds=60
-                )
+                result = limiter.check_message_rate("chat_1", limit=limit, window_seconds=60)
                 assert result.allowed is True
 
             # Next call must be denied — no slot was leaked
-            result = limiter.check_message_rate(
-                "chat_1", limit=limit, window_seconds=60
-            )
+            result = limiter.check_message_rate("chat_1", limit=limit, window_seconds=60)
             assert result.allowed is False
             assert result.remaining == 0
 
@@ -407,22 +395,16 @@ class TestMessageRateSlotConsumption:
         base_time = 1000.0
         with patch("time.time", return_value=base_time):
             for i in range(limit):
-                result = limiter.check_message_rate(
-                    "chat_1", limit=limit, window_seconds=window
-                )
+                result = limiter.check_message_rate("chat_1", limit=limit, window_seconds=window)
                 assert result.allowed is True
 
             # Exhausted at the base time
-            result = limiter.check_message_rate(
-                "chat_1", limit=limit, window_seconds=window
-            )
+            result = limiter.check_message_rate("chat_1", limit=limit, window_seconds=window)
             assert result.allowed is False
 
         # After window expires, all old timestamps are pruned → slots recover
         with patch("time.time", return_value=base_time + window + 1):
-            result = limiter.check_message_rate(
-                "chat_1", limit=limit, window_seconds=window
-            )
+            result = limiter.check_message_rate("chat_1", limit=limit, window_seconds=window)
         assert result.allowed is True
         # check_only sees 0 existing timestamps, remaining = limit - 0 = limit
         # then record() adds 1 → effective remaining = limit - 1
@@ -560,9 +542,7 @@ class TestRateLimitConfigFromEnvBounds:
         assert config.chat_rate_limit == RATE_LIMIT_MAX_VALUE
 
     def test_too_high_expensive_limit_clamped_to_max(self) -> None:
-        with patch.dict(
-            "os.environ", {"RATE_LIMIT_EXPENSIVE_PER_MINUTES": "999999"}, clear=False
-        ):
+        with patch.dict("os.environ", {"RATE_LIMIT_EXPENSIVE_PER_MINUTES": "999999"}, clear=False):
             config = RateLimitConfig.from_env()
         from src.constants import RATE_LIMIT_MAX_VALUE
 
@@ -637,9 +617,7 @@ class TestRateLimitConfigFromEnvBounds:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="src.rate_limiter"):
-            with patch.dict(
-                "os.environ", {"RATE_LIMIT_CHAT_PER_MINUTE": "999999"}, clear=False
-            ):
+            with patch.dict("os.environ", {"RATE_LIMIT_CHAT_PER_MINUTE": "999999"}, clear=False):
                 RateLimitConfig.from_env()
 
         assert "out of bounds" in caplog.text

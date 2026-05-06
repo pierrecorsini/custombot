@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import statistics
 import time
-from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections import deque
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -303,9 +305,7 @@ class PerformanceSnapshot:
                 "call_count": self.skill_call_count,
                 "latencies": {k: v.to_dict() for k, v in self.skill_latencies.items()},
                 "per_skill": {k: v.to_dict() for k, v in self.skill_metrics.items()},
-                "timeout_ratios": {
-                    k: v.to_dict() for k, v in self.skill_timeout_ratios.items()
-                },
+                "timeout_ratios": {k: v.to_dict() for k, v in self.skill_timeout_ratios.items()},
             },
             "database": {
                 "op_count": self.db_op_count,
@@ -337,7 +337,9 @@ class PerformanceSnapshot:
                 "misses": self.memory_cache_misses,
                 "hit_ratio": round(
                     self.memory_cache_hits / (self.memory_cache_hits + self.memory_cache_misses), 4
-                ) if (self.memory_cache_hits + self.memory_cache_misses) > 0 else 0.0,
+                )
+                if (self.memory_cache_hits + self.memory_cache_misses) > 0
+                else 0.0,
             },
             "outbound_dedup": {
                 "hits": self.outbound_dedup_hits,
@@ -356,7 +358,9 @@ class PerformanceSnapshot:
                 "misses": self.embed_cache_misses,
                 "hit_ratio": round(
                     self.embed_cache_hits / (self.embed_cache_hits + self.embed_cache_misses), 4
-                ) if (self.embed_cache_hits + self.embed_cache_misses) > 0 else 0.0,
+                )
+                if (self.embed_cache_hits + self.embed_cache_misses) > 0
+                else 0.0,
             },
             "skill_oversized_args": dict(self.skill_oversized_args),
             "skill_oversized_args_sizes": {
@@ -368,9 +372,15 @@ class PerformanceSnapshot:
             },
             "error_rates": {
                 "total_errors": self.total_error_count,
-                "error_rate_5m": self.error_windows[0].error_rate_per_minute if len(self.error_windows) > 0 else 0.0,
-                "error_rate_15m": self.error_windows[1].error_rate_per_minute if len(self.error_windows) > 1 else 0.0,
-                "error_rate_60m": self.error_windows[2].error_rate_per_minute if len(self.error_windows) > 2 else 0.0,
+                "error_rate_5m": self.error_windows[0].error_rate_per_minute
+                if len(self.error_windows) > 0
+                else 0.0,
+                "error_rate_15m": self.error_windows[1].error_rate_per_minute
+                if len(self.error_windows) > 1
+                else 0.0,
+                "error_rate_60m": self.error_windows[2].error_rate_per_minute
+                if len(self.error_windows) > 2
+                else 0.0,
                 "windows": [w.to_dict() for w in self.error_windows],
             },
         }

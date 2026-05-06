@@ -7,10 +7,13 @@ plain dicts suitable for the chat completions API wire format.
 
 from __future__ import annotations
 
-from openai.types.chat import (
-    ChatCompletionAssistantMessageParam,
-    ChatCompletionMessage,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from openai.types.chat import (
+        ChatCompletionAssistantMessageParam,
+        ChatCompletionMessage,
+    )
 
 
 def serialize_tool_call_message(

@@ -31,6 +31,23 @@ MAX_MESSAGE_ID_LENGTH: int = 200
 # MAX_CHAT_ID_LENGTH and is well above any real sender ID.
 MAX_SENDER_ID_LENGTH: int = 200
 
+# Maximum allowed length for sender_name in characters.
+# Enforced at the IncomingMessage boundary to prevent excessively long names
+# from polluting logs, metric labels, or UI output.  200 chars is generous
+# for display names while staying within log-line budgets.
+MAX_SENDER_NAME_LENGTH: int = 200
+
+# Maximum allowed length for correlation_id in characters.
+# Enforced at the IncomingMessage boundary to prevent unreasonably long
+# tracing IDs from reaching logging and observability backends.
+MAX_CORRELATION_ID_LENGTH: int = 200
+
+# Reasonable bounds for the ``timestamp`` field (Unix epoch, float).
+# Rejects NaN / Inf / negative values and timestamps far outside any
+# plausible message-window.  0 = 1970-01-01; 4_102_444_800 = 2100-01-01.
+TIMESTAMP_MIN: float = 0.0
+TIMESTAMP_MAX: float = 4_102_444_800.0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Rate Limiting Configuration
 # ─────────────────────────────────────────────────────────────────────────────

@@ -14,7 +14,6 @@ from src.db.db import (
     Database,
     ValidationResult,
     _sanitize_chat_id_for_path,
-    _validate_chat_id,
     get_database,
 )
 from src.db.db_index import (
@@ -65,6 +64,5 @@ __all__ = [
     "rebuild_index",
     "recover_index",
     # Utility functions
-    "_validate_chat_id",
     "_sanitize_chat_id_for_path",
 ]

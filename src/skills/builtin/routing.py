@@ -13,17 +13,20 @@ from __future__ import annotations
 
 import copy
 import uuid
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
-from src.core.instruction_loader import InstructionLoader
-from src.routing import RoutingEngine, RoutingRule
+from src.routing import RoutingRule
 from src.skills.base import BaseSkill, validate_input
 from src.utils.frontmatter import (
     dump_frontmatter,
     extract_routing_rules,
     parse_frontmatter,
 )
+
+if TYPE_CHECKING:
+    from src.core.instruction_loader import InstructionLoader
+    from src.routing import RoutingEngine
+    from pathlib import Path
 
 
 class RoutingListSkill(BaseSkill):

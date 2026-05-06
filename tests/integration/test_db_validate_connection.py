@@ -14,11 +14,14 @@ full multi-issue detection path.
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
 import pytest
 
 from src.db.db import Database
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_checksum(content: str, role: str, timestamp: float) -> str:
@@ -58,8 +61,7 @@ def corrupted_workspace(tmp_path: Path) -> Path:
     # A valid line (to verify non-corrupted lines are not flagged)
     valid_checksum = _make_checksum("hello", "user", 500.0)
     valid_line = (
-        f'{{"role":"user","content":"hello",'
-        f'"timestamp":500.0,"_checksum":"{valid_checksum}"}}'
+        f'{{"role":"user","content":"hello","timestamp":500.0,"_checksum":"{valid_checksum}"}}'
     )
 
     # Write message file with: valid line, truncated line, checksum-mismatch line
@@ -75,17 +77,15 @@ def corrupted_workspace(tmp_path: Path) -> Path:
 class TestValidateConnectionCorruptionDetection:
     """Integration test: single workspace with multiple corruption types."""
 
-    async def test_detects_corrupted_chats_json(
-        self, corrupted_workspace: Path
-    ) -> None:
+    async def test_detects_corrupted_chats_json(self, corrupted_workspace: Path) -> None:
         """Corrupted chats.json is reported as an error with correct detail fields."""
         db = Database(str(corrupted_workspace))
         result = await db.validate_connection()
 
         assert result.valid is False, "Should be invalid due to chats.json corruption"
-        assert any("chats.json" in e and ("corrupted" in e or "not a valid" in e)
-                    for e in result.errors), \
-            f"Expected chats.json corruption error, got: {result.errors}"
+        assert any(
+            "chats.json" in e and ("corrupted" in e or "not a valid" in e) for e in result.errors
+        ), f"Expected chats.json corruption error, got: {result.errors}"
         assert result.details.get("chats_json_valid") is False
         assert "chats.json" in result.details.get("files_checked", [])
 
@@ -105,25 +105,21 @@ class TestValidateConnectionCorruptionDetection:
         # Validator should complete without raising
         assert result.details.get("message_files_count") == 1
 
-    async def test_detects_checksum_mismatch(
-        self, corrupted_workspace: Path
-    ) -> None:
+    async def test_detects_checksum_mismatch(self, corrupted_workspace: Path) -> None:
         """Message with wrong checksum is reported as warning with checksum_errors detail."""
         db = Database(str(corrupted_workspace))
         result = await db.validate_connection()
 
-        assert any("checksum" in w for w in result.warnings), \
+        assert any("checksum" in w for w in result.warnings), (
             f"Expected checksum warning, got warnings: {result.warnings}"
-        checksum_errors = result.details.get("checksum_errors", [])
-        assert checksum_errors, (
-            f"Expected checksum_errors in details, got: {result.details}"
         )
-        assert any("chat_test.jsonl" in entry for entry in checksum_errors), \
+        checksum_errors = result.details.get("checksum_errors", [])
+        assert checksum_errors, f"Expected checksum_errors in details, got: {result.details}"
+        assert any("chat_test.jsonl" in entry for entry in checksum_errors), (
             f"Expected chat_test.jsonl in checksum errors, got: {checksum_errors}"
+        )
 
-    async def test_valid_line_not_flagged(
-        self, corrupted_workspace: Path
-    ) -> None:
+    async def test_valid_line_not_flagged(self, corrupted_workspace: Path) -> None:
         """The valid message line is not reported as corrupted or checksum error."""
         db = Database(str(corrupted_workspace))
         result = await db.validate_connection()
@@ -138,9 +134,7 @@ class TestValidateConnectionCorruptionDetection:
         assert not corrupted_lines, f"Line 1 should not be corrupted, got: {corrupted_lines}"
         assert not checksum_lines, f"Line 1 should not have checksum errors, got: {checksum_lines}"
 
-    async def test_all_corruptions_detected_together(
-        self, corrupted_workspace: Path
-    ) -> None:
+    async def test_all_corruptions_detected_together(self, corrupted_workspace: Path) -> None:
         """All detectable corruption types are reported in a single validate_connection call."""
         db = Database(str(corrupted_workspace))
         result = await db.validate_connection()
@@ -159,5 +153,6 @@ class TestValidateConnectionCorruptionDetection:
         assert result.details.get("message_files_count") == 1
         # Checksum errors detail should reference the specific file
         checksum_errors = result.details.get("checksum_errors", [])
-        assert any("chat_test.jsonl" in e for e in checksum_errors), \
+        assert any("chat_test.jsonl" in e for e in checksum_errors), (
             f"Expected chat_test.jsonl in checksum_errors, got: {checksum_errors}"
+        )

@@ -17,15 +17,15 @@ import logging
 import os
 from dataclasses import asdict, fields
 from dataclasses import MISSING as dataclasses_MISSING
-from pathlib import Path
-from typing import Any, Dict, Type, TypeVar, get_type_hints
+from typing import Any, Dict, Type, TypeVar, get_type_hints, TYPE_CHECKING
 
-from src.config.config_schema import (
+from src.config.config_schema_defs import (
+    CONFIG_PATH,
+    Config,
     add_schema_version,
     format_validation_errors,
     validate_config_dict,
 )
-from src.config.config_schema_defs import CONFIG_PATH, Config
 from src.config.config_validation import (
     _check_deprecated_options,
     _check_unknown_keys,
@@ -35,6 +35,9 @@ from src.config.config_validation import (
 )
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.exceptions import ConfigurationError
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, TYPE_CHECKING
 
-from src.project.store import ProjectStore
+
+if TYPE_CHECKING:
+    from src.project.store import ProjectStore
 
 log = logging.getLogger(__name__)
 

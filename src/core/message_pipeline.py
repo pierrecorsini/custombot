@@ -75,6 +75,37 @@ class MessageMiddleware(Protocol):
     ) -> None: ...
 
 
+class MiddlewareChain:
+    """Named chain executor replacing closure-based ``call_next`` unwinding.
+
+    Unlike anonymous closures, this class appears in tracebacks by name and
+    its ``__repr__`` shows which middlewares have executed and which remain,
+    making it easy to identify which middleware caused a failure.
+    """
+
+    __slots__ = ("_middlewares", "_ctx", "_index")
+
+    def __init__(
+        self, middlewares: Sequence[MessageMiddleware], ctx: MessageContext
+    ) -> None:
+        self._middlewares = middlewares
+        self._ctx = ctx
+        self._index = 0
+
+    def __repr__(self) -> str:
+        names = [type(mw).__name__ for mw in self._middlewares]
+        executed = ", ".join(names[: self._index])
+        remaining = ", ".join(names[self._index :])
+        return f"MiddlewareChain(executed=[{executed}], remaining=[{remaining}])"
+
+    async def call_next(self) -> None:
+        """Execute the next middleware in the chain."""
+        if self._index < len(self._middlewares):
+            mw = self._middlewares[self._index]
+            self._index += 1
+            await mw(self._ctx, self.call_next)
+
+
 class MessagePipeline:
     """Composable middleware chain for message processing.
 
@@ -88,14 +119,7 @@ class MessagePipeline:
 
     async def execute(self, ctx: MessageContext) -> None:
         """Run all middlewares in order, wrapped in an OTel span."""
-        index = 0
-
-        async def call_next() -> None:
-            nonlocal index
-            if index < len(self._middlewares):
-                mw = self._middlewares[index]
-                index += 1
-                await mw(ctx, call_next)
+        chain = MiddlewareChain(self._middlewares, ctx)
 
         async with message_pipeline_span(
             chat_id=ctx.msg.chat_id,
@@ -108,7 +132,7 @@ class MessagePipeline:
             set_correlation_id_on_span(span, get_correlation_id())
             span.set_attribute("messaging.from_me", ctx.msg.fromMe)
             span.set_attribute("messaging.to_me", ctx.msg.toMe)
-            await call_next()
+            await chain.call_next()
             if ctx.response is not None:
                 span.set_attribute("custombot.response.length", len(ctx.response))
 
@@ -162,9 +186,7 @@ def _typing_factory(d: PipelineDependencies) -> TypingMiddleware:
 
 
 def _error_handler_factory(d: PipelineDependencies) -> ErrorHandlerMiddleware:
-    return ErrorHandlerMiddleware(
-        d.channel, d.session_metrics, verbose=d.verbose, dedup=d.dedup
-    )
+    return ErrorHandlerMiddleware(d.channel, d.session_metrics, verbose=d.verbose, dedup=d.dedup)
 
 
 def _handle_message_factory(d: PipelineDependencies) -> HandleMessageMiddleware:
@@ -185,9 +207,7 @@ BUILTIN_MIDDLEWARE_FACTORIES: dict[str, MiddlewareFactory] = {
 def _import_factory(dotted_path: str) -> MiddlewareFactory:
     """Import a middleware factory from a ``'module.path:callable'`` string."""
     if ":" not in dotted_path:
-        raise ValueError(
-            f"Invalid middleware path {dotted_path!r}. Use 'module:factory' format."
-        )
+        raise ValueError(f"Invalid middleware path {dotted_path!r}. Use 'module:factory' format.")
     module_path, attr = dotted_path.rsplit(":", 1)
     module = importlib.import_module(module_path)
     obj = getattr(module, attr)
@@ -256,8 +276,7 @@ class OperationTrackerMiddleware:
         call_next: Callable[[], Awaitable[None]],
     ) -> None:
         op_id = await self._shutdown_mgr.enter_operation(
-            f"message from {ctx.msg.sender_name or ctx.msg.sender_id} "
-            f"in {ctx.msg.chat_id}"
+            f"message from {ctx.msg.sender_name or ctx.msg.sender_id} in {ctx.msg.chat_id}"
         )
         if op_id is None:
             return
@@ -317,8 +336,7 @@ class PreflightMiddleware:
         preflight = await self._bot.preflight_check(ctx.msg)
         if not preflight:
             log.debug(
-                "Message %s rejected by preflight: %s "
-                "(fromMe=%s, toMe=%s, chat=%s)",
+                "Message %s rejected by preflight: %s (fromMe=%s, toMe=%s, chat=%s)",
                 ctx.msg.message_id,
                 preflight.reason,
                 ctx.msg.fromMe,
@@ -347,9 +365,9 @@ class TypingMiddleware:
 class ErrorHandlerMiddleware:
     """Catches processing errors, increments error counter, sends user-facing error.
 
-    Uses ``_send_error_reply()`` to centralize send → dedup → event so that
-    error-channel traffic is observable in metrics and dedup logs, matching
-    the ``Bot._send_to_chat()`` pattern used for all other outbound paths.
+    Uses ``_send_error_reply()`` which delegates to
+    ``BaseChannel.send_and_track()`` to centralize send → dedup → event
+    so that error-channel traffic is observable in metrics and dedup logs.
     """
 
     def __init__(
@@ -367,40 +385,18 @@ class ErrorHandlerMiddleware:
     async def _send_error_reply(self, chat_id: str, text: str) -> None:
         """Send an error reply with dedup recording and event emission.
 
-        Mirrors ``Bot._send_to_chat()``: channel send → outbound dedup
-        record → ``response_sent`` event.  This ensures error responses
-        appear in dedup logs and event-bus metrics just like normal
-        responses, rate-limit warnings, and scheduled replies.
+        Delegates to ``BaseChannel.send_and_track()`` which centralizes the
+        send → dedup → event pipeline, ensuring error responses appear in
+        dedup logs and event-bus metrics just like normal responses,
+        rate-limit warnings, and scheduled replies.
         """
         try:
-            await self._channel.send_message(chat_id, text)
+            await self._channel.send_and_track(chat_id, text, dedup=self._dedup)
         except Exception as send_exc:
             log.warning(
-                "Failed to send error message to %s "
-                "(channel may be disconnected): %s",
+                "Failed to send error message to %s (channel may be disconnected): %s",
                 chat_id,
                 send_exc,
-            )
-            return
-
-        if self._dedup:
-            self._dedup.record_outbound(chat_id, text)
-
-        try:
-            from src.core.event_bus import Event, get_event_bus
-
-            await get_event_bus().emit(Event(
-                name="response_sent",
-                data={"chat_id": chat_id, "response_length": len(text)},
-                source="ErrorHandlerMiddleware._send_error_reply",
-                correlation_id=self._get_correlation_id(),
-            ))
-        except Exception:
-            log_noncritical(
-                NonCriticalCategory.EVENT_EMISSION,
-                "Failed to emit response_sent event for error reply to %s",
-                chat_id,
-                logger=log,
             )
 
     @staticmethod
@@ -421,9 +417,7 @@ class ErrorHandlerMiddleware:
         try:
             await call_next()
         except asyncio.CancelledError:
-            log.info(
-                "Message handling cancelled for %s (shutdown?)", ctx.msg.chat_id
-            )
+            log.info("Message handling cancelled for %s (shutdown?)", ctx.msg.chat_id)
             raise
         except Exception as exc:
             self._metrics.increment_errors()
@@ -432,9 +426,7 @@ class ErrorHandlerMiddleware:
 
             corr_id = get_correlation_id()
             error_msg = format_user_error(exc, correlation_id=corr_id)
-            log.error(
-                "Error handling message: %s", exc, exc_info=self._verbose
-            )
+            log.error("Error handling message: %s", exc, exc_info=self._verbose)
             await self._send_error_reply(ctx.msg.chat_id, error_msg)
 
 

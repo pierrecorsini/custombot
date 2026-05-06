@@ -32,18 +32,22 @@ import logging
 import time
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generator, TypeVar
+from typing import Any, Callable, Generator, TypeVar, TYPE_CHECKING
 
 from rich.console import Console
 from rich.progress import (
     BarColumn,
     Progress,
     SpinnerColumn,
-    TaskID,
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
 )
+
+if TYPE_CHECKING:
+    from rich.progress import (
+        TaskID,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants

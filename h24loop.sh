@@ -55,7 +55,8 @@ while true; do
         log "🧹 10-task milestone! Running context harvest..."
 
         timeout "$TASK_TIMEOUT" opencode run "${OPENCODE_ARGS[@]}" "
-            Execute autonomously the following two commands, in this order, without asking for user permission, make the decision yourself and run untill completion:
+            Execute autonomously the following two commands, in this order, without asking for user permission,
+            make the decision yourself and run untill completion, then commit the changes with a message starting with 'openagentcontrol context update':
             1. /context harvest
             2. /add-context --update
         " || true

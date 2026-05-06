@@ -9,12 +9,15 @@ and invalidated correctly.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 
 from src.skills import SkillRegistry
 from src.skills.base import BaseSkill
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_skill(name: str) -> BaseSkill:
@@ -64,18 +67,18 @@ class TestInvalidSkillNames:
     @pytest.mark.parametrize(
         "name",
         [
-            "",                          # empty
-            "WebSearch",                 # uppercase
-            "web-search",                # hyphen
-            "web.search",                # dot
-            "skill; DROP TABLE--",       # SQL injection attempt
-            "hello world",               # space
-            "naïve",                     # non-ASCII
-            "skill/name",                # slash
-            'quote"inname',              # double quote
-            "back`tick",                 # backtick
-            "new\nline",                 # newline
-            "tab\there",                 # tab
+            "",  # empty
+            "WebSearch",  # uppercase
+            "web-search",  # hyphen
+            "web.search",  # dot
+            "skill; DROP TABLE--",  # SQL injection attempt
+            "hello world",  # space
+            "naïve",  # non-ASCII
+            "skill/name",  # slash
+            'quote"inname',  # double quote
+            "back`tick",  # backtick
+            "new\nline",  # newline
+            "tab\there",  # tab
         ],
     )
     def test_rejects_invalid_name(self, name: str):

@@ -46,10 +46,12 @@ class ComponentHealth:
 class HealthReport:
     """Overall health report for the bot."""
 
-    status: HealthStatus
+    status: HealthStatus = HealthStatus.HEALTHY
     components: list[ComponentHealth] = field(default_factory=list)
     version: str = "1.0.0"
     token_usage: Optional[dict[str, Any]] = None
+    startup_durations: Optional[dict[str, float]] = None
+    startup_total_seconds: Optional[float] = None
 
     def to_dict(self) -> dict[str, Any]:
         overall = HealthStatus.HEALTHY
@@ -67,4 +69,8 @@ class HealthReport:
         }
         if self.token_usage is not None:
             result["token_usage"] = self.token_usage
+        if self.startup_durations is not None:
+            result["startup_durations"] = self.startup_durations
+        if self.startup_total_seconds is not None:
+            result["startup_total_seconds"] = round(self.startup_total_seconds, 3)
         return result

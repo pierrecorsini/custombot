@@ -230,6 +230,9 @@ class TestPerformShutdown:
         llm = MagicMock()
         llm.close = AsyncMock()
 
+        executor = MagicMock()
+        executor.shutdown = MagicMock()
+
         return {
             "shutdown": shutdown,
             "channel": channel,
@@ -240,6 +243,7 @@ class TestPerformShutdown:
             "project_store": project_store,
             "message_queue": message_queue,
             "llm": llm,
+            "executor": executor,
         }
 
     @pytest.mark.asyncio()
@@ -247,19 +251,21 @@ class TestPerformShutdown:
         session_metrics = {"start_time": time.time() - 10}
         m = shutdown_mocks
 
-        await perform_shutdown(ShutdownContext(
-            shutdown=m["shutdown"],
-            channel=m["channel"],
-            scheduler=m["scheduler"],
-            health_server=m["health_server"],
-            db=m["db"],
-            vector_memory=m["vector_memory"],
-            project_store=m["project_store"],
-            message_queue=m["message_queue"],
-            llm=m["llm"],
-            session_metrics=session_metrics,
-            log=logging.getLogger("test"),
-        ))
+        await perform_shutdown(
+            ShutdownContext(
+                shutdown=m["shutdown"],
+                channel=m["channel"],
+                scheduler=m["scheduler"],
+                health_server=m["health_server"],
+                db=m["db"],
+                vector_memory=m["vector_memory"],
+                project_store=m["project_store"],
+                message_queue=m["message_queue"],
+                llm=m["llm"],
+                session_metrics=session_metrics,
+                log=logging.getLogger("test"),
+            )
+        )
 
         # Verify all components were shut down
         m["shutdown"].request_shutdown.assert_called_once()
@@ -275,19 +281,21 @@ class TestPerformShutdown:
         session_metrics = {"start_time": time.time() - 30}
         m = shutdown_mocks
 
-        await perform_shutdown(ShutdownContext(
-            shutdown=m["shutdown"],
-            channel=m["channel"],
-            scheduler=m["scheduler"],
-            health_server=m["health_server"],
-            db=m["db"],
-            vector_memory=m["vector_memory"],
-            project_store=m["project_store"],
-            message_queue=m["message_queue"],
-            llm=m["llm"],
-            session_metrics=session_metrics,
-            log=logging.getLogger("test"),
-        ))
+        await perform_shutdown(
+            ShutdownContext(
+                shutdown=m["shutdown"],
+                channel=m["channel"],
+                scheduler=m["scheduler"],
+                health_server=m["health_server"],
+                db=m["db"],
+                vector_memory=m["vector_memory"],
+                project_store=m["project_store"],
+                message_queue=m["message_queue"],
+                llm=m["llm"],
+                session_metrics=session_metrics,
+                log=logging.getLogger("test"),
+            )
+        )
 
         assert "uptime" in session_metrics
         assert session_metrics["uptime"] > 0
@@ -301,37 +309,41 @@ class TestPerformShutdown:
         m["db"].close = AsyncMock(side_effect=RuntimeError("boom"))
 
         # Should not raise
-        await perform_shutdown(ShutdownContext(
-            shutdown=m["shutdown"],
-            channel=m["channel"],
-            scheduler=m["scheduler"],
-            health_server=m["health_server"],
-            db=m["db"],
-            vector_memory=m["vector_memory"],
-            project_store=m["project_store"],
-            message_queue=m["message_queue"],
-            llm=m["llm"],
-            session_metrics={"uptime": 5},
-            log=logging.getLogger("test"),
-        ))
+        await perform_shutdown(
+            ShutdownContext(
+                shutdown=m["shutdown"],
+                channel=m["channel"],
+                scheduler=m["scheduler"],
+                health_server=m["health_server"],
+                db=m["db"],
+                vector_memory=m["vector_memory"],
+                project_store=m["project_store"],
+                message_queue=m["message_queue"],
+                llm=m["llm"],
+                session_metrics={"uptime": 5},
+                log=logging.getLogger("test"),
+            )
+        )
 
     @pytest.mark.asyncio()
     async def test_shutdown_without_health_server(self, shutdown_mocks):
         m = shutdown_mocks
         # health_server=None should be handled
-        await perform_shutdown(ShutdownContext(
-            shutdown=m["shutdown"],
-            channel=m["channel"],
-            scheduler=m["scheduler"],
-            health_server=None,
-            db=m["db"],
-            vector_memory=m["vector_memory"],
-            project_store=m["project_store"],
-            message_queue=m["message_queue"],
-            llm=m["llm"],
-            session_metrics={"uptime": 5},
-            log=logging.getLogger("test"),
-        ))
+        await perform_shutdown(
+            ShutdownContext(
+                shutdown=m["shutdown"],
+                channel=m["channel"],
+                scheduler=m["scheduler"],
+                health_server=None,
+                db=m["db"],
+                vector_memory=m["vector_memory"],
+                project_store=m["project_store"],
+                message_queue=m["message_queue"],
+                llm=m["llm"],
+                session_metrics={"uptime": 5},
+                log=logging.getLogger("test"),
+            )
+        )
         # Should complete without error
         m["db"].close.assert_awaited_once()
 
@@ -345,19 +357,55 @@ class TestPerformShutdown:
         m["scheduler"].stop = AsyncMock(side_effect=lambda: call_order.append("scheduler"))
         m["db"].close = AsyncMock(side_effect=lambda: call_order.append("db"))
 
-        await perform_shutdown(ShutdownContext(
-            shutdown=m["shutdown"],
-            channel=m["channel"],
-            scheduler=m["scheduler"],
-            health_server=None,
-            db=m["db"],
-            vector_memory=m["vector_memory"],
-            project_store=m["project_store"],
-            message_queue=m["message_queue"],
-            llm=m["llm"],
-            session_metrics={"uptime": 5},
-            log=logging.getLogger("test"),
-        ))
+        await perform_shutdown(
+            ShutdownContext(
+                shutdown=m["shutdown"],
+                channel=m["channel"],
+                scheduler=m["scheduler"],
+                health_server=None,
+                db=m["db"],
+                vector_memory=m["vector_memory"],
+                project_store=m["project_store"],
+                message_queue=m["message_queue"],
+                llm=m["llm"],
+                session_metrics={"uptime": 5},
+                log=logging.getLogger("test"),
+            )
+        )
 
         # DB should be the last call
         assert call_order[-1] == "db"
+
+    @pytest.mark.asyncio()
+    async def test_db_close_runs_before_executor_shutdown(self, shutdown_mocks):
+        """DB close must happen before executor shutdown (DB uses to_thread on close)."""
+        m = shutdown_mocks
+        call_order: list[str] = []
+
+        async def _db_close() -> None:
+            call_order.append("db")
+
+        def _executor_shutdown(wait: bool = True) -> None:
+            call_order.append("executor")
+
+        m["db"].close = AsyncMock(side_effect=_db_close)
+        m["executor"].shutdown = MagicMock(side_effect=_executor_shutdown)
+
+        await perform_shutdown(
+            ShutdownContext(
+                shutdown=m["shutdown"],
+                channel=m["channel"],
+                scheduler=m["scheduler"],
+                health_server=None,
+                db=m["db"],
+                vector_memory=m["vector_memory"],
+                project_store=m["project_store"],
+                message_queue=m["message_queue"],
+                llm=m["llm"],
+                session_metrics={"uptime": 5},
+                log=logging.getLogger("test"),
+                executor=m["executor"],
+            )
+        )
+
+        assert call_order.index("db") < call_order.index("executor")

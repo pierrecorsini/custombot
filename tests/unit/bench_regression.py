@@ -346,6 +346,45 @@ class TestRoutingLatencyThreshold:
             f"{_ROUTING_MATCH_THRESHOLD_MS} ms threshold"
         )
 
+    def test_single_rule_fast_path(self, tmp_path: Path) -> None:
+        """Single-rule fast path — bypasses cache hashing and dict lookups.
+
+        When only one routing rule exists, _match_impl skips cache-key
+        computation, cache dict lookup, channel-index lookup, and list
+        iteration entirely, evaluating the rule directly.
+        """
+        engine = RoutingEngine(tmp_path / "instructions", use_watchdog=False)
+        engine._rules = [  # noqa: SLF001
+            RoutingRule(
+                id="single-catch-all",
+                priority=0,
+                sender="*",
+                recipient="*",
+                channel="*",
+                content_regex="*",
+                instruction="chat.md",
+            )
+        ]
+        assert engine._single_rule is not None
+        engine._last_stale_check = time.monotonic()
+        engine._file_mtimes = {}
+
+        msg = _make_msg(text="benchmark message")
+        # Warm up
+        engine.match_with_rule(msg)
+
+        samples: list[int] = []
+        for _ in range(_ROUTING_BENCH_ITERATIONS):
+            start = time.perf_counter_ns()
+            engine.match_with_rule(msg)
+            samples.append(time.perf_counter_ns() - start)
+        samples.sort()
+        median_ms = _median_ns(samples) / 1_000_000
+        assert median_ms < _ROUTING_MATCH_THRESHOLD_MS, (
+            f"Single-rule fast path median {median_ms:.4f} ms exceeds "
+            f"{_ROUTING_MATCH_THRESHOLD_MS} ms threshold"
+        )
+
 
 # ===================================================================
 # 2. EMBEDDING CACHE LOOKUP

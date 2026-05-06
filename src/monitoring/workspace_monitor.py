@@ -137,11 +137,7 @@ def _archive_old_conversations(
     files_to_archive: list[Path] = []
     try:
         for entry in data_dir.iterdir():
-            if (
-                entry.is_file()
-                and entry.suffix == ".jsonl"
-                and entry.stat().st_mtime < cutoff
-            ):
+            if entry.is_file() and entry.suffix == ".jsonl" and entry.stat().st_mtime < cutoff:
                 files_to_archive.append(entry)
     except OSError as exc:
         log.warning("Failed scanning data dir for archival: %s", exc)
@@ -546,7 +542,13 @@ class WorkspaceMonitor(BaseBackgroundService):
                         stats.archives_bytes / (1024 * 1024),
                     )
 
-                if stats.files_archived or stats.backups_pruned or stats.temps_cleaned or stats.logs_pruned or stats.audit_logs_pruned:
+                if (
+                    stats.files_archived
+                    or stats.backups_pruned
+                    or stats.temps_cleaned
+                    or stats.logs_pruned
+                    or stats.audit_logs_pruned
+                ):
                     log.info(
                         "Workspace cleanup: archived=%d, backups_pruned=%d, "
                         "temps_cleaned=%d, logs_pruned=%d, audit_logs_pruned=%d, errors=%d",

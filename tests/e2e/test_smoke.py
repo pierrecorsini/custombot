@@ -8,7 +8,6 @@ produces a response.  Uses a mocked LLM to avoid real API calls.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,6 +19,10 @@ from src.core.message_pipeline import (
     build_pipeline_from_config,
 )
 from tests.helpers.llm_mocks import make_text_response
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -37,9 +40,7 @@ class MockChannel(BaseChannel):
     async def start(self, handler) -> None:
         self.mark_connected()
 
-    async def _send_message(
-        self, chat_id: str, text: str, *, skip_delays: bool = False
-    ) -> None:
+    async def _send_message(self, chat_id: str, text: str, *, skip_delays: bool = False) -> None:
         self._sent.append((chat_id, text))
 
     async def send_typing(self, chat_id: str) -> None:
@@ -54,7 +55,7 @@ class MockChannel(BaseChannel):
 
 async def _create_bot(tmp_path: Path):
     """Create a fully-wired Bot with mocked LLM."""
-    from src.bot import Bot, BotConfig
+    from src.bot import Bot, BotConfig, BotDeps
     from src.core.dedup import DeduplicationService
     from src.db import Database
     from src.memory import Memory
@@ -121,7 +122,7 @@ async def _create_bot(tmp_path: Path):
 
         llm = LLMClient(config.llm)
 
-    bot = Bot(
+    bot = Bot(BotDeps(
         config=bot_config,
         db=db,
         llm=llm,
@@ -130,7 +131,7 @@ async def _create_bot(tmp_path: Path):
         routing=routing,
         dedup=dedup,
         instructions_dir=str(instructions_dir),
-    )
+    ))
 
     return bot, db
 
@@ -313,7 +314,7 @@ async def _create_app(tmp_path: Path):
         llm = LLMClient(config.llm)
 
     # ── Bot ──
-    from src.bot import Bot, BotConfig
+    from src.bot import Bot, BotConfig, BotDeps
 
     bot_config = BotConfig(
         max_tool_iterations=config.llm.max_tool_iterations,
@@ -321,7 +322,7 @@ async def _create_app(tmp_path: Path):
         system_prompt_prefix=config.llm.system_prompt_prefix,
         stream_response=False,
     )
-    bot = Bot(
+    bot = Bot(BotDeps(
         config=bot_config,
         db=db,
         llm=llm,
@@ -330,7 +331,7 @@ async def _create_app(tmp_path: Path):
         routing=routing,
         dedup=dedup,
         instructions_dir=str(instructions_dir),
-    )
+    ))
 
     # ── Auxiliary components for BotComponents ──
     project_store = ProjectStore(str(data_dir / "projects.db"))
@@ -419,9 +420,7 @@ async def test_smoke_application_lifecycle(tmp_path: Path):
 
     # Session metrics should reflect the processed message
     metrics = app._session_metrics.to_dict()
-    assert metrics["messages_processed"] >= 1, (
-        "Session metrics should track at least one message"
-    )
+    assert metrics["messages_processed"] >= 1, "Session metrics should track at least one message"
 
     # Cleanup
     await db.close()

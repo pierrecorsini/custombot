@@ -65,6 +65,7 @@ class NonCriticalCategory(Enum):
     SHUTDOWN = "shutdown"
     MONITORING = "monitoring"
     SCHEDULER = "scheduler"
+    VECTOR_MEMORY_FALLBACK = "vector_memory_fallback"
 
 
 def log_noncritical(

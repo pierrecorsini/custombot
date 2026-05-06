@@ -13,17 +13,20 @@ import logging
 
 import time
 from dataclasses import replace
-from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
-from src.channels.base import BaseChannel, IncomingMessage, MessageHandler
+from src.channels.base import BaseChannel, IncomingMessage
 from src.channels.neonize_backend import NeonizeBackend
 from src.channels.stealth import mark_sent
-from src.config import WhatsAppConfig
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.ui.cli_output import cli as cli_output
 from src.utils import LRUDict
 from src.utils.phone import normalize_phone
+
+if TYPE_CHECKING:
+    from src.channels.base import MessageHandler
+    from src.config import WhatsAppConfig
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -130,7 +133,7 @@ Always format your response for plain-text WhatsApp rendering. Your message must
                 sender_id=msg["sender_id"],
                 sender_name=msg["sender_name"],
                 text=msg["text"],
-                timestamp=msg["timestamp"],
+                timestamp=msg["timestamp"] / 1000 if msg["timestamp"] > 1e12 else msg["timestamp"],
                 channel_type="whatsapp",
                 fromMe=msg["fromMe"],
                 toMe=msg["toMe"],

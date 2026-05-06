@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.bot import Bot, BotConfig
+from src.bot import Bot, BotConfig, BotDeps
 from src.channels.base import IncomingMessage
 from src.message_queue import MessageStatus, QueuedMessage
 
@@ -59,14 +59,16 @@ def _make_bot(message_queue=None) -> Bot:
     dedup.is_inbound_duplicate = AsyncMock(return_value=False)
 
     return Bot(
-        config=cfg,
-        db=db,
-        llm=llm,
-        memory=memory,
-        skills=skills,
-        routing=None,
-        message_queue=message_queue,
-        dedup=dedup,
+        BotDeps(
+            config=cfg,
+            db=db,
+            llm=llm,
+            memory=memory,
+            skills=skills,
+            routing=None,
+            message_queue=message_queue,
+            dedup=dedup,
+        )
     )
 
 
@@ -723,9 +725,7 @@ class TestLargeBatchRecovery:
 
         # Allow users 0-29, block users 30-39
         channel = MagicMock()
-        channel._is_allowed = MagicMock(
-            side_effect=lambda s: int(s.split("_")[1]) < 30
-        )
+        channel._is_allowed = MagicMock(side_effect=lambda s: int(s.split("_")[1]) < 30)
 
         # First 20 succeed, next 10 fail (users 20-29 allowed but fail)
         async def selective_handle(msg, **kwargs):

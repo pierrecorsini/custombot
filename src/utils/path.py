@@ -75,7 +75,6 @@ def sanitize_path_component(chat_id: str) -> str:
     result = result[:200]
     if not result:
         raise ValueError(
-            "chat_id must not resolve to an empty path component "
-            f"(input was {chat_id!r})"
+            f"chat_id must not resolve to an empty path component (input was {chat_id!r})"
         )
     return result

@@ -8,12 +8,16 @@ typing indicators to the user.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass
 
 from src.channels.base import IncomingMessage
-from src.core.dedup import DeduplicationService
-from src.routing import RoutingEngine
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.routing import RoutingEngine
+    from src.core.dedup import DeduplicationService
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +61,10 @@ async def preflight_check(
         return PreflightResult(passed=False, reason="duplicate")
 
     if routing:
-        matched_rule, _ = routing.match_with_rule(msg)
+        match_result = routing.match_with_rule(msg)
+        if inspect.isawaitable(match_result):
+            match_result = await match_result
+        matched_rule, _ = match_result
         if not matched_rule:
             return PreflightResult(passed=False, reason="no_routing_rule")
 

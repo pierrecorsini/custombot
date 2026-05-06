@@ -294,12 +294,16 @@ class SqliteHelper:
         return self._db
 
     def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connection.
+
+        When a pool is configured, the connection is released back to the
+        pool's idle pool for reuse instead of being closed immediately.
+        """
         if self._db:
-            # Unregister from pool before closing
             if SqliteHelper._pool is not None:
-                SqliteHelper._pool.unregister(f"{type(self).__qualname__}")
-            self._db.close()
+                SqliteHelper._pool.release_connection(f"{type(self).__qualname__}")
+            else:
+                self._db.close()
             self._db = None
 
     def _execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
@@ -341,9 +345,7 @@ class SqliteHelper:
                 error is non-transient (e.g., schema error).
         """
         if self._sqlite_breaker.is_open():
-            raise sqlite3.OperationalError(
-                "SQLite write circuit breaker open — operation rejected"
-            )
+            raise sqlite3.OperationalError("SQLite write circuit breaker open — operation rejected")
 
         delay = SQLITE_WRITE_RETRY_INITIAL_DELAY
 

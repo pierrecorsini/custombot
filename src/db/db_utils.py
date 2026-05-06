@@ -10,19 +10,18 @@ from __future__ import annotations
 import logging
 import re
 import time
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from src.utils import json_dumps
 from src.utils.path import sanitize_path_component as _sanitize_chat_id_for_path
 from src.core.errors import NonCriticalCategory, log_noncritical
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 log = logging.getLogger(__name__)
 
 # ── constants ───────────────────────────────────────────────────────────────
-
-# Pattern for valid chat_id (safe for file paths)
-_CHAT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-.@]+$")
 
 # Maximum length for the 'name' field persisted to JSONL
 _MAX_NAME_LENGTH = 200
@@ -41,36 +40,21 @@ _JSONL_SCHEMA_VERSION = 1
 _JSONL_MIGRATIONS: list[tuple[int, list[Any]]] = []
 
 
-# ── validation ─────────────────────────────────────────────────────────────
-
-
-def _validate_chat_id(chat_id: str) -> None:
-    """Validate chat_id format for safe file path usage.
-
-    Raises:
-        ValueError: If chat_id contains unsafe characters.
-    """
-    if not chat_id:
-        raise ValueError("chat_id cannot be empty")
-    if not _CHAT_ID_PATTERN.match(chat_id):
-        raise ValueError(
-            f"Invalid chat_id format: {chat_id!r}. "
-            "Only alphanumeric characters, dash, underscore, dot, and @ are allowed."
-        )
-
-
 def _sanitize_name(name: Optional[str]) -> Optional[str]:
-    """Sanitize a sender/tool name before persisting to JSONL.
+    """Normalize and bound a persisted message ``name`` field.
 
-    Strips control characters and truncates to ``_MAX_NAME_LENGTH``.
-    Returns ``None`` if the name is empty after sanitization.
+    - Removes control characters.
+    - Trims leading/trailing whitespace.
+    - Enforces maximum storage length.
+    - Returns ``None`` for missing/empty names.
     """
-    if not name:
+    if name is None:
         return None
-    cleaned = _CONTROL_CHAR_PATTERN.sub("", name)
-    cleaned = cleaned.strip()
+
+    cleaned = _CONTROL_CHAR_PATTERN.sub("", str(name)).strip()
     if not cleaned:
         return None
+
     if len(cleaned) > _MAX_NAME_LENGTH:
         cleaned = cleaned[:_MAX_NAME_LENGTH]
     return cleaned

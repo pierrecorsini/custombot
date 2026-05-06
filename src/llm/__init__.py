@@ -11,11 +11,14 @@ Re-exports public symbols so that ``from src.llm import LLMClient`` and
 ``from src.llm import TokenUsage`` continue to work as before.
 """
 
+from openai import AsyncOpenAI
+
 from src.llm._client import LLMClient
 from src.llm._error_classifier import classify_llm_error
 from src.llm._provider import LLMProvider, TokenUsage
 
 __all__ = [
+    "AsyncOpenAI",
     "LLMClient",
     "LLMProvider",
     "TokenUsage",

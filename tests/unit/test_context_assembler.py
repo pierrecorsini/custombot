@@ -20,13 +20,16 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.bot import BotConfig
 from src.core.context_assembler import ContextAssembler, ContextResult
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,27 +102,39 @@ class TestHandleGatherResult:
 
     def test_returns_value_on_success(self) -> None:
         result = ContextAssembler._handle_gather_result(
-            "some content", "read_memory", "chat_1", default=None,
+            "some content",
+            "read_memory",
+            "chat_1",
+            default=None,
         )
         assert result == "some content"
 
     def test_returns_none_value(self) -> None:
         result = ContextAssembler._handle_gather_result(
-            None, "read_memory", "chat_1", default="fallback",
+            None,
+            "read_memory",
+            "chat_1",
+            default="fallback",
         )
         assert result is None
 
     def test_returns_default_on_exception(self) -> None:
         exc = RuntimeError("db connection lost")
         result = ContextAssembler._handle_gather_result(
-            exc, "read_memory", "chat_1", default=None,
+            exc,
+            "read_memory",
+            "chat_1",
+            default=None,
         )
         assert result is None
 
     def test_returns_custom_default_on_exception(self) -> None:
         exc = OSError("file not found")
         result = ContextAssembler._handle_gather_result(
-            exc, "read_agents_md", "chat_1", default="fallback agents",
+            exc,
+            "read_agents_md",
+            "chat_1",
+            default="fallback agents",
         )
         assert result == "fallback agents"
 
@@ -127,7 +142,10 @@ class TestHandleGatherResult:
         exc = ValueError("bad data")
         with patch("src.core.context_assembler.log") as mock_log:
             ContextAssembler._handle_gather_result(
-                exc, "read_memory", "chat_1", default=None,
+                exc,
+                "read_memory",
+                "chat_1",
+                default=None,
             )
             mock_log.log.assert_called_once()
             args = mock_log.log.call_args
@@ -137,8 +155,12 @@ class TestHandleGatherResult:
         exc = ValueError("bad data")
         with patch("src.core.context_assembler.log") as mock_log:
             import logging
+
             ContextAssembler._handle_gather_result(
-                exc, "read_agents_md", "chat_1", default=None,
+                exc,
+                "read_agents_md",
+                "chat_1",
+                default=None,
                 log_level=logging.DEBUG,
             )
             args = mock_log.log.call_args
@@ -147,7 +169,10 @@ class TestHandleGatherResult:
     def test_handles_base_exception_subclass(self) -> None:
         exc = KeyboardInterrupt()
         result = ContextAssembler._handle_gather_result(
-            exc, "source", "chat_1", default="safe",
+            exc,
+            "source",
+            "chat_1",
+            default="safe",
         )
         assert result == "safe"
 
@@ -207,7 +232,8 @@ class TestAssembleHappyPath:
         assert result.channel_prompt == "Channel prompt"
 
     async def test_instruction_and_channel_prompt_in_system_message(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         assembler = _make_assembler(tmp_path)
 
@@ -231,7 +257,8 @@ class TestAssembleEmptyContext:
     """Tests for assemble() when context sources return None/empty."""
 
     async def test_all_sources_none_still_returns_system_message(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         assembler = _make_assembler(
             tmp_path,
@@ -342,7 +369,8 @@ class TestAssembleGracefulDegradation:
     and the remaining reads are completely unaffected."""
 
     async def test_memory_read_failure_others_unaffected(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """When read_memory raises OSError, other sources still contribute."""
         memory = _make_memory()
@@ -377,7 +405,8 @@ class TestAssembleGracefulDegradation:
         assert "Archived summary." in system_content
 
     async def test_project_ctx_failure_others_unaffected(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """When project_ctx.get raises OSError, memory and agents still contribute."""
         memory = _make_memory(
@@ -404,7 +433,8 @@ class TestAssembleGracefulDegradation:
         assert "# Agent Directives" in system_content
 
     async def test_compressed_summary_failure_others_unaffected(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """When compressed summary raises OSError, other sources contribute."""
         memory = _make_memory(
@@ -442,7 +472,8 @@ class TestAssembleTopicCache:
     """Tests for topic cache read during assemble()."""
 
     async def test_topic_summary_included_in_system_prompt(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         assembler = _make_assembler(tmp_path, db=_make_db(rows=[]))
 
@@ -474,7 +505,9 @@ class TestAssembleCompressedSummary:
 
     @patch("src.core.context_assembler.get_metrics_collector")
     async def test_compressed_summary_tracks_metrics(
-        self, mock_get_metrics: MagicMock, tmp_path: Path,
+        self,
+        mock_get_metrics: MagicMock,
+        tmp_path: Path,
     ) -> None:
         mock_metrics = MagicMock()
         mock_get_metrics.return_value = mock_metrics
@@ -489,7 +522,9 @@ class TestAssembleCompressedSummary:
 
     @patch("src.core.context_assembler.get_metrics_collector")
     async def test_no_compressed_summary_does_not_track_metrics(
-        self, mock_get_metrics: MagicMock, tmp_path: Path,
+        self,
+        mock_get_metrics: MagicMock,
+        tmp_path: Path,
     ) -> None:
         mock_metrics = MagicMock()
         mock_get_metrics.return_value = mock_metrics
@@ -504,9 +539,7 @@ class TestAssembleCompressedSummary:
 
     async def test_compressed_summary_in_system_prompt(self, tmp_path: Path) -> None:
         db = _make_db(rows=[])
-        db.get_compressed_summary = AsyncMock(
-            return_value="Summary of old messages."
-        )
+        db.get_compressed_summary = AsyncMock(return_value="Summary of old messages.")
 
         assembler = _make_assembler(tmp_path, db=db)
         result = await assembler.assemble("chat_1")
@@ -529,9 +562,7 @@ class TestAsyncTopicRead:
         # Write a topic file
         topic_dir = tmp_path / "whatsapp_data" / "chat_1"
         topic_dir.mkdir(parents=True, exist_ok=True)
-        (topic_dir / ".topic_summary.md").write_text(
-            "Cached topic.", encoding="utf-8"
-        )
+        (topic_dir / ".topic_summary.md").write_text("Cached topic.", encoding="utf-8")
 
         result = await assembler._async_topic_read("chat_1")
         assert result == "Cached topic."
@@ -580,7 +611,7 @@ class TestFinalizeTurn:
     def test_topic_change_writes_cache(self, tmp_path: Path) -> None:
         assembler = _make_assembler(tmp_path)
 
-        response = "Here's the answer.\n---META---\n{\"topic_changed\": true, \"old_topic_summary\": \"Discussing testing patterns.\"}"
+        response = 'Here\'s the answer.\n---META---\n{"topic_changed": true, "old_topic_summary": "Discussing testing patterns."}'
 
         result = assembler.finalize_turn("chat_1", response)
 
@@ -601,7 +632,7 @@ class TestFinalizeTurn:
     def test_topic_not_changed_does_not_write(self, tmp_path: Path) -> None:
         assembler = _make_assembler(tmp_path)
 
-        response = "Answer.\n---META---\n{\"topic_changed\": false}"
+        response = 'Answer.\n---META---\n{"topic_changed": false}'
         result = assembler.finalize_turn("chat_1", response)
 
         assert result == "Answer."
@@ -618,11 +649,12 @@ class TestFinalizeTurn:
         assert result == response
 
     def test_topic_changed_without_summary_does_not_write(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         assembler = _make_assembler(tmp_path)
 
-        response = "Answer.\n---META---\n{\"topic_changed\": true}"
+        response = 'Answer.\n---META---\n{"topic_changed": true}'
         result = assembler.finalize_turn("chat_1", response)
 
         assert result == "Answer."
@@ -632,10 +664,10 @@ class TestFinalizeTurn:
     def test_multiple_finalize_turns_overwrite_topic(self, tmp_path: Path) -> None:
         assembler = _make_assembler(tmp_path)
 
-        response1 = "First.\n---META---\n{\"topic_changed\": true, \"old_topic_summary\": \"Topic A\"}"
+        response1 = 'First.\n---META---\n{"topic_changed": true, "old_topic_summary": "Topic A"}'
         assembler.finalize_turn("chat_1", response1)
 
-        response2 = "Second.\n---META---\n{\"topic_changed\": true, \"old_topic_summary\": \"Topic B\"}"
+        response2 = 'Second.\n---META---\n{"topic_changed": true, "old_topic_summary": "Topic B"}'
         result = assembler.finalize_turn("chat_1", response2)
 
         assert result == "Second."
@@ -663,7 +695,10 @@ class TestContextResult:
 
     def test_slots_no_dict(self) -> None:
         result = ContextResult(
-            messages=[], instruction_used="", rule_id=None, channel_prompt=None,
+            messages=[],
+            instruction_used="",
+            rule_id=None,
+            channel_prompt=None,
         )
         assert not hasattr(result, "__dict__")
 
@@ -681,7 +716,10 @@ class TestContextResult:
 
     def test_none_optional_fields(self) -> None:
         result = ContextResult(
-            messages=[], instruction_used="", rule_id=None, channel_prompt=None,
+            messages=[],
+            instruction_used="",
+            rule_id=None,
+            channel_prompt=None,
         )
         assert result.rule_id is None
         assert result.channel_prompt is None
@@ -697,9 +735,11 @@ class TestConcurrentAssembly:
 
     async def test_concurrent_assembles_do_not_interfere(self, tmp_path: Path) -> None:
         """Two simultaneous assemble() calls for different chats produce correct results."""
-        db = _make_db(rows=[
-            {"role": "user", "content": "Chat A message"},
-        ])
+        db = _make_db(
+            rows=[
+                {"role": "user", "content": "Chat A message"},
+            ]
+        )
 
         memory = _make_memory(
             memory_content="Memory for chat.",
@@ -708,7 +748,10 @@ class TestConcurrentAssembly:
         project_ctx = _make_project_ctx("Project info.")
 
         assembler = _make_assembler(
-            tmp_path, db=db, memory=memory, project_ctx=project_ctx,
+            tmp_path,
+            db=db,
+            memory=memory,
+            project_ctx=project_ctx,
         )
 
         # Run two assemblies concurrently
@@ -734,7 +777,8 @@ class TestAssembleAndFinalizeIntegration:
     """Integration tests for assemble() + finalize_turn() lifecycle."""
 
     async def test_assemble_reads_cached_topic_from_finalize(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """After finalize_turn writes a topic, the next assemble reads it."""
         assembler = _make_assembler(
@@ -745,7 +789,7 @@ class TestAssembleAndFinalizeIntegration:
         )
 
         # First: finalize a turn that changes topic
-        response = "New topic answer.\n---META---\n{\"topic_changed\": true, \"old_topic_summary\": \"Previous: discussing databases.\"}"
+        response = 'New topic answer.\n---META---\n{"topic_changed": true, "old_topic_summary": "Previous: discussing databases."}'
         assembler.finalize_turn("chat_1", response)
 
         # Second: assemble should pick up the cached topic summary

@@ -15,8 +15,7 @@ import asyncio
 import datetime
 import logging
 import time
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.constants import (
     COMPRESSION_KEEP_RECENT,
@@ -29,8 +28,11 @@ from src.db.db_utils import (
     _db_log_extra,
     _track_db_latency,
 )
-from src.db.file_pool import FileHandlePool
 from src.utils import json_dumps, json_loads
+
+if TYPE_CHECKING:
+    from src.db.file_pool import FileHandlePool
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +84,8 @@ class CompressionService:
         """
         summary_file = self.compressed_summary_file(chat_id)
         return await asyncio.to_thread(
-            self._read_compressed_summary_sync, summary_file,
+            self._read_compressed_summary_sync,
+            summary_file,
         )
 
     @staticmethod
@@ -122,7 +125,9 @@ class CompressionService:
         lock = await self._get_message_lock(chat_id)
         async with lock:
             result = await asyncio.to_thread(
-                self._compress_chat_history_sync, chat_id, msg_file,
+                self._compress_chat_history_sync,
+                chat_id,
+                msg_file,
             )
 
         if result.get("compressed"):
@@ -138,7 +143,9 @@ class CompressionService:
             if summary_text and self._vector_memory is not None:
                 try:
                     await self._vector_memory.save(
-                        chat_id, summary_text, category="compression_summary",
+                        chat_id,
+                        summary_text,
+                        category="compression_summary",
                     )
                 except Exception:
                     log_noncritical(
@@ -152,7 +159,9 @@ class CompressionService:
         return bool(result.get("compressed"))
 
     def _compress_chat_history_sync(
-        self, chat_id: str, msg_file: Path,
+        self,
+        chat_id: str,
+        msg_file: Path,
     ) -> dict:
         """Synchronous compression logic (runs in thread pool).
 
@@ -165,13 +174,15 @@ class CompressionService:
         except FileNotFoundError:
             log.debug(
                 "compress: file disappeared before stat — %s [%s]",
-                msg_file.name, chat_id,
+                msg_file.name,
+                chat_id,
             )
             return {"compressed": False}
         except OSError:
             log.warning(
                 "compress: I/O error during stat — %s [%s]",
-                msg_file.name, chat_id,
+                msg_file.name,
+                chat_id,
             )
             return {"compressed": False}
 
@@ -184,13 +195,15 @@ class CompressionService:
         except FileNotFoundError:
             log.debug(
                 "compress: file disappeared before read — %s [%s]",
-                msg_file.name, chat_id,
+                msg_file.name,
+                chat_id,
             )
             return {"compressed": False}
         except OSError:
             log.warning(
                 "compress: I/O error during read — %s [%s]",
-                msg_file.name, chat_id,
+                msg_file.name,
+                chat_id,
             )
             return {"compressed": False}
 
@@ -279,9 +292,7 @@ class CompressionService:
                         first_ts is None or existing_first < first_ts
                     ):
                         first_ts = existing_first
-                    if existing_last is not None and (
-                        last_ts is None or existing_last > last_ts
-                    ):
+                    if existing_last is not None and (last_ts is None or existing_last > last_ts):
                         last_ts = existing_last
             except Exception:
                 log_noncritical(
@@ -293,10 +304,12 @@ class CompressionService:
         date_range = ""
         if first_ts is not None and last_ts is not None:
             start = datetime.datetime.fromtimestamp(
-                first_ts, tz=datetime.timezone.utc,
+                first_ts,
+                tz=datetime.timezone.utc,
             ).strftime("%Y-%m-%d")
             end = datetime.datetime.fromtimestamp(
-                last_ts, tz=datetime.timezone.utc,
+                last_ts,
+                tz=datetime.timezone.utc,
             ).strftime("%Y-%m-%d")
             date_range = f" from {start} to {end}"
 
@@ -323,11 +336,14 @@ class CompressionService:
         }
         try:
             summary_file.write_text(
-                json_dumps(summary_data, ensure_ascii=False), encoding="utf-8",
+                json_dumps(summary_data, ensure_ascii=False),
+                encoding="utf-8",
             )
         except OSError as exc:
             log.warning(
-                "Failed to write compression summary for %s: %s", chat_id, exc,
+                "Failed to write compression summary for %s: %s",
+                chat_id,
+                exc,
                 extra=_db_log_extra(chat_id),
             )
             return {"compressed": False}
@@ -347,7 +363,9 @@ class CompressionService:
             self._atomic_write(msg_file, new_content)
         except OSError as exc:
             log.warning(
-                "Failed to write compressed JSONL for %s: %s", chat_id, exc,
+                "Failed to write compressed JSONL for %s: %s",
+                chat_id,
+                exc,
                 extra=_db_log_extra(chat_id),
             )
             return {"compressed": False}

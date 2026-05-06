@@ -74,14 +74,29 @@ ERROR_WINDOW_SECONDS: tuple[int, ...] = (300, 900, 3600)  # 5m, 15m, 60m
 # Prometheus histograms use cumulative counts per bucket, enabling
 # server-side percentile computation over arbitrary time windows.
 LLM_LATENCY_HISTOGRAM_BUCKETS_MS: tuple[float, ...] = (
-    500.0, 1000.0, 2000.0, 5000.0, 10000.0, 30000.0, 60000.0, 120000.0,
+    500.0,
+    1000.0,
+    2000.0,
+    5000.0,
+    10000.0,
+    30000.0,
+    60000.0,
+    120000.0,
 )
 
 # Fixed bucket boundaries (milliseconds) for the DB write latency histogram.
 # DB writes (JSONL appends, index updates) are typically sub-100ms; buckets
 # are tuned for the fast write path rather than the slower LLM call path.
 DB_WRITE_LATENCY_HISTOGRAM_BUCKETS_MS: tuple[float, ...] = (
-    5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0,
+    5.0,
+    10.0,
+    25.0,
+    50.0,
+    100.0,
+    250.0,
+    500.0,
+    1000.0,
+    5000.0,
 )
 
 # Maximum number of chats tracked for per-chat message counting.
@@ -133,9 +148,7 @@ class PerformanceMetrics(BaseBackgroundService):
         self._db_latencies: deque[float] = deque(maxlen=history_size)
 
         # DB write latency histogram (separate from general DB latency)
-        self._db_write_latency_histogram = LatencyHistogram(
-            DB_WRITE_LATENCY_HISTOGRAM_BUCKETS_MS
-        )
+        self._db_write_latency_histogram = LatencyHistogram(DB_WRITE_LATENCY_HISTOGRAM_BUCKETS_MS)
         self._db_write_latencies: deque[float] = deque(maxlen=history_size)
 
         # Fixed-bucket histogram for LLM latency Prometheus exposition
@@ -249,9 +262,7 @@ class PerformanceMetrics(BaseBackgroundService):
         self._react_iteration_counts.append(float(count))
         self._react_iterations_total += count
 
-    def track_context_budget_utilization(
-        self, used_tokens: int, budget: int
-    ) -> None:
+    def track_context_budget_utilization(self, used_tokens: int, budget: int) -> None:
         """Record the ratio of tokens used to the max budget on a context build.
 
         A ratio near 1.0 indicates the context is hitting the budget ceiling
@@ -326,9 +337,7 @@ class PerformanceMetrics(BaseBackgroundService):
         Args:
             error_code: The :class:`ErrorCode` value string (e.g. ``"ERR_1001"``).
         """
-        self._llm_error_counts[error_code] = (
-            self._llm_error_counts.get(error_code, 0) + 1
-        )
+        self._llm_error_counts[error_code] = self._llm_error_counts.get(error_code, 0) + 1
 
     def track_skill_args_oversized(self, skill_name: str, arg_size_bytes: int) -> None:
         """Record a rejected skill call due to oversized arguments.
@@ -337,9 +346,7 @@ class PerformanceMetrics(BaseBackgroundService):
             skill_name: Name of the skill that received oversized args.
             arg_size_bytes: Size of the raw argument payload in bytes.
         """
-        self._skill_oversized_args[skill_name] = (
-            self._skill_oversized_args.get(skill_name, 0) + 1
-        )
+        self._skill_oversized_args[skill_name] = self._skill_oversized_args.get(skill_name, 0) + 1
 
         # Update size distribution (min/max/total)
         stats = self._skill_oversized_args_sizes.get(skill_name)
@@ -368,9 +375,7 @@ class PerformanceMetrics(BaseBackgroundService):
             return
         ratio = actual_seconds / timeout_seconds
         if skill_name not in self._skill_timeout_ratios:
-            self._skill_timeout_ratios[skill_name] = deque(
-                maxlen=self._history_size
-            )
+            self._skill_timeout_ratios[skill_name] = deque(maxlen=self._history_size)
         self._skill_timeout_ratios[skill_name].append(ratio)
 
     def update_queue_depth(self, depth: int) -> None:
@@ -469,11 +474,13 @@ class PerformanceMetrics(BaseBackgroundService):
             window_cutoff = now - window_secs
             count = sum(1 for ts in timestamps if ts >= window_cutoff)
             rate = count / (window_secs / 60)  # errors per minute
-            results.append(ErrorWindowStats(
-                window_seconds=window_secs,
-                error_count=count,
-                error_rate_per_minute=rate,
-            ))
+            results.append(
+                ErrorWindowStats(
+                    window_seconds=window_secs,
+                    error_count=count,
+                    error_rate_per_minute=rate,
+                )
+            )
         return results
 
     def track_conversation_depth(self, chat_id: str, depth: int) -> None:
@@ -670,7 +677,7 @@ class PerformanceMetrics(BaseBackgroundService):
 
     async def _run_loop(self) -> None:
         """Background task for periodic metrics logging."""
-        interval_seconds = getattr(self, '_interval', DEFAULT_METRICS_LOG_INTERVAL)
+        interval_seconds = getattr(self, "_interval", DEFAULT_METRICS_LOG_INTERVAL)
         log.info(
             "Performance metrics logging started (interval=%.1fs)",
             interval_seconds,
@@ -697,9 +704,6 @@ class PerformanceMetrics(BaseBackgroundService):
         """
         self._interval = interval_seconds
         self.start()
-
-
-
 
 
 def get_metrics_collector(

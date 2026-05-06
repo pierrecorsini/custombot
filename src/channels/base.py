@@ -23,9 +23,11 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Optional
 
 if TYPE_CHECKING:
     from src.config import Config
+    from src.core.dedup import DeduplicationService
     from src.utils.protocols import Channel
 
 from src.utils.locking import AsyncLock
+from src.utils.validation import _CHAT_ID_RE, _validate_chat_id
 
 log = logging.getLogger(__name__)
 
@@ -55,13 +57,8 @@ VALID_CHANNEL_TYPES: frozenset[str] = frozenset(e.value for e in ChannelType) | 
 _CHANNEL_TYPE_RE = re.compile(r"^[a-z0-9_]+$")
 
 # Pattern for valid chat_id at the message boundary.
-# Allows: alphanumeric, dash, underscore, dot, and @.
-# Real-world values: "1234567890@s.whatsapp.net", "120363abc@g.us",
-# "12345678-1234-1234-1234-123456789012" (CLI UUID).
-# Rejects: path separators (/ \), dots-only (.. traversal), control chars,
-# whitespace, and other characters that could corrupt filesystem paths,
-# log lines, or metric labels.
-_CHAT_ID_RE = re.compile(r"^[a-zA-Z0-9_\-.@]+$")
+# Canonical definition lives in src/utils/validation.py (_CHAT_ID_RE).
+_CHAT_ID_RE  # noqa: B018 — re-exported for local aliasing below.
 
 # Pattern for valid message_id at the message boundary.
 # Mirrors _CHAT_ID_RE: alphanumeric, dash, underscore, dot, @.
@@ -72,41 +69,6 @@ _MESSAGE_ID_RE = _CHAT_ID_RE
 # Mirrors _CHAT_ID_RE: alphanumeric, dash, underscore, dot, @.
 # Real-world values: WhatsApp phone numbers "1234567890", CLI chat IDs "cli-abc123".
 _SENDER_ID_RE = _CHAT_ID_RE
-
-
-def _validate_chat_id(chat_id: object, *, max_length: int = 200) -> None:
-    """Validate ``chat_id`` at the IncomingMessage boundary.
-
-    Defense-in-depth check that catches malicious or malformed chat IDs
-    *before* they reach any filesystem operation (workspace directories,
-    JSONL files, scheduler paths, etc.).
-
-    Args:
-        chat_id: Value to validate.
-        max_length: Maximum allowed length (default matches MAX_CHAT_ID_LENGTH).
-
-    Raises:
-        TypeError: If ``chat_id`` is not a string.
-        ValueError: If ``chat_id`` is empty, too long, or contains unsafe
-            characters.
-    """
-    from src.constants import MAX_CHAT_ID_LENGTH
-
-    if not isinstance(chat_id, str):
-        raise TypeError(f"IncomingMessage.chat_id must be a str, got {type(chat_id).__name__}")
-    if not chat_id:
-        raise ValueError("IncomingMessage.chat_id must not be empty")
-    effective_max = max_length or MAX_CHAT_ID_LENGTH
-    if len(chat_id) > effective_max:
-        raise ValueError(
-            f"IncomingMessage.chat_id exceeds maximum length "
-            f"({len(chat_id)} > {effective_max}): {chat_id[:40]!r}..."
-        )
-    if not _CHAT_ID_RE.match(chat_id):
-        raise ValueError(
-            f"IncomingMessage.chat_id contains invalid characters: {chat_id!r}. "
-            "Only alphanumeric characters, dash, underscore, dot, and @ are allowed."
-        )
 
 
 def _validate_message_id(message_id: object, *, max_length: int = 200) -> None:
@@ -182,22 +144,31 @@ def _validate_sender_id(sender_id: object, *, max_length: int = 200) -> None:
 # Characters allowed in sender_name.
 # Broader than the ID regex: allows spaces, commas, Unicode letters,
 # and common punctuation that appear in real display names.
-# Rejects control characters, path separators, and other dangerous chars.
+# Rejects path separators and other dangerous printable chars.
+# Note: control characters (\x00-\x1f, \x7f) are stripped before this check.
 _SENDER_NAME_RE = re.compile(r"^[^\x00-\x1f\x7f/\\<>\"|?*]+$")
 
+# Control characters stripped from sender_name before validation.
+# Covers null, tabs, newlines, carriage returns, ANSI escapes, DEL, etc.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
-def _validate_sender_name(sender_name: object, *, max_length: int = 200) -> None:
-    """Validate ``sender_name`` at the IncomingMessage boundary.
 
-    Rejects excessively long names and characters that could corrupt
-    logs, terminal output, or filesystem paths (control chars, path
-    separators, etc.).  Empty string is allowed — some channels omit
-    display names.
+def _validate_sender_name(sender_name: object, *, max_length: int = 200) -> str:
+    """Sanitize and validate ``sender_name`` at the IncomingMessage boundary.
+
+    Strips non-printable characters (control chars \\x00-\\x1f, \\x7f) and
+    truncates to ``max_length``.  After sanitization, still rejects names
+    containing dangerous printable characters (path separators, shell
+    metacharacters).  Empty string is allowed — some channels omit display
+    names.
+
+    Returns:
+        The sanitized sender_name string.
 
     Raises:
         TypeError: If ``sender_name`` is not a string.
-        ValueError: If ``sender_name`` is too long or contains unsafe
-            characters.
+        ValueError: If the sanitized ``sender_name`` contains unsafe
+            printable characters.
     """
     from src.constants import MAX_SENDER_NAME_LENGTH
 
@@ -205,18 +176,18 @@ def _validate_sender_name(sender_name: object, *, max_length: int = 200) -> None
         raise TypeError(
             f"IncomingMessage.sender_name must be a str, got {type(sender_name).__name__}"
         )
+    # Strip control characters (ANSI escapes, null bytes, tabs, newlines, etc.)
+    sanitized = _CONTROL_CHARS_RE.sub("", sender_name)
+    # Truncate to maximum length
     effective_max = max_length or MAX_SENDER_NAME_LENGTH
-    if len(sender_name) > effective_max:
+    sanitized = sanitized[:effective_max]
+    # Reject dangerous printable characters (path separators, shell metacharacters).
+    if sanitized and not _SENDER_NAME_RE.match(sanitized):
         raise ValueError(
-            f"IncomingMessage.sender_name exceeds maximum length "
-            f"({len(sender_name)} > {effective_max}): {sender_name[:40]!r}..."
+            f"IncomingMessage.sender_name contains unsafe characters: {sanitized!r}. "
+            "Path separators and shell metacharacters are not allowed."
         )
-    # Empty sender_name is allowed (some channels don't provide a display name).
-    if sender_name and not _SENDER_NAME_RE.match(sender_name):
-        raise ValueError(
-            f"IncomingMessage.sender_name contains unsafe characters: {sender_name!r}. "
-            "Control characters, path separators, and shell metacharacters are not allowed."
-        )
+    return sanitized
 
 
 def _validate_timestamp(timestamp: object) -> None:
@@ -330,7 +301,10 @@ class IncomingMessage:
         _validate_chat_id(self.chat_id)
         _validate_message_id(self.message_id)
         _validate_sender_id(self.sender_id)
-        _validate_sender_name(self.sender_name)
+        # Sanitize sender_name: strip control chars + truncate (frozen → setattr).
+        sanitized_name = _validate_sender_name(self.sender_name)
+        if sanitized_name != self.sender_name:
+            object.__setattr__(self, "sender_name", sanitized_name)
         _validate_timestamp(self.timestamp)
         if self.correlation_id is not None:
             _validate_correlation_id(self.correlation_id)
@@ -490,6 +464,63 @@ class BaseChannel(ABC):
                     return
             log.debug("Full chat_id for safe-mode send: %s", chat_id)
         await self._send_message(chat_id, text, skip_delays=skip_delays)
+
+    async def send_and_track(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        dedup: DeduplicationService | None = None,
+        skip_delays: bool = False,
+    ) -> None:
+        """Send a message, record outbound dedup, and emit a ``response_sent`` event.
+
+        Centralizes the send → dedup → event pipeline so that *all* outbound
+        paths (normal responses, error replies, scheduled replies, rate-limit
+        warnings) are tracked consistently.  Callers that only need persistence
+        without an actual channel send should use
+        :func:`src.bot.response_delivery.send_to_chat` directly with
+        ``channel=None``.
+
+        Args:
+            chat_id: Target chat identifier.
+            text: Message body.
+            dedup: Optional deduplication service for outbound tracking.
+            skip_delays: Bypass human-like timing delays (for scheduled tasks).
+        """
+        from src.core.errors import NonCriticalCategory, log_noncritical
+        from src.core.event_bus import Event, get_event_bus
+        from src.logging import get_correlation_id
+
+        try:
+            await self.send_message(chat_id, text, skip_delays=skip_delays)
+        except Exception:
+            # send_message already handles safe-mode; this catch is for
+            # unexpected transport errors so that dedup + event still fire.
+            log.warning(
+                "send_and_track: send_message failed for chat %s",
+                chat_id,
+                exc_info=True,
+            )
+
+        if dedup:
+            dedup.record_outbound(chat_id, text)
+
+        try:
+            await get_event_bus().emit(
+                Event(
+                    name="response_sent",
+                    data={"chat_id": chat_id, "response_length": len(text)},
+                    source="BaseChannel.send_and_track",
+                    correlation_id=get_correlation_id(),
+                )
+            )
+        except Exception:
+            log_noncritical(
+                NonCriticalCategory.EVENT_EMISSION,
+                f"Failed to emit response_sent event for chat {chat_id}",
+                logger=log,
+            )
 
     @abstractmethod
     async def _send_message(self, chat_id: str, text: str, *, skip_delays: bool = False) -> None:

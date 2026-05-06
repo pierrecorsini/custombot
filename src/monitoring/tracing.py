@@ -152,7 +152,7 @@ def _setup_provider() -> Any:
         log.debug("OpenTelemetry packages not installed — tracing disabled")
         return _noop_tracer
 
-    exporter_name = os.environ.get("OTEL_TRACES_EXPORTER", "console").lower()
+    exporter_name = os.environ.get("OTEL_TRACES_EXPORTER", "none").lower()
 
     if exporter_name == "none":
         log.info("OTel tracing explicitly disabled via OTEL_TRACES_EXPORTER=none")
@@ -199,9 +199,7 @@ def _setup_provider() -> Any:
                     _tracer = provider.get_tracer("custombot", "1.0.0")
                     return _tracer
 
-            endpoint = os.environ.get(
-                "OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"
-            )
+            endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
             exporter = OTLPSpanExporter(endpoint=endpoint)
             provider.add_span_processor(BatchSpanProcessor(exporter))
             log.info(
@@ -270,14 +268,10 @@ async def message_pipeline_span(
     if _OTEL_AVAILABLE:
         from opentelemetry import trace
 
-        with tracer.start_as_current_span(
-            "message_pipeline", attributes=attrs
-        ) as span:
+        with tracer.start_as_current_span("message_pipeline", attributes=attrs) as span:
             yield span
     else:
-        async with tracer.start_as_current_span_async(
-            "message_pipeline", attributes=attrs
-        ) as span:
+        async with tracer.start_as_current_span_async("message_pipeline", attributes=attrs) as span:
             yield span
 
 
@@ -363,9 +357,7 @@ def context_assembly_span(chat_id: str, rule_id: str | None = None) -> Iterator[
     if rule_id:
         attrs["custombot.routing.rule_id"] = rule_id
 
-    with tracer.start_as_current_span(
-        "context.assembly", attributes=attrs
-    ) as span:
+    with tracer.start_as_current_span("context.assembly", attributes=attrs) as span:
         yield span
 
 
@@ -389,6 +381,8 @@ def get_tracing_status() -> dict[str, Any]:
     return {
         "available": _OTEL_AVAILABLE,
         "initialized": _initialized,
-        "exporter": os.environ.get("OTEL_TRACES_EXPORTER", "console" if _OTEL_AVAILABLE else "unavailable"),
+        "exporter": os.environ.get(
+            "OTEL_TRACES_EXPORTER", "console" if _OTEL_AVAILABLE else "unavailable"
+        ),
         "service_name": os.environ.get("OTEL_SERVICE_NAME", "custombot"),
     }

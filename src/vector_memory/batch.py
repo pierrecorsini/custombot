@@ -147,6 +147,7 @@ class BatchEmbedMixin:
             resp = await self._client.embeddings.create(
                 model=self._embedding_model,
                 input=unique_texts,
+                encoding_format="float",
             )
 
             if len(resp.data) != len(unique_texts):

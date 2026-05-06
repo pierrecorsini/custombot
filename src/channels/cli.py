@@ -16,14 +16,17 @@ import logging
 import sys
 import time
 import uuid
-from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from rich.console import Console
 from rich.panel import Panel
 
-from src.channels.base import BaseChannel, IncomingMessage, MessageHandler
+from src.channels.base import BaseChannel, IncomingMessage
 from src.core.errors import NonCriticalCategory, log_noncritical
+
+if TYPE_CHECKING:
+    from src.channels.base import MessageHandler
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 

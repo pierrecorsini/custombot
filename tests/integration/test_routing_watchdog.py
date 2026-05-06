@@ -17,7 +17,6 @@ from __future__ import annotations
 import sys
 import threading
 import time
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -25,6 +24,10 @@ import pytest
 from src.channels.base import ChannelType, IncomingMessage
 from src.constants import ROUTING_WATCH_DEBOUNCE_SECONDS
 from src.routing import RoutingEngine, _HAS_WATCHDOG
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -37,14 +40,7 @@ _POLL_DEBOUNCE = 0.05
 
 def _md_content(rule_id: str, priority: int = 1, body: str = "# Rule") -> str:
     """Return a minimal .md file with a single routing rule."""
-    return (
-        f"---\n"
-        f"routing:\n"
-        f"  id: {rule_id}\n"
-        f"  priority: {priority}\n"
-        f"---\n\n"
-        f"{body}\n"
-    )
+    return f"---\nrouting:\n  id: {rule_id}\n  priority: {priority}\n---\n\n{body}\n"
 
 
 def _make_msg(text: str = "hello") -> IncomingMessage:
@@ -125,9 +121,7 @@ class TestPollingAutoReload:
 
     # ── New file creation triggers reload ──────────────────────────────────
 
-    def test_new_file_triggers_auto_reload(
-        self, tmp_path: Path, engine: RoutingEngine
-    ) -> None:
+    def test_new_file_triggers_auto_reload(self, tmp_path: Path, engine: RoutingEngine) -> None:
         """Creating a new .md file with routing rules is detected on next match."""
         msg = _make_msg()
 
@@ -170,9 +164,7 @@ class TestPollingAutoReload:
 
     # ── Full lifecycle: create → modify → delete → recreate ───────────────
 
-    def test_full_lifecycle_via_polling(
-        self, tmp_path: Path, engine: RoutingEngine
-    ) -> None:
+    def test_full_lifecycle_via_polling(self, tmp_path: Path, engine: RoutingEngine) -> None:
         """Full lifecycle through polling: create, match, modify, re-match,
         delete, verify gone, recreate, verify restored."""
         msg = _make_msg()

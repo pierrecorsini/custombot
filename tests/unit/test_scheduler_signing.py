@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -27,6 +26,10 @@ from src.security.signing import (
     verify_payload,
     write_signature_file,
 )
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
@@ -78,13 +81,22 @@ def scheduler(workspace: Path, on_trigger: AsyncMock) -> TaskScheduler:
 
 @pytest.fixture(autouse=True)
 def _clean_env():
-    """Ensure SCHEDULER_HMAC_SECRET is not set between tests."""
+    """Ensure SCHEDULER_HMAC_SECRET is not set between tests.
+
+    Also resets the module-level cache so that ``get_scheduler_secret()``
+    re-reads the environment on each test.  Without this, the cached value
+    from an earlier test leaks into subsequent tests.
+    """
+    import src.security.signing as _signing_mod
+
     original = os.environ.pop(SCHEDULER_HMAC_SECRET_ENV, None)
+    _signing_mod._cached_secret = _signing_mod._SENTINEL
     yield
     if original is not None:
         os.environ[SCHEDULER_HMAC_SECRET_ENV] = original
     elif SCHEDULER_HMAC_SECRET_ENV in os.environ:
         del os.environ[SCHEDULER_HMAC_SECRET_ENV]
+    _signing_mod._cached_secret = _signing_mod._SENTINEL
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -268,7 +280,10 @@ class TestSchedulerWriteSigning:
 
     @pytest.mark.asyncio
     async def test_sig_after_execution_persist(
-        self, scheduler: TaskScheduler, workspace: Path, on_trigger: AsyncMock,
+        self,
+        scheduler: TaskScheduler,
+        workspace: Path,
+        on_trigger: AsyncMock,
     ):
         """Signature is updated after task execution + persist."""
         os.environ[SCHEDULER_HMAC_SECRET_ENV] = SECRET
@@ -300,7 +315,9 @@ class TestSchedulerLoadVerification:
 
     @pytest.mark.asyncio
     async def test_load_without_secret_succeeds(
-        self, scheduler: TaskScheduler, workspace: Path,
+        self,
+        scheduler: TaskScheduler,
+        workspace: Path,
     ):
         """Without secret, loading unsigned tasks works as before."""
         await scheduler.add_task("chat1", _make_task(prompt="legacy"))

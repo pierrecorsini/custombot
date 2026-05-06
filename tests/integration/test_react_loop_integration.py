@@ -19,9 +19,8 @@ from __future__ import annotations
 
 import json
 import tempfile
-from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any, TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -35,6 +34,10 @@ from src.skills import SkillRegistry
 from src.skills.base import BaseSkill
 
 from tests.helpers.llm_mocks import make_chat_response, make_tool_call
+
+if TYPE_CHECKING:
+    from unittest.mock import MagicMock
+    from pathlib import Path
 
 
 # ── Stub Skills ───────────────────────────────────────────────────────────────
@@ -110,11 +113,13 @@ class _FileWriteSkill(BaseSkill):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-RETRYABLE_CODES = frozenset({
-    ErrorCode.LLM_RATE_LIMITED,
-    ErrorCode.LLM_TIMEOUT,
-    ErrorCode.LLM_CONNECTION_FAILED,
-})
+RETRYABLE_CODES = frozenset(
+    {
+        ErrorCode.LLM_RATE_LIMITED,
+        ErrorCode.LLM_TIMEOUT,
+        ErrorCode.LLM_CONNECTION_FAILED,
+    }
+)
 
 
 def _make_stub_llm(responses: list[MagicMock]) -> AsyncMock:
@@ -268,7 +273,9 @@ class TestReactLoopMultiStepToolChain:
             arguments='{"expression": "10 * 4"}',
         )
         response1 = make_chat_response(
-            content=None, finish_reason="tool_calls", tool_calls=[tc1],
+            content=None,
+            finish_reason="tool_calls",
+            tool_calls=[tc1],
         )
 
         # Iteration 2: lookup
@@ -278,7 +285,9 @@ class TestReactLoopMultiStepToolChain:
             arguments='{"key": "capital_france"}',
         )
         response2 = make_chat_response(
-            content=None, finish_reason="tool_calls", tool_calls=[tc2],
+            content=None,
+            finish_reason="tool_calls",
+            tool_calls=[tc2],
         )
 
         # Iteration 3: final answer
@@ -426,7 +435,9 @@ class TestReactLoopToolLogAssembly:
             arguments='{"filename": "hello.txt", "content": "Hello World"}',
         )
         tool_response = make_chat_response(
-            content=None, finish_reason="tool_calls", tool_calls=[tc],
+            content=None,
+            finish_reason="tool_calls",
+            tool_calls=[tc],
         )
         final_response = make_chat_response(
             content="I wrote the note for you.",
@@ -471,9 +482,7 @@ class TestReactLoopToolLogAssembly:
 class TestReactLoopMessageBufferIntegrity:
     """Integration: Verify buffered_persist message sequence is correct."""
 
-    async def test_buffered_persist_contains_full_conversation_trace(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_buffered_persist_contains_full_conversation_trace(self, tmp_path: Path) -> None:
         """
         After a 2-step tool chain, buffered_persist should contain:
           [asst(turn1), tool(turn1), asst(turn2), tool(turn2)]
@@ -485,11 +494,13 @@ class TestReactLoopMessageBufferIntegrity:
         workspace.mkdir(parents=True, exist_ok=True)
 
         tc1 = make_tool_call(
-            call_id="call_b1", name="calculator",
+            call_id="call_b1",
+            name="calculator",
             arguments='{"expression": "1 + 1"}',
         )
         tc2 = make_tool_call(
-            call_id="call_b2", name="lookup",
+            call_id="call_b2",
+            name="lookup",
             arguments='{"key": "population_earth"}',
         )
 
@@ -544,6 +555,7 @@ from contextlib import contextmanager
 def _patch_workspace_dir(tmp_path: Path):
     """Patch WORKSPACE_DIR in react_loop to tmp_path so path-traversal passes."""
     import src.bot.react_loop as _mod
+
     original = _mod.WORKSPACE_DIR
     _mod.WORKSPACE_DIR = str(tmp_path)
     try:

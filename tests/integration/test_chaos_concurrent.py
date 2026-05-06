@@ -20,8 +20,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -36,6 +35,9 @@ from src.memory import Memory
 from src.message_queue import MessageQueue
 from src.routing import RoutingEngine, RoutingRule
 from src.skills import SkillRegistry
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -189,8 +191,7 @@ class TestChaosConcurrentWithFailures:
             await db.connect()
 
             messages = [
-                _make_message(cid, f"msg-fail-{cid}-001", f"Hello from {cid}")
-                for cid in chat_ids
+                _make_message(cid, f"msg-fail-{cid}-001", f"Hello from {cid}") for cid in chat_ids
             ]
 
             results = await asyncio.gather(
@@ -222,9 +223,7 @@ class TestChaosConcurrentWithFailures:
             else:
                 # Failed chat: only the user message was saved (or nothing if
                 # the save happened before the LLM call and the error propagated)
-                assert len(rows) <= 1, (
-                    f"Failed chat {cid} should have ≤1 messages, got {len(rows)}"
-                )
+                assert len(rows) <= 1, f"Failed chat {cid} should have ≤1 messages, got {len(rows)}"
 
         await db.close()
 
@@ -311,8 +310,7 @@ class TestChaosConcurrentWithFailures:
             if idx not in fail_indices:
                 rows = await db.get_recent_messages(chat_ids[idx], limit=50)
                 assert len(rows) == 2, (
-                    f"Successful chat {chat_ids[idx]} should have 2 messages, "
-                    f"got {len(rows)}"
+                    f"Successful chat {chat_ids[idx]} should have 2 messages, got {len(rows)}"
                 )
 
         await queue.close()
@@ -332,9 +330,7 @@ class TestChaosDedupConcurrency:
     """
 
     @pytest.mark.asyncio
-    async def test_duplicate_message_ids_rejected_after_persist(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_duplicate_message_ids_rejected_after_persist(self, tmp_path: Path) -> None:
         """
         Submit one message, let it complete and persist, then submit 4
         duplicates with the same message_id concurrently.
@@ -412,16 +408,12 @@ class TestChaosDedupConcurrency:
         for i in range(num_duplicates):
             cid = f"chat-dedup-chaos-dup-{i:03d}"
             rows = await db.get_recent_messages(cid, limit=50)
-            assert len(rows) == 0, (
-                f"Duplicate chat {cid} should have 0 messages, got {len(rows)}"
-            )
+            assert len(rows) == 0, f"Duplicate chat {cid} should have 0 messages, got {len(rows)}"
 
         await db.close()
 
     @pytest.mark.asyncio
-    async def test_unique_then_duplicate_concurrent_rejection(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_unique_then_duplicate_concurrent_rejection(self, tmp_path: Path) -> None:
         """
         5 chats send unique messages concurrently (all succeed), then
         5 duplicate messages reusing the same message_ids are submitted
@@ -474,9 +466,7 @@ class TestChaosDedupConcurrency:
             )
 
         # All unique messages should succeed
-        successful = [
-            r for r in results1 if isinstance(r, str) and r is not None
-        ]
+        successful = [r for r in results1 if isinstance(r, str) and r is not None]
         assert len(successful) == num_unique, (
             f"Expected {num_unique} successful unique messages, "
             f"got {len(successful)}. Results: {results1}"
@@ -503,8 +493,7 @@ class TestChaosDedupConcurrency:
         # All duplicates should be rejected by dedup
         rejected = [r for r in results2 if r is None]
         assert len(rejected) == num_unique, (
-            f"Expected {num_unique} rejected duplicates, got {len(rejected)}. "
-            f"Results: {results2}"
+            f"Expected {num_unique} rejected duplicates, got {len(rejected)}. Results: {results2}"
         )
 
         # Verify each unique chat has correct DB state
@@ -512,17 +501,14 @@ class TestChaosDedupConcurrency:
             cid = f"chat-inter-{i:03d}"
             rows = await db.get_recent_messages(cid, limit=50)
             assert len(rows) == 2, (
-                f"Chat {cid} should have 2 messages (user + assistant), "
-                f"got {len(rows)}"
+                f"Chat {cid} should have 2 messages (user + assistant), got {len(rows)}"
             )
 
         # Verify duplicate chats have no messages
         for i in range(num_unique):
             cid = f"chat-inter-dup-{i:03d}"
             rows = await db.get_recent_messages(cid, limit=50)
-            assert len(rows) == 0, (
-                f"Duplicate chat {cid} should have 0 messages, got {len(rows)}"
-            )
+            assert len(rows) == 0, f"Duplicate chat {cid} should have 0 messages, got {len(rows)}"
 
         await db.close()
 
@@ -540,9 +526,7 @@ class TestChaosInterleavedMessages:
     """
 
     @pytest.mark.asyncio
-    async def test_interleaved_messages_with_random_failures(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_interleaved_messages_with_random_failures(self, tmp_path: Path) -> None:
         """
         10 chats, each sending 3 messages concurrently.
         Random ~30% of LLM calls fail with RuntimeError.
@@ -597,9 +581,7 @@ class TestChaosInterleavedMessages:
                         # Check if this call should fail
                         for mi in range(msgs_per_chat):
                             if f"msg-{mi}" in last_user_msg and (ci, mi) in fail_set:
-                                raise RuntimeError(
-                                    f"Chaos failure for {cid} msg {mi}"
-                                )
+                                raise RuntimeError(f"Chaos failure for {cid} msg {mi}")
                         break
 
                 # Track concurrency
@@ -612,9 +594,7 @@ class TestChaosInterleavedMessages:
                 await asyncio.sleep(0.02)  # Simulate latency
 
                 async with chat_lock:
-                    concurrent_per_chat[chat_id] = concurrent_per_chat.get(
-                        chat_id, 1
-                    ) - 1
+                    concurrent_per_chat[chat_id] = concurrent_per_chat.get(chat_id, 1) - 1
 
                 return _make_text_response(f"OK-{chat_id}")
 
@@ -639,19 +619,13 @@ class TestChaosInterleavedMessages:
 
         # Count successes/failures
         successes = [r for r in results if isinstance(r, str) and r is not None]
-        failures = [
-            r
-            for r in results
-            if isinstance(r, Exception) or r is None
-        ]
+        failures = [r for r in results if isinstance(r, Exception) or r is None]
         total_expected = num_chats * msgs_per_chat
         assert len(successes) + len(failures) == total_expected
 
         # Per-chat lock should serialize: max concurrent per chat = 1
         for cid, max_c in max_concurrent_per_chat.items():
-            assert max_c <= 1, (
-                f"Per-chat lock violated for {cid}: max concurrent = {max_c}"
-            )
+            assert max_c <= 1, f"Per-chat lock violated for {cid}: max concurrent = {max_c}"
 
         # Verify DB consistency for each chat.
         # User messages are saved BEFORE the LLM call, so even failed messages
@@ -678,9 +652,7 @@ class TestChaosInterleavedMessages:
             # Verify no cross-chat leakage
             for row in rows:
                 if row["role"] == "user":
-                    assert cid in row["content"], (
-                        f"Cross-chat leak in {cid}: {row['content']}"
-                    )
+                    assert cid in row["content"], f"Cross-chat leak in {cid}: {row['content']}"
 
         await db.close()
 
@@ -697,9 +669,7 @@ class TestChaosQueueRecovery:
     """
 
     @pytest.mark.asyncio
-    async def test_stale_recovery_after_forced_failures(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_stale_recovery_after_forced_failures(self, tmp_path: Path) -> None:
         """
         1. Send 10 messages with queue enabled; 3 fail.
         2. Those 3 stay in queue as pending.
@@ -757,9 +727,7 @@ class TestChaosQueueRecovery:
 
         # Verify 3 pending messages in queue
         pending = await queue.get_pending_count()
-        assert pending == len(fail_indices), (
-            f"Expected {len(fail_indices)} pending, got {pending}"
-        )
+        assert pending == len(fail_indices), f"Expected {len(fail_indices)} pending, got {pending}"
 
         # Phase 2: Make stale by setting updated_at in the past
         # We use timeout=0 with recover_stale to force recovery
@@ -806,8 +774,7 @@ class TestChaosQueueRecovery:
             # Phase 1 saved the user message for failed chats,
             # Phase 3 reprocessed them saving user + assistant
             assert len(rows) >= 2, (
-                f"Chat {cid} should have ≥2 messages after recovery, "
-                f"got {len(rows)}"
+                f"Chat {cid} should have ≥2 messages after recovery, got {len(rows)}"
             )
 
         await queue.close()
@@ -816,9 +783,7 @@ class TestChaosQueueRecovery:
         await db2.close()
 
     @pytest.mark.asyncio
-    async def test_concurrent_enqueue_and_complete_integrity(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_concurrent_enqueue_and_complete_integrity(self, tmp_path: Path) -> None:
         """
         Directly exercise the queue's enqueue/complete under high concurrency
         without going through the Bot, to stress-test the queue's internal
@@ -854,13 +819,9 @@ class TestChaosQueueRecovery:
 
         # Complete all concurrently
         message_ids = [f"msg-qdirect-{i:04d}" for i in range(num_messages)]
-        results = await asyncio.gather(
-            *[queue.complete(mid) for mid in message_ids]
-        )
+        results = await asyncio.gather(*[queue.complete(mid) for mid in message_ids])
 
-        assert all(r is True for r in results), (
-            f"Some completions failed: {results}"
-        )
+        assert all(r is True for r in results), f"Some completions failed: {results}"
 
         pending_after = await queue.get_pending_count()
         assert pending_after == 0, (
@@ -951,9 +912,7 @@ class TestChaosMixedSuccessFailureInvariants:
                 await asyncio.sleep(0.03)
 
                 async with track_lock:
-                    concurrent_counts[chat_id] = concurrent_counts.get(
-                        chat_id, 1
-                    ) - 1
+                    concurrent_counts[chat_id] = concurrent_counts.get(chat_id, 1) - 1
 
                 # Check if this should fail
                 for ci in range(num_chats):
@@ -987,9 +946,7 @@ class TestChaosMixedSuccessFailureInvariants:
 
         # Invariant 1: Per-chat lock serialization
         for cid, mc in max_concurrent.items():
-            assert mc <= 1, (
-                f"INV1 FAIL: {cid} had max concurrent LLM calls = {mc}"
-            )
+            assert mc <= 1, f"INV1 FAIL: {cid} had max concurrent LLM calls = {mc}"
 
         # Count expected failures
         total_failures = 0
@@ -1033,9 +990,7 @@ class TestChaosMixedSuccessFailureInvariants:
             for row in rows:
                 content = row.get("content", "")
                 if row["role"] == "user" and content:
-                    assert cid in content, (
-                        f"INV5 FAIL: Cross-chat leak in {cid}: {content}"
-                    )
+                    assert cid in content, f"INV5 FAIL: Cross-chat leak in {cid}: {content}"
 
         await queue.close()
         await db.close()

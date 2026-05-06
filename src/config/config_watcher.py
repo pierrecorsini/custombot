@@ -100,6 +100,7 @@ SAFE_FIELDS: frozenset[str] = frozenset(
         "shutdown_timeout",
         "shell.command_denylist",
         "shell.command_allowlist",
+        "react_loop_timeout",
     }
 )
 
@@ -263,6 +264,8 @@ class ConfigChangeApplier:
             "llm.system_prompt_prefix",
             "memory_max_history",
             "per_chat_timeout",
+            "react_loop_timeout",
+            "max_concurrent_messages",
         }
         if not bot_fields & changed:
             return
@@ -273,6 +276,8 @@ class ConfigChangeApplier:
             system_prompt_prefix=new_config.llm.system_prompt_prefix,
             stream_response=self._bot._cfg.stream_response,  # destructive — keep old
             per_chat_timeout=new_config.per_chat_timeout,
+            react_loop_timeout=new_config.react_loop_timeout,
+            max_concurrent_messages=new_config.max_concurrent_messages,
         )
         self._bot.update_config(new_bot_cfg)
 

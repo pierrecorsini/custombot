@@ -1,4 +1,4 @@
-<!-- Context: project/navigation | Priority: high | Version: 2.2 | Updated: 2026-05-04 -->
+<!-- Context: project/navigation | Priority: high | Version: 2.4 | Updated: 2026-05-05 -->
 
 # Project Context — custombot
 
@@ -49,6 +49,7 @@
 | **Deduplication service** | `concepts/dedup-service.md` |
 | **Security subsystem** | `concepts/security-subsystem.md` |
 | **Non-critical error system** | `concepts/noncritical-errors.md` |
+| **Design philosophy** | `concepts/design-philosophy.md` |
 | **Step orchestrator pattern** | `concepts/step-orchestrator.md` |
 | **Code review decisions (R11)** | `concepts/code-review-decisions.md` |
 | **Bug fixes log** | `errors/bug-fixes.md` |
@@ -58,6 +59,7 @@
 | **PLAN.md progress** | `lookup/plan-progress.md` |
 | **Improvement roadmap** | `lookup/improvement-roadmap.md` |
 | **OpenAI exceptions** | `lookup/openai-exceptions.md` |
+| **Agent instruction templates** | `examples/agent-instruction-template.md` |
 | **Create a Python skill** | `guides/skill-development.md` → `examples/python-skill.md` |
 | **Create a Markdown skill** | `guides/skill-development.md` → `examples/markdown-skill.md` |
 | **CLI commands** | `guides/cli-reference.md` |
@@ -100,6 +102,7 @@
 | `noncritical-errors.md` | 25+ categorized fire-and-forget error logging | ~55 |
 | `step-orchestrator.md` | Generic dependency-ordered step execution | ~65 |
 | `code-review-decisions.md` | Round 11 completed refactors + optimizations | ~65 |
+| `design-philosophy.md` | 7 design principles guiding architecture | ~55 |
 
 ### errors/ — Bug Fixes & Solutions
 
@@ -125,7 +128,7 @@
 | `workspace-structure.md` | .workspace/ directory layout | ~68 |
 | `configuration.md` | config.json schema + providers | ~120 |
 | `implemented-modules.md` | Infrastructure modules already built | ~39 |
-| `plan-progress.md` | PLAN.md checkbox tracker (219/219 done, ALL COMPLETE) | ~160 |
+| `plan-progress.md` | PLAN.md checkbox tracker (243/271 done, 28 remaining) | ~300 |
 | `improvement-roadmap.md` | 10 task categories, 138 subtasks | ~95 |
 | `openai-exceptions.md` | OpenAI exception hierarchy + retryability | ~85 |
 
@@ -135,6 +138,7 @@
 |------|-------|-------|
 | `python-skill.md` | Minimal BaseSkill example | ~46 |
 | `markdown-skill.md` | Minimal prompt skill example | ~48 |
+| `agent-instruction-template.md` | Agent instruction templates with routing YAML | ~68 |
 
 ---
 
@@ -177,6 +181,7 @@
 | 2026-05-04 | Harvest: Round 10 full sync (PLAN.md 308 lines rechecked) | 3 updated (plan-progress v12.0, tech-domain v2.5, nav v2.0) | — |
 | 2026-05-04 | Harvest: source code sync (30 commits, event bus +10, lazy args, startup.py) | 3 updated concepts (event-bus v1.2), 2 updated lookup (implemented-modules v3.0, plan-progress v13.0), 1 updated (tech-domain v2.8, nav v2.2) | PLAN.md → .tmp/archive/ |
 | 2026-05-04 | Harvest: PLAN.md Round 11 (10/15 done, 5 remaining) | 1 new concept (code-review-decisions), 2 new errors (known-gaps, security-gaps), 2 updated (plan-progress v14.0, nav v2.3) | PLAN.md → .tmp/archive/ |
+| 2026-05-05 | Harvest: PLAN.md Round 12 + templates + philosophy | 2 new (design-philosophy, agent-instruction-template), 1 updated (plan-progress v15.0), 1 updated (nav v2.4) | PLAN.md → .tmp/archive/ |
 
 ## Related
 

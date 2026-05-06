@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.skills.base import BaseSkill, validate_input
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 

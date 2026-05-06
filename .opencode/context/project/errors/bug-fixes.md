@@ -1,4 +1,4 @@
-<!-- Context: project/errors/bug-fixes | Priority: high | Version: 1.0 | Updated: 2026-04-06 -->
+<!-- Context: project/errors/bug-fixes | Priority: high | Version: 1.1 | Updated: 2026-05-06 -->
 
 # Errors: Bug Fixes Log
 
@@ -66,3 +66,4 @@ Always `await` async method calls. Use linting rules to catch unawaited coroutin
 
 - `concepts/react-loop.md` — Where tool processing fits in the pipeline
 - `project-intelligence/harvested-sessions.md` — Source of these fixes
+- `project-intelligence/errors/bug-fixes.md` — Complete bug fixes log (Fixes 1-23)

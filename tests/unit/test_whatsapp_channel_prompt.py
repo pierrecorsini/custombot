@@ -8,13 +8,16 @@ when a WhatsAppChannel is passed to bot.handle_message().
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.bot._bot import BotConfig
+from src.bot._bot import BotConfig, BotDeps
 from src.channels.base import IncomingMessage
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_text_response(text: str):
@@ -104,14 +107,16 @@ async def test_whatsapp_channel_prompt_injected_into_system_message(tmp_path: Pa
         mock_dedup.is_inbound_duplicate = AsyncMock(return_value=False)
 
         bot = Bot(
-            config=bot_config,
-            db=db,
-            llm=llm,
-            memory=memory,
-            skills=skills,
-            routing=routing,
-            instructions_dir=str(instructions_dir),
-            dedup=mock_dedup,
+            BotDeps(
+                config=bot_config,
+                db=db,
+                llm=llm,
+                memory=memory,
+                skills=skills,
+                routing=routing,
+                instructions_dir=str(instructions_dir),
+                dedup=mock_dedup,
+            )
         )
 
         # Create a real WhatsAppChannel
@@ -204,14 +209,16 @@ async def test_no_channel_means_no_channel_prompt(tmp_path: Path):
         mock_dedup.is_inbound_duplicate = AsyncMock(return_value=False)
 
         bot = Bot(
-            config=bot_config,
-            db=db,
-            llm=llm,
-            memory=memory,
-            skills=skills,
-            routing=routing,
-            instructions_dir=str(instructions_dir),
-            dedup=mock_dedup,
+            BotDeps(
+                config=bot_config,
+                db=db,
+                llm=llm,
+                memory=memory,
+                skills=skills,
+                routing=routing,
+                instructions_dir=str(instructions_dir),
+                dedup=mock_dedup,
+            )
         )
 
         msg = IncomingMessage(

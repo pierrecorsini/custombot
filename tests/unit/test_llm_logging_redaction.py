@@ -6,6 +6,7 @@ LLM log payloads before being written to disk.
 """
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -235,10 +236,13 @@ class TestLLMLoggerRedaction:
         assert len(log_files) == 1
         written = json.loads(log_files[0].read_text(encoding="utf-8"))
 
-        # The OpenAI key pattern should be redacted from the message content
-        content = written["messages"][0]["content"]
-        assert "sk-abcdefghijklmnopqrstuvwx12345" not in content
-        assert _REDACTED in content
+        # Request logging stores compact summary only (no full raw messages)
+        assert "messages" not in written
+        assert written["message_count"] == 1
+        assert "messages_summary" in written
+        content_preview = written["messages_summary"][0]["content_preview"]
+        assert "sk-abcdefghijklmnopqrstuvwx12345" not in content_preview
+        assert _REDACTED in content_preview
 
     def test_log_request_redacts_secret_dict_keys(self, tmp_path):
         logger = LLMLogger(tmp_path / "llm_logs")
@@ -298,3 +302,68 @@ class TestLLMLoggerRedaction:
         content = written["response"]["choices"][0]["message"]["content"]
         assert "sk-abcdefghijklmnopqrstuvwx12345" not in content
         assert _REDACTED in content
+
+    def test_log_write_truncates_large_string_fields(self, tmp_path):
+        logger = LLMLogger(tmp_path / "llm_logs")
+
+        very_long = "x" * 10000
+        logger._write(
+            "test_large_string.json",
+            {
+                "request_id": "req-1",
+                "messages": [{"role": "user", "content": very_long}],
+            },
+        )
+
+        written = json.loads((tmp_path / "llm_logs" / "test_large_string.json").read_text("utf-8"))
+        content = written["messages"][0]["content"]
+        assert len(content) < len(very_long)
+        assert "[TRUNCATED" in content
+
+    def test_log_write_truncates_large_list_fields(self, tmp_path):
+        logger = LLMLogger(tmp_path / "llm_logs")
+
+        logger._write(
+            "test_large_list.json",
+            {
+                "request_id": "req-2",
+                "messages": [{"role": "user", "content": "ok"}],
+                "items": list(range(200)),
+            },
+        )
+
+        written = json.loads((tmp_path / "llm_logs" / "test_large_list.json").read_text("utf-8"))
+        assert len(written["items"]) < 200
+        assert isinstance(written["items"][-1], str)
+        assert "TRUNCATED" in written["items"][-1]
+
+    def test_log_response_persists_summary_not_full_response(self, tmp_path):
+        logger = LLMLogger(tmp_path / "llm_logs")
+        req_id = logger.new_request_id()
+
+        response_data = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "hello world",
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+        logger.log_response(
+            request_id=req_id,
+            model="gpt-4",
+            response=response_data,
+            request_ts=datetime.now(timezone.utc),
+        )
+
+        log_files = list((tmp_path / "llm_logs").glob("*_response_*.json"))
+        assert len(log_files) == 1
+        written = json.loads(log_files[0].read_text(encoding="utf-8"))
+
+        assert "response" not in written
+        assert "response_summary" in written
+        assert written["response_summary"]["choices_count"] == 1

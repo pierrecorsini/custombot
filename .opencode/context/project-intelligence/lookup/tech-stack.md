@@ -29,7 +29,7 @@
 | Circuit Breaker | Fault tolerance | `src/utils/circuit_breaker.py` |
 | Rate Limiter | Request throttling | `src/rate_limiter.py` |
 | Retry | Exponential backoff | `src/utils/retry.py` |
-| Message Queue | Crash recovery persistence | `src/message_queue.py` |
+| Message Queue | Crash recovery persistence | `src/message_queue.py`, `src/message_queue_persistence.py` |
 | Exceptions | Domain error hierarchy | `src/exceptions.py` |
 | Protocols | Type interfaces | `src/utils/protocols.py`, `src/llm_provider.py` |
 | Type Guards | Runtime type checking | `src/utils/type_guards.py` |

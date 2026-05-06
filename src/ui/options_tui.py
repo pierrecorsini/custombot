@@ -18,8 +18,7 @@ Usage:
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, TYPE_CHECKING
 
 try:
     import questionary
@@ -29,8 +28,12 @@ except ImportError:
         "Install it with: pip install custombot[tui]  or  pip install questionary"
     ) from None
 
-from src.config import CONFIG_PATH, Config, load_config, save_config
+from src.config import CONFIG_PATH, load_config, save_config
 from src.ui.cli_output import cli
+
+if TYPE_CHECKING:
+    from src.config import Config
+    from pathlib import Path
 
 # Custom style for questionary prompts
 QUESTIONARY_STYLE = questionary.Style(

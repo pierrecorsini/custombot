@@ -17,8 +17,7 @@ import mmap
 import time
 import uuid
 from collections import OrderedDict, deque
-from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, TYPE_CHECKING
 
 from src.constants import (
     DB_WRITE_MAX_RETRIES,
@@ -45,9 +44,7 @@ from src.db.db_utils import (
     _sanitize_name,
     _track_db_latency,
     _track_db_write_latency,
-    _validate_chat_id,
 )
-from src.db.file_pool import FileHandlePool, ReadHandlePool
 from src.core.errors import NonCriticalCategory, log_noncritical
 from src.exceptions import DatabaseError
 from src.security.prompt_injection import (
@@ -56,13 +53,20 @@ from src.security.prompt_injection import (
 )
 from src.utils import (
     JsonParseMode,
-    LRUDict,
-    LRULockCache,
     json_dumps,
     safe_json_parse,
 )
 from src.utils.locking import AsyncLock
 from src.utils.path import sanitize_path_component as _sanitize_chat_id_for_path
+from src.utils.validation import _validate_chat_id
+
+if TYPE_CHECKING:
+    from src.utils import (
+        LRUDict,
+        LRULockCache,
+    )
+    from src.db.file_pool import FileHandlePool, ReadHandlePool
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -160,7 +164,9 @@ class MessageStore:
             # Index missing or corrupt — check if file exists for recovery
             if self._index_file.exists():
                 ids, recovery = await asyncio.to_thread(
-                    recover_index, self._index_file, self._messages_dir,
+                    recover_index,
+                    self._index_file,
+                    self._messages_dir,
                 )
                 self._message_id_index = {mid: None for mid in ids}
                 self._last_recovery = recovery
@@ -193,6 +199,14 @@ class MessageStore:
         """Persist message ID index to disk."""
         await asyncio.to_thread(
             save_index,
+            self._index_file,
+            set(self._message_id_index),
+            self._atomic_write,
+        )
+
+    def save_message_index_sync(self) -> None:
+        """Synchronous fallback for persisting message index during shutdown."""
+        save_index(
             self._index_file,
             set(self._message_id_index),
             self._atomic_write,
@@ -443,7 +457,9 @@ class MessageStore:
             async with lock:
                 try:
                     lines = await asyncio.to_thread(
-                        self._read_file_lines, msg_file, limit,
+                        self._read_file_lines,
+                        msg_file,
+                        limit,
                     )
                 except OSError:
                     return []
@@ -457,7 +473,8 @@ class MessageStore:
             )
         except DatabaseError:
             log.warning(
-                "Timeout reading messages for chat %s", chat_id,
+                "Timeout reading messages for chat %s",
+                chat_id,
                 extra=_db_log_extra(chat_id),
             )
             return []
@@ -469,13 +486,14 @@ class MessageStore:
 
         for line_num_offset, line in enumerate(recent_lines):
             msg = safe_json_parse(
-                line, default=None, log_errors=False, mode=JsonParseMode.LINE,
+                line,
+                default=None,
+                log_errors=False,
+                mode=JsonParseMode.LINE,
             )
             if msg is None:
                 if line.strip():  # Only log if line wasn't empty
-                    actual_line_num = (
-                        len(lines) - len(recent_lines) + line_num_offset + 1
-                    )
+                    actual_line_num = len(lines) - len(recent_lines) + line_num_offset + 1
                     log.warning(
                         "JSON corruption detected in chat %s line %d",
                         chat_id,
@@ -492,9 +510,7 @@ class MessageStore:
             # Validate checksum if present
             is_valid, error = validate_checksum(msg)
             if not is_valid:
-                actual_line_num = (
-                    len(lines) - len(recent_lines) + line_num_offset + 1
-                )
+                actual_line_num = len(lines) - len(recent_lines) + line_num_offset + 1
                 log.warning(
                     "Checksum validation failed for chat %s line %d: %s",
                     chat_id,
@@ -542,7 +558,9 @@ class MessageStore:
         handle.write(content)
 
     def _read_file_lines(
-        self, file_path: Path, limit: int = MAX_MESSAGE_HISTORY,
+        self,
+        file_path: Path,
+        limit: int = MAX_MESSAGE_HISTORY,
     ) -> List[str]:
         """Read the last N lines from a file without reading the entire file.
 
@@ -582,10 +600,7 @@ class MessageStore:
                             extra=_db_log_extra(),
                         )
                         handle = self._read_pool.get_reader(file_path)
-                        return [
-                            line.rstrip("\r")
-                            for line in deque(handle, maxlen=limit)
-                        ]
+                        return [line.rstrip("\r") for line in deque(handle, maxlen=limit)]
 
                     region_end = pos
                     region_start = max(0, pos - 8192)
@@ -599,7 +614,7 @@ class MessageStore:
                         pos = region_start
 
                 # Decode directly from mmap — avoids a second open() syscall
-                remaining_text = mm[max(pos, 0):].decode("utf-8")
+                remaining_text = mm[max(pos, 0) :].decode("utf-8")
 
         # Split and take last N lines, preserving order (oldest first)
         all_lines = remaining_text.splitlines()

@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/lookup/project-structure | Priority: high | Version: 4.7 | Updated: 2026-05-06 -->
+<!-- Context: project-intelligence/lookup/project-structure | Priority: high | Version: 4.9 | Updated: 2026-05-06 -->
 
 # Project Structure
 
@@ -87,15 +87,15 @@ custombot/
 │   │   ├── tool_executor.py # Skill execution with rate-limit, timeout, audit
 │   │   └── ... (context_builder, errors, project_context, serialization, etc.)
 │   │
-│   ├── db/                 # Database layer (12 modules)
+│   ├── db/                 # Database layer (13 modules)
 │   │   ├── db.py            # File-based JSONL persistence (facade)
 │   │   ├── sqlite_pool.py   # Shared connection pool for SQLite
 │   │   ├── file_pool.py     # Bounded file handle pool
 │   │   ├── message_store.py # JSONL message persistence
-│   │   └── ... (compression, db_utils, db_index, db_integrity, generations, migration, sqlite_utils)
+│   │   └── ... (compression, db_utils, db_index, db_integrity, db_validation, generations, migration, sqlite_utils)
 │   │
 │   ├── health/             # Health check HTTP endpoint
-│   │   ├── checks.py, middleware.py, models.py, prometheus.py, server.py
+│   │   ├── checks.py, middleware.py, models.py, prometheus.py, registry.py, server.py
 │   │
 │   ├── logging/            # Structured logging (3 modules: config, llm, http)
 │   │
@@ -153,7 +153,7 @@ custombot/
 | `src/channels/` | Communication channel implementations | WhatsApp, CLI |
 | `src/skills/` | Dual skill system (builtin + user) | 11 builtin skills |
 | `src/security/` | Defense-in-depth (5 modules) | Audit, injection detection |
-| `src/db/` | Database layer with connection pooling | 12 modules |
+| `src/db/` | Database layer with connection pooling | 13 modules |
 | `workspace/` | ALL runtime files | logs, database, session, per-chat data |
 
 ## Codebase References

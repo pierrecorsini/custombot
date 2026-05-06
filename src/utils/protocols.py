@@ -24,9 +24,7 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import (
     Any,
     AsyncIterator,
@@ -37,7 +35,12 @@ from typing import (
     Optional,
     Protocol,
     runtime_checkable,
+    TYPE_CHECKING,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+    import asyncio
 
 # Type alias for message handlers (re-exported for convenience)
 MessageHandler = Callable[..., Awaitable[None]]

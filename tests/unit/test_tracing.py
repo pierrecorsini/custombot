@@ -152,7 +152,9 @@ class TestLLMCallSpan:
         with patch.object(tracing_mod, "_OTEL_AVAILABLE", False):
             reset_tracer()
             with llm_call_span(
-                chat_id="chat-1", iteration=0, use_streaming=False,
+                chat_id="chat-1",
+                iteration=0,
+                use_streaming=False,
             ) as span:
                 assert isinstance(span, _NoOpSpan)
 
@@ -174,7 +176,8 @@ class TestSkillExecutionSpan:
         with patch.object(tracing_mod, "_OTEL_AVAILABLE", False):
             reset_tracer()
             with skill_execution_span(
-                skill_name="echo", chat_id="chat-1",
+                skill_name="echo",
+                chat_id="chat-1",
             ) as span:
                 assert isinstance(span, _NoOpSpan)
 
@@ -223,9 +226,7 @@ class TestSetCorrelationIdOnSpan:
         span = MagicMock()
         span.is_recording.return_value = True
         set_correlation_id_on_span(span, "corr-abc")
-        span.set_attribute.assert_called_once_with(
-            "custombot.correlation_id", "corr-abc"
-        )
+        span.set_attribute.assert_called_once_with("custombot.correlation_id", "corr-abc")
 
     def test_non_recording_span_skips(self):
         span = MagicMock()
@@ -311,50 +312,69 @@ class TestSetupProvider:
     """Test _setup_provider configuration via environment variables."""
 
     def test_exporter_none_returns_noop(self):
-        with patch.object(tracing_mod, "_OTEL_AVAILABLE", True), \
-             patch.dict(os.environ, {"OTEL_TRACES_EXPORTER": "none"}):
+        with (
+            patch.object(tracing_mod, "_OTEL_AVAILABLE", True),
+            patch.dict(os.environ, {"OTEL_TRACES_EXPORTER": "none"}),
+        ):
             reset_tracer()
             tracer = get_tracer()
             assert isinstance(tracer, _NoOpTracer)
 
     def test_unknown_exporter_returns_noop(self):
-        with patch.object(tracing_mod, "_OTEL_AVAILABLE", True), \
-             patch.dict(os.environ, {"OTEL_TRACES_EXPORTER": "invalid"}):
+        with (
+            patch.object(tracing_mod, "_OTEL_AVAILABLE", True),
+            patch.dict(os.environ, {"OTEL_TRACES_EXPORTER": "invalid"}),
+        ):
             reset_tracer()
             tracer = get_tracer()
             assert isinstance(tracer, _NoOpTracer)
 
     def test_console_exporter_initializes(self):
-        with patch.object(tracing_mod, "_OTEL_AVAILABLE", True), \
-             patch.dict(os.environ, {"OTEL_TRACES_EXPORTER": "console"}, clear=False):
+        with (
+            patch.object(tracing_mod, "_OTEL_AVAILABLE", True),
+            patch.dict(os.environ, {"OTEL_TRACES_EXPORTER": "console"}, clear=False),
+        ):
             # Mock the OTel SDK imports to avoid requiring the package
             mock_provider = MagicMock()
             mock_tracer = MagicMock()
             mock_provider.get_tracer.return_value = mock_tracer
 
-            with patch("src.monitoring.tracing.TracerProvider", return_value=mock_provider, create=True), \
-                 patch("src.monitoring.tracing.BatchSpanProcessor", create=True), \
-                 patch("src.monitoring.tracing.ConsoleSpanExporter", create=True), \
-                 patch("src.monitoring.tracing.Resource", create=True) as mock_resource:
+            with (
+                patch(
+                    "src.monitoring.tracing.TracerProvider", return_value=mock_provider, create=True
+                ),
+                patch("src.monitoring.tracing.BatchSpanProcessor", create=True),
+                patch("src.monitoring.tracing.ConsoleSpanExporter", create=True),
+                patch("src.monitoring.tracing.Resource", create=True) as mock_resource,
+            ):
                 mock_resource.create.return_value = MagicMock()
                 reset_tracer()
 
                 # Need to patch at module level where imports happen
-                with patch.dict("sys.modules", {
-                    "opentelemetry": MagicMock(),
-                    "opentelemetry.sdk.trace": MagicMock(),
-                    "opentelemetry.sdk.trace.export": MagicMock(),
-                    "opentelemetry.sdk.resources": MagicMock(),
-                }):
+                with patch.dict(
+                    "sys.modules",
+                    {
+                        "opentelemetry": MagicMock(),
+                        "opentelemetry.sdk.trace": MagicMock(),
+                        "opentelemetry.sdk.trace.export": MagicMock(),
+                        "opentelemetry.sdk.resources": MagicMock(),
+                    },
+                ):
                     # If OTel is available but imports fail, we get noop
                     tracer = get_tracer()
                     assert tracer is not None
 
     def test_setup_exception_returns_noop(self):
-        with patch.object(tracing_mod, "_OTEL_AVAILABLE", True), \
-             patch.dict(os.environ, {"OTEL_TRACES_EXPORTER": "console"}):
+        with (
+            patch.object(tracing_mod, "_OTEL_AVAILABLE", True),
+            patch.dict(os.environ, {"OTEL_TRACES_EXPORTER": "console"}),
+        ):
             # Force an exception during provider setup
-            with patch("src.monitoring.tracing.TracerProvider", side_effect=RuntimeError("setup fail"), create=True):
+            with patch(
+                "src.monitoring.tracing.TracerProvider",
+                side_effect=RuntimeError("setup fail"),
+                create=True,
+            ):
                 reset_tracer()
                 tracer = get_tracer()
                 assert isinstance(tracer, _NoOpTracer)

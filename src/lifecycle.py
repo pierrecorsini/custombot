@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
@@ -384,29 +385,66 @@ async def perform_shutdown(ctx: ShutdownContext) -> None:
         asyncio.to_thread(_close_executor),
     )
 
-    # 6. Shut down the thread pool executor (after all to_thread calls are done)
-    _log_cleanup_step(6, total_cleanup_steps, "Shutting down thread pool executor")
-    if ctx.executor is not None:
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(ctx.executor.shutdown, wait=True),
-                timeout=CLEANUP_STEP_TIMEOUT,
-            )
-        except TimeoutError:
-            ctx.log.warning(
-                "Thread pool executor shutdown timed out after %.1fs, proceeding",
-                CLEANUP_STEP_TIMEOUT,
-            )
-        except Exception as exc:
-            ctx.log.warning("Error shutting down thread pool executor: %s", exc)
-
-    # 7. Close database (must be last — other closers may still write)
-    _log_cleanup_step(7, total_cleanup_steps, "Closing database connections")
+    # 6. Close database before executor shutdown because DB flush paths use
+    # asyncio.to_thread() internally (save_chats/index writes).
+    _log_cleanup_step(6, total_cleanup_steps, "Closing database connections")
     cli_output.dim("  Closing database connections...")
     try:
         await ctx.db.close()
     except Exception as exc:
         ctx.log.warning("Error closing database: %s", exc)
+
+    # 7. Shut down the thread pool executor after all components that may
+    # schedule work via to_thread() have completed.
+    _log_cleanup_step(7, total_cleanup_steps, "Shutting down thread pool executor")
+    if ctx.executor is not None:
+        try:
+            # Do not call executor.shutdown(wait=True) via asyncio.to_thread().
+            # If this executor is the loop default, to_thread may run inside the
+            # same pool and trigger "cannot join current thread".
+            done = threading.Event()
+            error_box: list[Exception] = []
+
+            def _shutdown_executor() -> None:
+                try:
+                    ctx.executor.shutdown(wait=True)
+                except RuntimeError as exc:
+                    msg = str(exc)
+                    # Expected during event loop teardown — the default executor
+                    # may already be shut down by asyncio.run() cleanup.
+                    if "cannot join current thread" in msg or (
+                        "cannot schedule new futures after shutdown" in msg
+                    ):
+                        ctx.log.debug(
+                            "Executor shutdown encountered expected teardown error: %s", msg
+                        )
+                    else:
+                        error_box.append(exc)
+                except Exception as exc:  # pragma: no cover - defensive
+                    error_box.append(exc)
+                finally:
+                    done.set()
+
+            t = threading.Thread(target=_shutdown_executor, name="executor-shutdown")
+            t.start()
+
+            waited = 0.0
+            poll_interval = 0.05
+            while not done.is_set() and waited < CLEANUP_STEP_TIMEOUT:
+                await asyncio.sleep(poll_interval)
+                waited += poll_interval
+
+            if not done.is_set():
+                ctx.log.warning(
+                    "Thread pool executor shutdown timed out after %.1fs, proceeding",
+                    CLEANUP_STEP_TIMEOUT,
+                )
+            elif error_box:
+                ctx.log.warning(
+                    "Error shutting down thread pool executor: %s", error_box[0]
+                )
+        except Exception as exc:
+            ctx.log.warning("Error shutting down thread pool executor: %s", exc)
 
     # Safety net: close any leaked SQLite connections via the shared pool.
     # Individual components (VectorMemory, ProjectStore) should have already

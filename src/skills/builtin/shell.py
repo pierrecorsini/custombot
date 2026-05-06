@@ -23,7 +23,6 @@ import os
 import platform
 import re
 from functools import cached_property
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from src.security.audit import audit_log
@@ -35,6 +34,7 @@ from src.skills.base import BaseSkill, validate_input
 from src.utils.async_executor import AsyncExecutor
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from src.config.config import ShellConfig
 
 log = logging.getLogger(__name__)

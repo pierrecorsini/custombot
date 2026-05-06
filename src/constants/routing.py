@@ -1,6 +1,15 @@
-"""Routing engine constants — file watching, match cache."""
+"""Routing engine constants — file watching, match cache, frontmatter cache."""
 
 from __future__ import annotations
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routing Engine — Frontmatter Cache
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of parsed frontmatter entries cached in memory.  Keyed by
+# ``(filename, mtime, size)`` — avoids redundant YAML parsing when instruction
+# files are unchanged during hot-reload.
+ROUTING_FRONTMATTER_CACHE_MAX_SIZE: int = 128
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Routing Engine — File Watching

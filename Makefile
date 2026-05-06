@@ -11,7 +11,7 @@
 #   check-deps         — verify generated files are in sync with pyproject.toml
 # ==============================================================================
 
-.PHONY: requirements requirements-lock requirements-all check-deps
+.PHONY: requirements requirements-lock requirements-all check-deps check-config-example
 
 PYTHON    ?= python
 PIP-COMPILE := $(PYTHON) -m piptools compile

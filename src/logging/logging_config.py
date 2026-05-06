@@ -77,9 +77,7 @@ _MAX_CORR_ID_LENGTH = 64
 
 # Control characters, newlines, carriage returns, and ANSI escape sequences
 # stripped from correlation IDs to prevent log injection.
-_CORR_ID_SANITIZE_PATTERN = re.compile(
-    r"\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f-\x9f]"
-)
+_CORR_ID_SANITIZE_PATTERN = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f-\x9f]")
 
 
 def _sanitize_correlation_id(corr_id: str) -> str:
@@ -729,7 +727,7 @@ def setup_logging(
 
     # Suppress noisy third-party libraries
     if suppress_noisy:
-        for noisy_lib in ("httpx", "httpcore", "urllib3", "asyncio"):
+        for noisy_lib in ("httpx", "httpcore", "urllib3", "asyncio", "primp"):
             logging.getLogger(noisy_lib).setLevel(logging.WARNING)
 
 

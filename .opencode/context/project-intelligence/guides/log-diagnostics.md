@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/guides/log-diagnostics | Priority: medium | Version: 3.0 | Updated: 2026-04-06 -->
+<!-- Context: project-intelligence/guides/log-diagnostics | Priority: medium | Version: 3.1 | Updated: 2026-05-06 -->
 
 # Log Diagnostics
 
@@ -46,12 +46,20 @@ Each log entry includes:
 | Messages not sending | `WhatsApp\|neonize` | Session expired, reconnect needed |
 | High memory | `memory\|monitoring` | Unbounded cache, check `src/monitoring.py` |
 | Slow responses | `latency\|timeout` | LLM API timeout, check `src/rate_limiter.py` |
+| Shutdown errors | `cannot schedule\|cannot join` | Executor shutdown order — see `src/lifecycle.py` |
+| Startup corruption warnings | `corrupt\|jsonl` | JSONL last line corruption — auto-repair in `workspace_integrity.py` |
+| Dependency check failures | `dependency\|not found` | Package name normalization — hyphens vs underscores |
+| Embedding errors | `embedding\|encoding_format` | Missing encoding_format param for non-OpenAI providers |
+| Config validation errors | `config\|schema\|validation` | Schema fields not synced with runtime config |
 
 ## Codebase References
 
-- `src/logging_config.py` — Structured logging with rotation and JSON format option
-- `src/monitoring.py` — Performance metrics, memory monitoring
-- `src/health.py` — Health check endpoint
+- `src/logging/` — Structured logging with rotation and JSON format option
+- `src/monitoring/` — Performance metrics, memory monitoring
+- `src/health/` — Health check endpoint
+- `src/workspace_integrity.py` — JSONL auto-repair on startup
+- `src/lifecycle.py` — Shutdown sequence with executor handling
+- `src/diagnose.py` — Diagnostic checks including embedding probe
 
 ## Related Files
 

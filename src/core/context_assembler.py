@@ -23,11 +23,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from src.core.context_builder import ChatMessage
     from src.bot import BotConfig
     from src.db import Database
     from src.utils.protocols import MemoryProtocol, ProjectContextLoader
 
-from src.core.context_builder import ChatMessage, build_context
+from src.core.context_builder import build_context
 from src.core.topic_cache import TopicCache, parse_meta
 from src.memory import DEFAULT_AGENTS_MD
 from src.monitoring.performance import get_metrics_collector
@@ -137,20 +138,35 @@ class ContextAssembler:
         )
 
         memory_content = self._handle_gather_result(
-            memory_content, "read_memory", chat_id, default=None,
+            memory_content,
+            "read_memory",
+            chat_id,
+            default=None,
         )
         agents_content = self._handle_gather_result(
-            agents_content, "read_agents_md", chat_id, default=DEFAULT_AGENTS_MD,
+            agents_content,
+            "read_agents_md",
+            chat_id,
+            default=DEFAULT_AGENTS_MD,
             log_level=logging.DEBUG,
         )
         project_context = self._handle_gather_result(
-            project_context, "get_project_context", chat_id, default=None,
+            project_context,
+            "get_project_context",
+            chat_id,
+            default=None,
         )
         topic_summary = self._handle_gather_result(
-            topic_summary, "topic_cache_read", chat_id, default=None,
+            topic_summary,
+            "topic_cache_read",
+            chat_id,
+            default=None,
         )
         compressed_summary = self._handle_gather_result(
-            compressed_summary, "compressed_summary", chat_id, default=None,
+            compressed_summary,
+            "compressed_summary",
+            chat_id,
+            default=None,
         )
 
         if compressed_summary is not None:
@@ -188,10 +204,8 @@ class ContextAssembler:
         Raises:
             TypeError: If *new_cfg* is not a :class:`BotConfig` instance.
         """
-        if not isinstance(new_cfg, BotConfig):
-            raise TypeError(
-                f"Expected BotConfig, got {type(new_cfg).__name__}"
-            )
+        if type(new_cfg).__name__ != "BotConfig":
+            raise TypeError(f"Expected BotConfig, got {type(new_cfg).__name__}")
         self._config = new_cfg
         log.info("ContextAssembler config updated")
 

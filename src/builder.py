@@ -221,7 +221,7 @@ async def _step_llm_client(ctx: BuilderContext) -> str | None:
     from src.llm import LLMClient
     from src.llm import TokenUsage
 
-    token_usage = TokenUsage()
+    token_usage = TokenUsage(max_per_chat_size=ctx.config.per_chat_token_tracking_size)
     llm = LLMClient(ctx.config.llm, log_llm=ctx.config.log_llm, token_usage=token_usage)
     ctx.token_usage = token_usage
     ctx.llm = llm
@@ -414,6 +414,8 @@ async def _step_bot(ctx: BuilderContext) -> str | None:
         system_prompt_prefix=ctx.config.llm.system_prompt_prefix,
         stream_response=ctx.config.llm.stream_response,
         per_chat_timeout=ctx.config.per_chat_timeout,
+        react_loop_timeout=ctx.config.react_loop_timeout,
+        max_concurrent_messages=ctx.config.max_concurrent_messages,
     )
     from src.utils import LRULockCache
     from src.constants import EvictionPolicy

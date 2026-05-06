@@ -7,7 +7,6 @@ Tests the TUI functions for configuration editing with mocked questionary.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +19,10 @@ from src.ui.options_tui import (
     _show_main_menu,
     run_options_tui,
 )
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures

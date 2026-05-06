@@ -95,13 +95,9 @@ class TestHalfOpenConcurrentSuccess:
         async def probe_success() -> bool:
             return await breaker.is_open()
 
-        results = await asyncio.gather(
-            *(probe_success() for _ in range(num_probes))
-        )
+        results = await asyncio.gather(*(probe_success() for _ in range(num_probes)))
         # Now record successes concurrently
-        await asyncio.gather(
-            *(breaker.record_success() for _ in range(num_probes))
-        )
+        await asyncio.gather(*(breaker.record_success() for _ in range(num_probes)))
 
         # All probes were allowed through
         assert all(r is False for r in results)

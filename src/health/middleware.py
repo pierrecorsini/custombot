@@ -4,7 +4,7 @@ src/health/middleware.py — HTTP middleware for the health check server.
 Provides middleware functions for:
 - Per-IP rate limiting with sliding window tracking
 - HTTP method validation (read-only enforcement)
-- Request body and URL size limits
+- Request body rejection (Content-Length > 0) and URL size limits
 - Request path whitelisting (reject unknown paths early)
 - Optional HMAC-SHA256 authentication
 
@@ -59,8 +59,8 @@ class IPLimiter:
     def __init__(self, limit: int, window_seconds: float, max_ips: int) -> None:
         self._limit = limit
         self._window_seconds = window_seconds
-        self._trackers: BoundedOrderedDict[str, SlidingWindowTracker] = (
-            BoundedOrderedDict(max_size=max_ips, eviction="half")
+        self._trackers: BoundedOrderedDict[str, SlidingWindowTracker] = BoundedOrderedDict(
+            max_size=max_ips, eviction="half"
         )
         self._lock = ThreadLock()
 
@@ -127,9 +127,7 @@ def create_method_validation_middleware() -> Any:
     _ALLOWED = frozenset({"GET", "HEAD", "OPTIONS"})
 
     @web.middleware
-    async def method_validation_middleware(
-        request: web.Request, handler: Any
-    ) -> Any:
+    async def method_validation_middleware(request: web.Request, handler: Any) -> Any:
         if request.method not in _ALLOWED:
             log.warning(
                 "Health server rejected %s request to %s",
@@ -162,13 +160,9 @@ def create_path_validation_middleware(allowed_paths: frozenset[str]) -> Any:
     from aiohttp import web
 
     @web.middleware
-    async def path_validation_middleware(
-        request: web.Request, handler: Any
-    ) -> Any:
+    async def path_validation_middleware(request: web.Request, handler: Any) -> Any:
         if request.path not in allowed_paths:
-            log.warning(
-                "Health server rejected unknown path: %s", request.path
-            )
+            log.warning("Health server rejected unknown path: %s", request.path)
             return web.Response(
                 text="Not Found",
                 status=404,
@@ -192,21 +186,19 @@ def load_request_size_config() -> tuple[int, int]:
     )
 
 
-def create_request_size_limit_middleware(
-    max_body_bytes: int, max_url_length: int
-) -> Any:
-    """Create an aiohttp middleware that rejects oversized requests.
+def create_request_size_limit_middleware(max_body_bytes: int, max_url_length: int) -> Any:
+    """Create an aiohttp middleware that rejects body-carrying or oversized requests.
 
-    Health endpoints serve short GET requests.  Rejecting bodies > *max_body_bytes*
-    and URL paths > *max_url_length* prevents memory exhaustion from malicious or
-    misconfigured clients.
+    Health endpoints are read-only GET/HEAD endpoints.  Any request with
+    ``Content-Length > 0`` is rejected immediately (status 400) since these
+    endpoints should never carry a request body.  URL paths longer than
+    *max_url_length* are also rejected (status 414) to prevent memory
+    exhaustion from malicious clients.
     """
     from aiohttp import web
 
     @web.middleware
-    async def request_size_limit_middleware(
-        request: web.Request, handler: Any
-    ) -> Any:
+    async def request_size_limit_middleware(request: web.Request, handler: Any) -> Any:
         if len(request.path) > max_url_length:
             log.warning(
                 "Health server rejected oversized URL path (%d chars, max %d)",
@@ -220,15 +212,14 @@ def create_request_size_limit_middleware(
             )
 
         content_length = request.content_length
-        if content_length is not None and content_length > max_body_bytes:
+        if content_length is not None and content_length > 0:
             log.warning(
-                "Health server rejected oversized request body (%d bytes, max %d)",
+                "Health server rejected request with unexpected body (Content-Length: %d)",
                 content_length,
-                max_body_bytes,
             )
             return web.Response(
-                text="Payload Too Large",
-                status=413,
+                text="Bad Request",
+                status=400,
                 content_type="text/plain",
             )
 
@@ -324,7 +315,7 @@ def verify_hmac(request: Any, secret: str) -> bool:
     if not auth_header.startswith("HMAC-SHA256 "):
         return False
 
-    token = auth_header[len("HMAC-SHA256 "):]
+    token = auth_header[len("HMAC-SHA256 ") :]
     if ":" not in token:
         return False
 
@@ -341,9 +332,7 @@ def verify_hmac(request: Any, secret: str) -> bool:
     method = request.method
     path = request.path
     message = f"{timestamp_str}{method}{path}"
-    expected = hmac.new(
-        secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256
-    ).hexdigest()
+    expected = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
 
     # Normalize to equal-length strings before comparison so that
     # hmac.compare_digest operates in constant time regardless of length

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -27,6 +27,10 @@ from src.core.context_builder import (
     estimate_tokens,
 )
 from src.security.prompt_injection import InjectionDetectionResult
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from unittest.mock import MagicMock
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -524,9 +528,7 @@ class TestSanitizeHistory:
         self, mock_detect: MagicMock
     ) -> None:
         """Only unsanitized user messages are scanned; sanitized ones pass through."""
-        mock_detect.return_value = InjectionDetectionResult(
-            detected=False, confidence=0.0
-        )
+        mock_detect.return_value = InjectionDetectionResult(detected=False, confidence=0.0)
 
         messages = [
             ChatMessage(role="user", content="safe", _sanitized=True),
@@ -568,9 +570,7 @@ class TestSanitizeHistory:
         assert result[0]._sanitized is False
 
     @patch("src.core.context_builder.detect_injection")
-    def test_low_confidence_injection_not_sanitized(
-        self, mock_detect: MagicMock
-    ) -> None:
+    def test_low_confidence_injection_not_sanitized(self, mock_detect: MagicMock) -> None:
         """Low-confidence injection is logged but message is passed through unchanged."""
         mock_detect.return_value = InjectionDetectionResult(
             detected=True, confidence=0.5, reason="suspicious_pattern"

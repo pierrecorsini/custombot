@@ -79,9 +79,7 @@ class SkillAuditLogger(ThreadLockMixin):
         self._path = self._dir / "audit.jsonl"
         self._chain_hashes = chain_hashes
         self._prev_hash: str | None = (
-            hmac.new(self._CHAIN_KEY, b"", hashlib.sha256).hexdigest()
-            if chain_hashes
-            else None
+            hmac.new(self._CHAIN_KEY, b"", hashlib.sha256).hexdigest() if chain_hashes else None
         )
 
     # ── public API ───────────────────────────────────────────────────────

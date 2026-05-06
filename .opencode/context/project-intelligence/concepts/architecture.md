@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/concepts/architecture | Priority: high | Version: 3.2 | Updated: 2026-05-04 -->
+<!-- Context: project-intelligence/concepts/architecture | Priority: high | Version: 3.4 | Updated: 2026-05-06 -->
 
 # Architecture
 
@@ -51,6 +51,9 @@ The native Python approach was chosen because:
 | Zero-rule retention | `src/routing.py` | `load_rules()` retains previous rules when reload yields zero (handles transient empty-file states) |
 | Truncation handling | `src/bot/react_loop.py` | `finish_reason='length'` returns user-visible warning |
 | Resource cleanup on degradation | `src/builder.py` | Closes dedicated embed_http client when vector memory degrades |
+| HealthCheckRegistry | `src/health/registry.py` | Centralized registry for health checks — replaces scattered `validate_connection()` / `get_llm_status()` / `get_dedup_stats()` accessors on Bot |
+| NullMemoryMonitor | `src/monitoring/memory.py` | NullObject satisfying MemoryMonitor Protocol — eliminates downstream None-checks when psutil unavailable |
+| ComponentRegistry DI | `src/utils/registry.py` | Replaces mutable `field: X | None = None` bags with dict-backed store; surfaces missing deps at access time |
 
 ## Codebase References
 

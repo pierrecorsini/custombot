@@ -20,8 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -35,6 +34,9 @@ from src.memory import Memory
 from src.message_queue import MessageQueue
 from src.routing import RoutingEngine, RoutingRule
 from src.skills import SkillRegistry
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,9 +143,7 @@ class TestConcurrentMultiChatProcessing:
     """
 
     @pytest.mark.asyncio
-    async def test_concurrent_messages_different_chats_no_leakage(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_concurrent_messages_different_chats_no_leakage(self, tmp_path: Path) -> None:
         """
         Process messages from many different chats simultaneously.
 
@@ -181,14 +181,11 @@ class TestConcurrentMultiChatProcessing:
 
             # Build messages: each chat sends a unique text
             messages = [
-                _make_message(cid, f"msg-{cid}-001", f"Hello from {cid}")
-                for cid in chat_ids
+                _make_message(cid, f"msg-{cid}-001", f"Hello from {cid}") for cid in chat_ids
             ]
 
             # Fire all messages concurrently
-            results = await asyncio.gather(
-                *[bot.handle_message(msg) for msg in messages]
-            )
+            results = await asyncio.gather(*[bot.handle_message(msg) for msg in messages])
 
         # All messages should have been processed
         assert all(r is not None for r in results), (
@@ -206,8 +203,7 @@ class TestConcurrentMultiChatProcessing:
         for cid in chat_ids:
             rows = await db.get_recent_messages(cid, limit=50)
             assert len(rows) == 2, (
-                f"Chat {cid} should have exactly 2 messages (user + assistant), "
-                f"got {len(rows)}"
+                f"Chat {cid} should have exactly 2 messages (user + assistant), got {len(rows)}"
             )
             roles = [r["role"] for r in rows]
             assert "user" in roles, f"Chat {cid} missing user message"
@@ -222,8 +218,7 @@ class TestConcurrentMultiChatProcessing:
             # Verify assistant response is for this chat (not another)
             asst_msgs = [r for r in rows if r["role"] == "assistant"]
             assert cid in asst_msgs[0]["content"], (
-                f"Chat {cid} assistant response leaked from another chat: "
-                f"{asst_msgs[0]['content']}"
+                f"Chat {cid} assistant response leaked from another chat: {asst_msgs[0]['content']}"
             )
 
         await db.close()
@@ -369,9 +364,7 @@ class TestPerChatLockSerialization:
                 for i in range(num_chats)
             ]
 
-            results = await asyncio.gather(
-                *[bot.handle_message(msg) for msg in messages]
-            )
+            results = await asyncio.gather(*[bot.handle_message(msg) for msg in messages])
 
         await db.close()
 
@@ -432,9 +425,7 @@ class TestMessageQueueIntegrity:
                 for i in range(num_chats)
             ]
 
-            results = await asyncio.gather(
-                *[bot.handle_message(msg) for msg in messages]
-            )
+            results = await asyncio.gather(*[bot.handle_message(msg) for msg in messages])
 
         # All messages should succeed
         assert all(r is not None for r in results)
@@ -442,17 +433,14 @@ class TestMessageQueueIntegrity:
         # Queue should have zero pending messages
         pending_count = await queue.get_pending_count()
         assert pending_count == 0, (
-            f"Expected 0 pending messages after concurrent processing, "
-            f"got {pending_count}"
+            f"Expected 0 pending messages after concurrent processing, got {pending_count}"
         )
 
         await queue.close()
         await db.close()
 
     @pytest.mark.asyncio
-    async def test_queue_dedup_after_concurrent_processing(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_queue_dedup_after_concurrent_processing(self, tmp_path: Path) -> None:
         """
         Process messages concurrently, then verify that reprocessing
         the same message_ids is correctly rejected by dedup.
@@ -492,9 +480,7 @@ class TestMessageQueueIntegrity:
                 for i in range(num_chats)
             ]
 
-            results = await asyncio.gather(
-                *[bot.handle_message(msg) for msg in messages]
-            )
+            results = await asyncio.gather(*[bot.handle_message(msg) for msg in messages])
 
         # All should succeed
         assert all(r is not None for r in results), "All first-batch messages should succeed"
@@ -505,15 +491,11 @@ class TestMessageQueueIntegrity:
 
         # Phase 2: Attempt to reprocess the same message_ids
         # Dedup should catch all of them now (they're persisted)
-        duplicate_results = await asyncio.gather(
-            *[bot.handle_message(msg) for msg in messages]
-        )
+        duplicate_results = await asyncio.gather(*[bot.handle_message(msg) for msg in messages])
 
         # All duplicates should be rejected
         for i, result in enumerate(duplicate_results):
-            assert result is None, (
-                f"Duplicate message {i} should have been rejected, got: {result}"
-            )
+            assert result is None, f"Duplicate message {i} should have been rejected, got: {result}"
 
         # Database should still have only the original messages (2 per chat)
         for i in range(num_chats):
@@ -591,9 +573,7 @@ class TestHighVolumeStress:
 
         # All should succeed (no exceptions, no None)
         for i, r in enumerate(results):
-            assert isinstance(r, str) and r is not None, (
-                f"Task {i} failed: {r!r}"
-            )
+            assert isinstance(r, str) and r is not None, f"Task {i} failed: {r!r}"
 
         # Verify per-chat database integrity
         for chat_idx in range(num_chats):
@@ -611,8 +591,7 @@ class TestHighVolumeStress:
                 f"Chat {cid}: expected {msgs_per_chat} user messages, got {user_count}"
             )
             assert assistant_count == msgs_per_chat, (
-                f"Chat {cid}: expected {msgs_per_chat} assistant messages, "
-                f"got {assistant_count}"
+                f"Chat {cid}: expected {msgs_per_chat} assistant messages, got {assistant_count}"
             )
 
         await db.close()
@@ -634,9 +613,7 @@ class TestConcurrentDatabaseReadWrite:
     """
 
     @pytest.mark.asyncio
-    async def test_concurrent_read_write_same_chat_no_corruption(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_concurrent_read_write_same_chat_no_corruption(self, tmp_path: Path) -> None:
         """
         Fire many interleaved save_message() and get_recent_messages() calls
         on the same chat_id concurrently.
@@ -679,15 +656,11 @@ class TestConcurrentDatabaseReadWrite:
         write_tasks = [_writer(i) for i in range(num_writes)]
         read_tasks = [_reader(i) for i in range(num_reads)]
 
-        results = await asyncio.gather(
-            *write_tasks, *read_tasks, return_exceptions=True
-        )
+        results = await asyncio.gather(*write_tasks, *read_tasks, return_exceptions=True)
 
         # No operation should raise
         for i, r in enumerate(results):
-            assert not isinstance(r, Exception), (
-                f"Operation {i} raised: {r!r}"
-            )
+            assert not isinstance(r, Exception), f"Operation {i} raised: {r!r}"
 
         # All writes should have returned a message ID
         write_results = results[:num_writes]
@@ -719,16 +692,12 @@ class TestConcurrentDatabaseReadWrite:
 
         # Verify message_exists returns True for every written ID
         for mid in written_ids:
-            assert await db.message_exists(mid), (
-                f"Written message {mid} not found in index"
-            )
+            assert await db.message_exists(mid), f"Written message {mid} not found in index"
 
         await db.close()
 
     @pytest.mark.asyncio
-    async def test_concurrent_reads_during_sequential_writes(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_concurrent_reads_during_sequential_writes(self, tmp_path: Path) -> None:
         """
         Continuously read messages while writes are being appended.
 
@@ -797,8 +766,7 @@ class TestConcurrentDatabaseReadWrite:
             # with writes via the per-chat lock, so a reader always sees a
             # consistent state)
             assert count <= num_writes, (
-                f"Snapshot {snap_idx} saw {count} messages, "
-                f"more than {num_writes} total writes"
+                f"Snapshot {snap_idx} saw {count} messages, more than {num_writes} total writes"
             )
 
         await db.close()
@@ -840,15 +808,12 @@ class TestConcurrentDatabaseReadWrite:
 
         # No exceptions
         errors = [r for r in results if isinstance(r, Exception)]
-        assert len(errors) == 0, (
-            f"{len(errors)} operations raised exceptions: {errors[:3]}"
-        )
+        assert len(errors) == 0, f"{len(errors)} operations raised exceptions: {errors[:3]}"
 
         # Final verification: all writes persisted
         final = await db.get_recent_messages(chat_id, limit=500)
         assert len(final) == num_writes, (
-            f"Expected {num_writes} messages after high-freq test, "
-            f"got {len(final)}"
+            f"Expected {num_writes} messages after high-freq test, got {len(final)}"
         )
 
         # Verify message IDs are all present
@@ -861,9 +826,7 @@ class TestConcurrentDatabaseReadWrite:
         contents = {msg["content"] for msg in final}
         for i in range(num_writes):
             expected = f"Fast write {i}"
-            assert expected in contents, (
-                f"Missing expected content '{expected}' in final messages"
-            )
+            assert expected in contents, f"Missing expected content '{expected}' in final messages"
 
         await db.close()
 
@@ -889,7 +852,9 @@ class TestConcurrentCompressionAndRead:
 
     @pytest.mark.asyncio
     async def test_concurrent_compress_and_read_no_corruption(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """
         Pre-fill a chat above the compression threshold, then fire
@@ -914,7 +879,9 @@ class TestConcurrentCompressionAndRead:
         num_prefill = 35
         for i in range(num_prefill):
             await db.save_message(
-                chat_id, "user", f"prefill-{i}-{padding}",
+                chat_id,
+                "user",
+                f"prefill-{i}-{padding}",
                 message_id=f"msg-prefill-{i:04d}",
             )
 
@@ -922,7 +889,8 @@ class TestConcurrentCompressionAndRead:
         msg_file = db._message_file(chat_id)
         assert msg_file.exists()
         raw_lines = [
-            line for line in msg_file.read_text(encoding="utf-8").splitlines()
+            line
+            for line in msg_file.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.strip().startswith('{"_version"')
         ]
         assert len(raw_lines) >= num_prefill, (
@@ -952,9 +920,7 @@ class TestConcurrentCompressionAndRead:
 
         # (a) No operation should raise
         for i, r in enumerate(results):
-            assert not isinstance(r, Exception), (
-                f"Operation {i} raised: {r!r}"
-            )
+            assert not isinstance(r, Exception), f"Operation {i} raised: {r!r}"
 
         # First result is the compression return value
         compressed = results[0]
@@ -962,16 +928,10 @@ class TestConcurrentCompressionAndRead:
 
         # (b) Every read result must be a consistent, parseable snapshot
         for snap_idx, msgs in enumerate(read_results):
-            assert isinstance(msgs, list), (
-                f"Snapshot {snap_idx} is not a list: {type(msgs)}"
-            )
+            assert isinstance(msgs, list), f"Snapshot {snap_idx} is not a list: {type(msgs)}"
             for msg in msgs:
-                assert "role" in msg, (
-                    f"Snapshot {snap_idx}: message missing 'role': {msg}"
-                )
-                assert "content" in msg, (
-                    f"Snapshot {snap_idx}: message missing 'content': {msg}"
-                )
+                assert "role" in msg, f"Snapshot {snap_idx}: message missing 'role': {msg}"
+                assert "content" in msg, f"Snapshot {snap_idx}: message missing 'content': {msg}"
 
             # Count must be ≤ total messages written (no phantom messages)
             assert len(msgs) <= num_prefill, (
@@ -1004,7 +964,9 @@ class TestConcurrentCompressionAndRead:
 
     @pytest.mark.asyncio
     async def test_concurrent_compress_and_read_consistent_snapshot(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """
         Verify every concurrent read returns a *complete* snapshot — either
@@ -1029,7 +991,9 @@ class TestConcurrentCompressionAndRead:
         compression_keep = 10
         for i in range(num_prefill):
             await db.save_message(
-                chat_id, "user", f"prefill-{i:04d}-{padding}",
+                chat_id,
+                "user",
+                f"prefill-{i:04d}-{padding}",
                 message_id=f"msg-snap-{i:04d}",
             )
 

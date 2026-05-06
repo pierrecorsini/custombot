@@ -446,12 +446,13 @@ class TestVectorMemoryStartupDegradation:
         """BuilderContext with LLM mock but no vector_memory set."""
         mock_llm = MagicMock()
         mock_llm.openai_client = MagicMock()
-        return BuilderContext(
+        ctx = BuilderContext(
             config=test_config,
             workspace=tmp_path,
-            llm=mock_llm,
-            db=AsyncMock(),
         )
+        ctx.llm = mock_llm
+        ctx.db = AsyncMock()
+        return ctx
 
     async def test_probe_failure_sets_vector_memory_none(self, degradation_ctx: BuilderContext):
         """When embedding probe fails, vector_memory should be None."""
@@ -597,12 +598,13 @@ class TestVectorMemoryDedicatedEmbeddingDegradation:
         """BuilderContext wired for dedicated embedding URL tests."""
         mock_llm = MagicMock()
         mock_llm.openai_client = MagicMock()
-        return BuilderContext(
+        ctx = BuilderContext(
             config=dedicated_config,
             workspace=tmp_path,
-            llm=mock_llm,
-            db=AsyncMock(),
         )
+        ctx.llm = mock_llm
+        ctx.db = AsyncMock()
+        return ctx
 
     async def test_dedicated_embed_http_closed_on_probe_failure(
         self, dedicated_ctx: BuilderContext
