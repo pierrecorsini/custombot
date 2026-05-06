@@ -161,6 +161,26 @@ def get_memory_stats(
     )
 
 
+class NullMemoryMonitor:
+    """NullObject that satisfies the MemoryMonitor Protocol.
+
+    Used when psutil is unavailable or monitoring is disabled, eliminating
+    downstream ``None``-checks.  Every method is a safe no-op.
+    """
+
+    def register_cache(self, name: str, size_fn: Callable[[], int]) -> None:
+        """No-op cache registration."""
+
+    def unregister_cache(self, name: str) -> None:
+        """No-op cache removal."""
+
+    def start_periodic_check(self, interval_seconds: float = DEFAULT_MEMORY_CHECK_INTERVAL) -> None:
+        """No-op periodic check startup."""
+
+    async def stop(self) -> None:
+        """No-op stop."""
+
+
 class MemoryMonitor(BaseBackgroundService):
     """
     Memory monitor with periodic checking and threshold warnings.
@@ -272,7 +292,7 @@ class MemoryMonitor(BaseBackgroundService):
 
     async def _run_loop(self) -> None:
         """Background task that checks memory periodically."""
-        interval_seconds = getattr(self, '_interval', DEFAULT_MEMORY_CHECK_INTERVAL)
+        interval_seconds = getattr(self, "_interval", DEFAULT_MEMORY_CHECK_INTERVAL)
         log.info(
             "Memory monitor started (interval=%.1fs, warning_threshold=%.1f%%, critical_threshold=%.1f%%)",
             interval_seconds,
@@ -312,7 +332,6 @@ class MemoryMonitor(BaseBackgroundService):
         self._interval = interval_seconds
         self.start()
         log.info("Memory monitor periodic check started")
-
 
     @property
     def peak_memory_percent(self) -> float:

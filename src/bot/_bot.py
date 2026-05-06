@@ -48,7 +48,7 @@ from src.core.tool_executor import ToolExecutor
 from src.utils.validation import _validate_chat_id
 from src.exceptions import ErrorCode
 from src.logging import clear_correlation_id, get_correlation_id, set_correlation_id
-from src.monitoring import get_metrics_collector
+from src.monitoring import NullMemoryMonitor, get_metrics_collector
 from src.monitoring.tracing import (
     get_tracer,
     record_exception_safe,
@@ -209,7 +209,7 @@ class Bot:
         # rate limiting.
         self._rate_limiter = RateLimiter()
         # Memory monitor for tracking resource usage
-        self._memory_monitor: MemoryMonitor | None = None
+        self._memory_monitor: MemoryMonitor = NullMemoryMonitor()
         # Performance metrics collector
         self._metrics: PerformanceMetrics = get_metrics_collector()
         # Tool executor (delegates to skill registry with rate limiting and error handling)
@@ -276,10 +276,9 @@ class Bot:
 
     async def stop_memory_monitoring(self) -> None:
         """Stop memory monitoring for this bot instance."""
-        if self._memory_monitor:
-            await self._memory_monitor.stop()
-            self._memory_monitor = None
-            log.info("Memory monitoring stopped")
+        await self._memory_monitor.stop()
+        self._memory_monitor = NullMemoryMonitor()
+        log.info("Memory monitoring stopped")
 
     def close_executor(self) -> None:
         """Close the tool executor's audit logger during shutdown."""

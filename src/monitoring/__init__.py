@@ -44,6 +44,7 @@ from src.monitoring.memory import (
     DEFAULT_MEMORY_WARNING_THRESHOLD,
     MemoryMonitor,
     MemoryStats,
+    NullMemoryMonitor,
     check_memory_health,
     get_global_monitor,
     get_memory_stats,
@@ -110,6 +111,7 @@ __all__ = [
     # Memory monitoring
     "MemoryStats",
     "MemoryMonitor",
+    "NullMemoryMonitor",
     "get_memory_stats",
     "get_global_monitor",
     "reset_global_monitor",
