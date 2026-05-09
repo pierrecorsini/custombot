@@ -382,7 +382,7 @@ jobs:
         run: pip install pip-audit==2.10.0
 
       - name: Cache pip-audit vulnerability database
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/pip-audit
           key: pip-audit-db-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
@@ -429,7 +429,7 @@ jobs:
           pip install ".[dev]"
 
       - name: Restore benchmark baseline
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .benchmarks
           key: bench-baseline-${{ runner.os }}-py3.11
@@ -566,7 +566,7 @@ jobs:
           pip install mutmut
 
       - name: Cache mutmut results
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .mutmut-cache
           key: mutmut-${{ runner.os }}-${{ hashFiles('src/core/dedup.py', 'src/core/event_bus.py', 'src/routing.py', 'src/bot/react_loop.py', 'src/rate_limiter.py') }}
