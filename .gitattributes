@@ -1,0 +1,9 @@
+# Normalize line endings across platforms (Windows devs, Linux deploy)
+* text=auto eol=lf
+
+# Shell scripts must always use LF — CRLF causes execution failures
+*.sh text eol=lf
+
+# Windows scripts get CRLF for native editors
+*.bat text eol=crlf
+*.cmd text eol=crlf

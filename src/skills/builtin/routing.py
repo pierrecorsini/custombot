@@ -13,17 +13,20 @@ from __future__ import annotations
 
 import copy
 import uuid
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
-from src.routing import RoutingEngine, RoutingRule
+from src.routing import RoutingRule
 from src.skills.base import BaseSkill, validate_input
-from src.core.instruction_loader import InstructionLoader
 from src.utils.frontmatter import (
-    parse_frontmatter,
     dump_frontmatter,
     extract_routing_rules,
+    parse_frontmatter,
 )
+
+if TYPE_CHECKING:
+    from src.core.instruction_loader import InstructionLoader
+    from src.routing import RoutingEngine
+    from pathlib import Path
 
 
 class RoutingListSkill(BaseSkill):
@@ -55,19 +58,9 @@ class RoutingListSkill(BaseSkill):
         for rule in rules:
             status = "✅" if rule.enabled else "❌"
             from_me_str = (
-                "true"
-                if rule.fromMe is True
-                else "false"
-                if rule.fromMe is False
-                else "any"
+                "true" if rule.fromMe is True else "false" if rule.fromMe is False else "any"
             )
-            to_me_str = (
-                "true"
-                if rule.toMe is True
-                else "false"
-                if rule.toMe is False
-                else "any"
-            )
+            to_me_str = "true" if rule.toMe is True else "false" if rule.toMe is False else "any"
             lines.append(
                 f"{status} **{rule.id}** (priority: {rule.priority})\n"
                 f"   • sender: `{rule.sender}`\n"
@@ -140,8 +133,7 @@ class RoutingAddSkill(BaseSkill):
             "rule_id": {
                 "type": "string",
                 "description": (
-                    "Optional unique ID for the rule. If not provided, "
-                    "a UUID will be generated."
+                    "Optional unique ID for the rule. If not provided, a UUID will be generated."
                 ),
             },
             "fromMe": {
@@ -279,18 +271,10 @@ class RoutingAddSkill(BaseSkill):
             self._engine.refresh_rules()
 
             from_me_str = (
-                "true"
-                if from_me_value is True
-                else "false"
-                if from_me_value is False
-                else "any"
+                "true" if from_me_value is True else "false" if from_me_value is False else "any"
             )
             to_me_str = (
-                "true"
-                if to_me_value is True
-                else "false"
-                if to_me_value is False
-                else "any"
+                "true" if to_me_value is True else "false" if to_me_value is False else "any"
             )
             return (
                 f"✅ Routing rule created successfully.\n"
@@ -305,17 +289,15 @@ class RoutingAddSkill(BaseSkill):
                 f"   • showErrors: `{showErrors}`\n"
                 f"   • Instruction: `{instruction}`"
             )
-        except Exception as e:
-            return f"❌ Error creating routing rule: {e}"
+        except Exception as exc:
+            return f"❌ Error creating routing rule: {exc}"
 
 
 class RoutingDeleteSkill(BaseSkill):
     """Delete a routing rule by ID from instruction file frontmatter."""
 
     name = "routing_delete"
-    description = (
-        "Delete a routing rule by its unique ID. This action cannot be undone."
-    )
+    description = "Delete a routing rule by its unique ID. This action cannot be undone."
     parameters = {
         "type": "object",
         "properties": {
@@ -389,5 +371,5 @@ class RoutingDeleteSkill(BaseSkill):
             self._engine.refresh_rules()
 
             return f"✅ Routing rule `{rule_id}` deleted successfully."
-        except Exception as e:
-            return f"❌ Error deleting routing rule: {e}"
+        except Exception as exc:
+            return f"❌ Error deleting routing rule: {exc}"

@@ -13,11 +13,14 @@ Security measures:
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, TYPE_CHECKING
 
+from src.security.audit import audit_log
+from src.security.path_validator import PathSecurityError, validate_path
 from src.skills.base import BaseSkill, validate_input
-from src.security.path_validator import validate_path, PathSecurityError
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -27,19 +30,8 @@ _MAX_WRITE_BYTES = 1 * 1024 * 1024  # 1 MB
 
 
 def _audit_log(event: str, details: Dict[str, Any]) -> None:
-    """
-    Log file operation events for audit purposes.
-
-    Args:
-        event: Event type (e.g., "file_read", "file_write", "path_blocked")
-        details: Additional context about the event
-    """
-    log.info(
-        "FILE_AUDIT: %s | %s",
-        event,
-        " | ".join(f"{k}={v}" for k, v in details.items()),
-        extra={"file_event": event, **details},
-    )
+    """Log file operation events for audit purposes."""
+    audit_log(event, details, level=logging.INFO, prefix="FILE_AUDIT")
 
 
 def _safe_path(workspace_dir: Path, filename: str) -> Path:
@@ -56,8 +48,7 @@ def _safe_path(workspace_dir: Path, filename: str) -> Path:
 class ReadFileSkill(BaseSkill):
     name = "read_file"
     description = (
-        "Read the contents of a file in the conversation workspace. "
-        "Returns up to 64 KB of text."
+        "Read the contents of a file in the conversation workspace. Returns up to 64 KB of text."
     )
     parameters = {
         "type": "object",
@@ -71,9 +62,7 @@ class ReadFileSkill(BaseSkill):
     }
 
     @validate_input
-    async def execute(
-        self, workspace_dir: Path, filename: str = "", **kwargs: Any
-    ) -> str:
+    async def execute(self, workspace_dir: Path, filename: str = "", **kwargs: Any) -> str:
         try:
             path = _safe_path(workspace_dir, filename)
         except ValueError as exc:
@@ -94,6 +83,7 @@ class ReadFileSkill(BaseSkill):
 
 class WriteFileSkill(BaseSkill):
     name = "write_file"
+    dangerous = True
     description = (
         "Write (or overwrite) a file in the conversation workspace. "
         "Creates parent directories automatically. "
@@ -168,8 +158,7 @@ class ListFilesSkill(BaseSkill):
             "path": {
                 "type": "string",
                 "description": (
-                    "Sub-path inside the workspace to list. "
-                    "Leave empty or use '.' for the root."
+                    "Sub-path inside the workspace to list. Leave empty or use '.' for the root."
                 ),
                 "default": ".",
             }

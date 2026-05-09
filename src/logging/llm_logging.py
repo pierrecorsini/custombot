@@ -7,18 +7,132 @@ When enabled, each LLM call produces two JSON files in workspace/logs/llm/:
   {timestamp}_response_{request_id}.json  — full response payload
 
 Both files share the same request_id so they can be paired.
+
+Rotation:
+  - Cleanup runs every ``LLM_LOG_CLEANUP_INTERVAL`` writes.
+  - Removes files older than ``max_age_days``.
+  - Keeps at most ``max_files`` files (oldest deleted first).
+  - Log directory size is queryable via ``get_log_dir_size()``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.constants import (
+    LLM_LOG_CLEANUP_INTERVAL,
+    LLM_LOG_MAX_COLLECTION_ITEMS,
+    LLM_LOG_MAX_AGE_DAYS,
+    LLM_LOG_MAX_FILES,
+    LLM_LOG_MAX_JSON_BYTES,
+    LLM_LOG_MAX_STRING_CHARS,
+)
+
 log = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Secret redaction for log payloads
+# ─────────────────────────────────────────────────────────────────────────────
+
+_REDACTED = "[REDACTED]"
+
+# Dict keys whose values should always be redacted (case-insensitive match).
+# Patterns that mark a key as secret (case-insensitive).  Each entry is
+# checked against the lowered key using *in* matching.  Order matters:
+# more-specific patterns should come first.
+_SECRET_SUBSTRINGS: tuple[str, ...] = (
+    "api_key",
+    "apikey",
+    "api-key",
+    "authorization",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "credential",
+    "access_token",
+    "refresh_token",
+    "bearer_token",
+    "auth_token",
+    "api_token",
+)
+
+
+def _is_secret_key(key: str) -> bool:
+    """Return True if *key* (case-insensitive) looks like a secret field."""
+    k = key.lower()
+    return any(s in k for s in _SECRET_SUBSTRINGS)
+
+
+# Regex patterns applied to string values to catch inline secrets.
+_SECRET_VALUE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # OpenAI-style keys
+    (re.compile(r"sk-proj-[a-zA-Z0-9_-]{20,}"), _REDACTED),
+    (re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"), _REDACTED),
+    (re.compile(r"sk-[a-zA-Z0-9]{20,}"), _REDACTED),
+    # AWS access keys
+    (re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"), _REDACTED),
+    # GitHub tokens
+    (re.compile(r"gh[po]_[a-zA-Z0-9]{36}"), _REDACTED),
+    # GitLab tokens
+    (re.compile(r"glpat-[a-zA-Z0-9_-]{20,}"), _REDACTED),
+    # Slack tokens
+    (re.compile(r"xox[bpsa]-[a-zA-Z0-9-]{10,}"), _REDACTED),
+    # Google API keys
+    (re.compile(r"AIza[a-zA-Z0-9_-]{35}"), _REDACTED),
+    # Bearer / Basic auth tokens in strings
+    (re.compile(r"(?i)(?:Bearer|Basic)\s+[a-zA-Z0-9._-]{10,}"), _REDACTED),
+    # JWT tokens (three base64url segments)
+    (re.compile(r"eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*"), _REDACTED),
+]
+
+
+def _redact_string(text: str) -> str:
+    """Apply regex-based redaction to a string value."""
+    for pattern, replacement in _SECRET_VALUE_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _redact_secrets(obj: Any, _depth: int = 0) -> Any:
+    """Recursively redact secret values from a data structure.
+
+    - Dict values whose *lowered* key is in ``_SECRET_KEY_NAMES`` are replaced
+      with ``"[REDACTED]"``.
+    - String values are scanned for known API-key / token patterns.
+    - Lists and tuples are traversed element-wise.
+    - A depth cap (20) prevents stack overflow on deeply nested payloads.
+    """
+    if _depth > 20:
+        return obj
+
+    if isinstance(obj, dict):
+        redacted: dict[str, Any] = {}
+        for k, v in obj.items():
+            if isinstance(k, str) and _is_secret_key(k):
+                redacted[k] = _REDACTED
+            else:
+                redacted[k] = _redact_secrets(v, _depth + 1)
+        return redacted
+
+    if isinstance(obj, list):
+        return [_redact_secrets(item, _depth + 1) for item in obj]
+
+    if isinstance(obj, tuple):
+        return tuple(_redact_secrets(item, _depth + 1) for item in obj)
+
+    if isinstance(obj, str):
+        return _redact_string(obj)
+
+    # int, float, bool, None, etc. — safe as-is
+    return obj
 
 
 def _timestamp_prefix() -> str:
@@ -45,12 +159,171 @@ def _serializable(obj: Any) -> Any:
     return str(obj)
 
 
-class LLMLogger:
-    """Writes one JSON file per LLM request and per LLM response."""
+def _truncate_for_log(
+    obj: Any,
+    *,
+    max_string_chars: int = LLM_LOG_MAX_STRING_CHARS,
+    max_collection_items: int = LLM_LOG_MAX_COLLECTION_ITEMS,
+    _depth: int = 0,
+) -> Any:
+    """Recursively truncate oversized values for disk-friendly JSON logs."""
+    if _depth > 20:
+        return "[TRUNCATED_DEPTH]"
 
-    def __init__(self, log_dir: str | Path) -> None:
+    if isinstance(obj, str):
+        if len(obj) <= max_string_chars:
+            return obj
+        omitted = len(obj) - max_string_chars
+        return f"{obj[:max_string_chars]}...[TRUNCATED {omitted} chars]"
+
+    if isinstance(obj, dict):
+        items = list(obj.items())
+        trimmed_items = items[:max_collection_items]
+        out = {
+            str(k): _truncate_for_log(
+                v,
+                max_string_chars=max_string_chars,
+                max_collection_items=max_collection_items,
+                _depth=_depth + 1,
+            )
+            for k, v in trimmed_items
+        }
+        omitted = len(items) - len(trimmed_items)
+        if omitted > 0:
+            out["__truncated_keys__"] = omitted
+        return out
+
+    if isinstance(obj, list):
+        trimmed = obj[:max_collection_items]
+        out = [
+            _truncate_for_log(
+                item,
+                max_string_chars=max_string_chars,
+                max_collection_items=max_collection_items,
+                _depth=_depth + 1,
+            )
+            for item in trimmed
+        ]
+        omitted = len(obj) - len(trimmed)
+        if omitted > 0:
+            out.append(f"[TRUNCATED {omitted} list items]")
+        return out
+
+    if isinstance(obj, tuple):
+        return tuple(
+            _truncate_for_log(
+                item,
+                max_string_chars=max_string_chars,
+                max_collection_items=max_collection_items,
+                _depth=_depth + 1,
+            )
+            for item in obj[:max_collection_items]
+        )
+
+    return obj
+
+
+def _summarize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return compact message summaries without full content payloads."""
+    summaries: list[dict[str, Any]] = []
+    for msg in messages[:LLM_LOG_MAX_COLLECTION_ITEMS]:
+        role = str(msg.get("role", "unknown"))
+        content = msg.get("content")
+        content_text = content if isinstance(content, str) else json.dumps(content, default=str)
+        content_text = _redact_string(content_text)
+        summaries.append(
+            {
+                "role": role,
+                "content_chars": len(content_text),
+                "content_preview": _truncate_for_log(content_text, max_string_chars=200),
+                "has_tool_calls": bool(msg.get("tool_calls")),
+                "name": str(msg.get("name")) if msg.get("name") else None,
+            }
+        )
+    omitted = max(0, len(messages) - len(summaries))
+    if omitted:
+        summaries.append({"truncated_messages": omitted})
+    return summaries
+
+
+def _summarize_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return compact tool summaries without full JSON schemas."""
+    out: list[dict[str, Any]] = []
+    for tool in tools[:LLM_LOG_MAX_COLLECTION_ITEMS]:
+        fn = tool.get("function") if isinstance(tool, dict) else None
+        fn_name = None
+        if isinstance(fn, dict):
+            name = fn.get("name")
+            if isinstance(name, str):
+                fn_name = name
+        out.append({
+            "type": str(tool.get("type", "unknown")) if isinstance(tool, dict) else "unknown",
+            "function": fn_name,
+        })
+    omitted = max(0, len(tools) - len(out))
+    if omitted:
+        out.append({"truncated_tools": omitted})
+    return out
+
+
+def _summarize_response_payload(response_payload: Any) -> dict[str, Any]:
+    """Return response summary without persisting full body JSON."""
+    summary: dict[str, Any] = {
+        "type": type(response_payload).__name__,
+    }
+
+    if isinstance(response_payload, dict):
+        choices = response_payload.get("choices")
+        if isinstance(choices, list):
+            summary["choices_count"] = len(choices)
+            if choices:
+                first = choices[0]
+                if isinstance(first, dict):
+                    msg = first.get("message")
+                    if isinstance(msg, dict):
+                        content = msg.get("content")
+                        content_text = content if isinstance(content, str) else json.dumps(content, default=str)
+                        summary["first_message_chars"] = len(content_text)
+                        summary["first_message_preview"] = _truncate_for_log(
+                            _redact_string(content_text),
+                            max_string_chars=200,
+                        )
+                        summary["first_message_has_tool_calls"] = bool(msg.get("tool_calls"))
+
+        usage = response_payload.get("usage")
+        if isinstance(usage, dict):
+            compact_usage = {
+                k: usage.get(k)
+                for k in ("prompt_tokens", "completion_tokens", "total_tokens")
+                if k in usage
+            }
+            if compact_usage:
+                summary["usage"] = compact_usage
+
+    return summary
+
+
+class LLMLogger:
+    """Writes one JSON file per LLM request and per LLM response.
+
+    Includes automatic log rotation: old files are pruned by age and count
+    every ``cleanup_interval`` writes.
+    """
+
+    def __init__(
+        self,
+        log_dir: str | Path,
+        *,
+        max_files: int = LLM_LOG_MAX_FILES,
+        max_age_days: int = LLM_LOG_MAX_AGE_DAYS,
+        cleanup_interval: int = LLM_LOG_CLEANUP_INTERVAL,
+    ) -> None:
         self._dir = Path(log_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._max_files = max_files
+        self._max_age_days = max_age_days
+        self._cleanup_interval = cleanup_interval
+        self._write_count = 0
 
     # ── public helpers ────────────────────────────────────────────────────
 
@@ -61,10 +334,68 @@ class LLMLogger:
     def _write(self, filename: str, data: Dict[str, Any]) -> Path:
         path = self._dir / filename
         try:
-            path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+            safe_data = _redact_secrets(data)
+            payload = _truncate_for_log(safe_data)
+
+            serialized = json.dumps(payload, default=str, separators=(",", ":"))
+            if len(serialized.encode("utf-8")) > LLM_LOG_MAX_JSON_BYTES:
+                payload = {
+                    "meta": {
+                        "log_truncated": True,
+                        "reason": "payload exceeded LLM_LOG_MAX_JSON_BYTES",
+                        "max_json_bytes": LLM_LOG_MAX_JSON_BYTES,
+                    },
+                    "data": _truncate_for_log(
+                        safe_data,
+                        max_string_chars=max(128, LLM_LOG_MAX_STRING_CHARS // 4),
+                        max_collection_items=max(5, LLM_LOG_MAX_COLLECTION_ITEMS // 4),
+                    ),
+                }
+                serialized = json.dumps(payload, default=str, separators=(",", ":"))
+
+            path.write_text(serialized, encoding="utf-8")
         except OSError as exc:
             log.warning("Failed to write LLM log %s: %s", path, exc)
+        self._write_count += 1
+        if self._write_count % self._cleanup_interval == 0:
+            self._cleanup()
         return path
+
+    # ── rotation / cleanup ────────────────────────────────────────────────
+
+    def _cleanup(self) -> None:
+        """Remove old files by age, then trim to max_files by count."""
+        try:
+            files = _list_log_files(self._dir)
+        except OSError:
+            return
+
+        now = time.time()
+        age_cutoff = now - (self._max_age_days * 86400)
+
+        # 1) Delete files older than max_age_days
+        remaining: list[Path] = []
+        for f in files:
+            try:
+                if f.stat().st_mtime < age_cutoff:
+                    f.unlink()
+                else:
+                    remaining.append(f)
+            except OSError:
+                remaining.append(f)
+
+        # 2) Trim to max_files (oldest first — list is already sorted by name)
+        if len(remaining) > self._max_files:
+            excess = len(remaining) - self._max_files
+            for f in remaining[:excess]:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+
+    def get_log_dir_size(self) -> int:
+        """Return total size (bytes) of all log files in the directory."""
+        return _dir_size(self._dir)
 
     # ── request ───────────────────────────────────────────────────────────
 
@@ -86,11 +417,13 @@ class LLMLogger:
             "request_id": request_id,
             "timestamp": now.isoformat(),
             "model": model,
-            "messages": _serializable(messages),
+            "message_count": len(messages),
+            "messages_summary": _summarize_messages(messages),
             "temperature": temperature,
         }
         if tools:
-            payload["tools"] = _serializable(tools)
+            payload["tool_count"] = len(tools)
+            payload["tools_summary"] = _summarize_tools(tools)
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
 
@@ -123,6 +456,32 @@ class LLMLogger:
             payload["error"] = str(error)
             payload["error_type"] = type(error).__name__
         else:
-            payload["response"] = _serializable(response)
+            serializable_response = _serializable(response)
+            payload["response_summary"] = _summarize_response_payload(serializable_response)
 
         self._write(f"{ts_prefix}_response_{request_id}.json", payload)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Module-level helpers (reusable by health checks)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _list_log_files(directory: Path) -> list[Path]:
+    """Return sorted list of .json log files in *directory* (oldest first)."""
+    return sorted(directory.glob("*.json"))
+
+
+def _dir_size(directory: Path) -> int:
+    """Return total size (bytes) of all files in *directory*."""
+    total = 0
+    try:
+        for f in directory.iterdir():
+            if f.is_file():
+                try:
+                    total += f.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total

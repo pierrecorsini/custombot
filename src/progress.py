@@ -32,18 +32,22 @@ import logging
 import time
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generator, TypeVar
+from typing import Any, Callable, Generator, TypeVar, TYPE_CHECKING
 
 from rich.console import Console
 from rich.progress import (
     BarColumn,
     Progress,
     SpinnerColumn,
-    TaskID,
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
 )
+
+if TYPE_CHECKING:
+    from rich.progress import (
+        TaskID,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -71,7 +75,7 @@ T = TypeVar("T")
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class SpinnerConfig:
     """Configuration for spinner behavior."""
 
@@ -201,7 +205,7 @@ class SpinnerStatus:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ProgressConfig:
     """Configuration for progress bar behavior."""
 
@@ -328,8 +332,7 @@ class ProgressBar:
 
         # Always update on description change, otherwise throttle
         should_update = (
-            description is not None
-            or (now - self._last_update) >= self._config.min_update_interval
+            description is not None or (now - self._last_update) >= self._config.min_update_interval
         )
 
         if should_update:

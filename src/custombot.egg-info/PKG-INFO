@@ -1,0 +1,36 @@
+Metadata-Version: 2.4
+Name: custombot
+Version: 1.0.0
+Summary: A lightweight WhatsApp AI assistant
+Requires-Python: >=3.11
+Requires-Dist: openai~=2.29.0
+Requires-Dist: httpx~=0.28.0
+Requires-Dist: aiohttp~=3.13.0
+Requires-Dist: click~=8.3.0
+Requires-Dist: rich~=14.3.0
+Requires-Dist: python-dotenv~=1.2.0
+Requires-Dist: psutil~=6.0.0
+Requires-Dist: pyyaml~=6.0.0
+Requires-Dist: neonize==0.3.17.post0
+Requires-Dist: duckduckgo-search~=8.1.0
+Requires-Dist: sqlite-vec==0.1.9
+Requires-Dist: orjson~=3.10.0
+Requires-Dist: msgpack~=1.1.0
+Requires-Dist: opentelemetry-api~=1.30.0
+Requires-Dist: opentelemetry-sdk~=1.30.0
+Requires-Dist: watchdog>=4.0.0
+Requires-Dist: xxhash~=3.5.0
+Provides-Extra: tui
+Requires-Dist: questionary~=2.1.0; extra == "tui"
+Provides-Extra: dev
+Requires-Dist: pytest>=9.0.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=1.3.0; extra == "dev"
+Requires-Dist: pytest-cov>=7.1.0; extra == "dev"
+Requires-Dist: pytest-xdist>=3.8.0; extra == "dev"
+Requires-Dist: mypy>=1.20.0; extra == "dev"
+Requires-Dist: ruff==0.15.12; extra == "dev"
+Requires-Dist: hypothesis>=6.152.0; extra == "dev"
+Requires-Dist: pytest-benchmark>=4.0.0; extra == "dev"
+Requires-Dist: pip-audit>=2.10.0; extra == "dev"
+Requires-Dist: pip-tools>=7.4.0; extra == "dev"
+Requires-Dist: pytest-timeout>=2.3.0; extra == "dev"

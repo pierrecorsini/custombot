@@ -23,16 +23,18 @@ from pathlib import Path
 import pytest
 
 from src.memory import (
+    _DEFAULT_AGENTS_MD,
     AGENTS_FILENAME,
     BACKUP_DIR,
     MEMORY_FILENAME,
+    MtimeCache,
     RECOVERY_LOG_FILENAME,
     Memory,
     MemoryCorruptionResult,
     _safe_name,
-    _DEFAULT_AGENTS_MD,
 )
-
+from src.security import PathSecurityError, is_path_in_workspace
+from src.utils import LRUDict
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -93,23 +95,40 @@ class TestSafeName:
 
     @pytest.mark.parametrize(
         "char",
-        ["@", "#", "$", "%", "^", "&", "*", "(", ")", "!", " ", "/", "\\", ":", "|"],
+        ["#", "$", "%", "^", "&", "(", ")", "!", " "],
     )
-    def test_unsafe_chars_replaced(self, char: str):
-        assert _safe_name(char) == "_"
+    def test_unsafe_chars_replaced_with_underscore(self, char: str):
+        # Single special chars become "_" which gets stripped to "" → ValueError
+        with pytest.raises(ValueError):
+            _safe_name(char)
+
+    @pytest.mark.parametrize(
+        "char, expected",
+        [
+            ("@", "at"),
+            ("*", "as"),
+            ("/", "sl"),
+            ("\\", "bs"),
+            (":", "col"),
+            ("|", "pi"),
+        ],
+    )
+    def test_unsafe_chars_replaced_with_named(self, char: str, expected: str):
+        assert _safe_name(char) == expected
 
     def test_email_becomes_safe(self):
         result = _safe_name("user@domain.com")
         assert "@" not in result
         assert "." in result  # dot is allowed
-        assert result == "user_domain.com"
+        assert result == "user_at_domain.com"
 
-    def test_empty_string(self):
-        assert _safe_name("") == ""
+    def test_empty_string_raises(self):
+        with pytest.raises(ValueError, match="must not be empty"):
+            _safe_name("")
 
     def test_phone_number_with_plus(self):
         result = _safe_name("+1234567890")
-        assert result == "_1234567890"
+        assert result == "1234567890"
 
     def test_unicode_characters(self):
         result = _safe_name("日本語")
@@ -122,11 +141,11 @@ class TestSafeName:
 
     def test_multiple_special_chars(self):
         result = _safe_name("a@b#c$d")
-        assert result == "a_b_c_d"
+        assert result == "a_at_b_c_d"
 
     def test_consecutive_specials(self):
         result = _safe_name("a@@b")
-        assert result == "a__b"
+        assert result == "a_at__at_b"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,51 +202,98 @@ class TestMemoryInit:
 
 
 class TestLRUCacheInternals:
-    """Tests for _cache_get / _cache_put LRU mechanics."""
+    """Tests for MtimeCache-backed cache mechanics in Memory."""
 
-    def test_cache_get_miss_returns_none(self, mem: Memory):
-        assert mem._cache_get(mem._memory_cache, "x") is None
+    def test_caches_initially_empty(self, mem: Memory):
+        assert len(mem._memory_cache) == 0
+        assert len(mem._agents_cache) == 0
 
-    def test_cache_put_and_get(self, mem: Memory):
-        mem._cache_put(mem._memory_cache, "a", (1.0, "content"))
-        result = mem._cache_get(mem._memory_cache, "a")
-        assert result == (1.0, "content")
+    @pytest.mark.asyncio
+    async def test_miss_on_first_read(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "content")
+        await mem.read_memory("chat1")
+        assert mem._memory_cache.misses == 1
+        assert mem._memory_cache.hits == 0
 
-    def test_cache_get_moves_to_end_lru(self, mem: Memory):
-        """Accessing a key should move it to the most-recent position."""
-        mem._cache_put(mem._memory_cache, "a", (1.0, "A"))
-        mem._cache_put(mem._memory_cache, "b", (1.0, "B"))
-        # Access "a" → moves to end
-        mem._cache_get(mem._memory_cache, "a")
-        # Now "b" is oldest, should be evicted next
-        mem._max_cache_size = 2
-        mem._cache_put(mem._memory_cache, "c", (1.0, "C"))
-        assert "b" not in mem._memory_cache
-        assert "a" in mem._memory_cache
-        assert "c" in mem._memory_cache
+    @pytest.mark.asyncio
+    async def test_hit_on_reread_unchanged(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "content")
+        await mem.read_memory("chat1")
+        await mem.read_memory("chat1")
+        assert mem._memory_cache.hits == 1
+        assert mem._memory_cache.misses == 1
 
-    def test_cache_put_evicts_oldest_at_capacity(self, mem: Memory):
-        mem._max_cache_size = 3
-        mem._cache_put(mem._memory_cache, "a", (1.0, "A"))
-        mem._cache_put(mem._memory_cache, "b", (1.0, "B"))
-        mem._cache_put(mem._memory_cache, "c", (1.0, "C"))
-        # Cache is full; next insert should evict "a"
-        mem._cache_put(mem._memory_cache, "d", (1.0, "D"))
-        assert "a" not in mem._memory_cache
-        assert "d" in mem._memory_cache
+    @pytest.mark.asyncio
+    async def test_invalidate_removes_entry(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "content")
+        await mem.read_memory("chat1")
+        assert "chat1" in mem._memory_cache
+        mem._memory_cache.invalidate("chat1")
+        assert "chat1" not in mem._memory_cache
 
-    def test_cache_put_updates_existing_key(self, mem: Memory):
-        mem._cache_put(mem._memory_cache, "a", (1.0, "old"))
-        mem._cache_put(mem._memory_cache, "a", (2.0, "new"))
-        result = mem._cache_get(mem._memory_cache, "a")
-        assert result == (2.0, "new")
+    @pytest.mark.asyncio
+    async def test_separate_caches(self, mem: Memory, workspace: Path):
+        """Memory cache and agents cache track hits/misses independently."""
+        _write_memory_raw(workspace, "chat1", "mem")
+        await mem.read_memory("chat1")
+        mem.ensure_workspace("chat2")
+        await mem.read_agents_md("chat2")
+        assert mem._memory_cache.misses == 1
+        assert mem._agents_cache.misses == 1
 
-    def test_separate_caches(self, mem: Memory):
-        """Memory cache and agents cache are independent."""
-        mem._cache_put(mem._memory_cache, "a", (1.0, "mem"))
-        mem._cache_put(mem._agents_cache, "a", (1.0, "agents"))
-        assert mem._cache_get(mem._memory_cache, "a") == (1.0, "mem")
-        assert mem._cache_get(mem._agents_cache, "a") == (1.0, "agents")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MtimeCache._missing bounding
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestMtimeCacheMissingBounding:
+    """_missing dict must stay within max_size to prevent unbounded growth."""
+
+    @pytest.mark.asyncio
+    async def test_missing_dict_respects_max_size(self, mem: Memory):
+        """_missing stays bounded when many unique keys probe for absent files."""
+        max_size = 5
+        cache = MtimeCache(max_size=max_size)
+
+        # Probe 10 nonexistent files — _missing should cap at max_size
+        for i in range(10):
+            result = await cache.read(
+                f"key-{i:04d}",
+                Path(f"/tmp/nonexistent_{i}"),
+            )
+            assert result is None
+
+        assert len(cache._missing) <= max_size
+
+        # Most recent entries should survive
+        assert cache._missing.get("key-0009") is not None
+
+        # Oldest entries should have been evicted
+        assert cache._missing.get("key-0000") is None
+
+    @pytest.mark.asyncio
+    async def test_missing_and_cache_share_max_size_independently(self, mem: Memory):
+        """_missing and _cache each have their own max_size bound."""
+        max_size = 5
+        cache = MtimeCache(max_size=max_size)
+
+        # Fill _missing with absent-file probes
+        for i in range(10):
+            await cache.read(
+                f"missing-{i:04d}",
+                Path(f"/tmp/nonexistent_{i}"),
+            )
+
+        # _missing is bounded
+        assert len(cache._missing) <= max_size
+
+        # _cache is empty (no files existed to cache)
+        assert len(cache._cache) == 0
+
+        # Both can coexist at max_size independently
+        assert len(cache._missing) <= max_size
+        assert len(cache._cache) <= max_size
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,7 +310,7 @@ class TestWorkspacePath:
 
     def test_workspace_path_sanitizes_chat_id(self, mem: Memory):
         result = mem.workspace_path("user@domain")
-        assert result.name == "user_domain"
+        assert result.name == "user_at_domain"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,20 +348,111 @@ class TestEnsureWorkspace:
 
     def test_clears_agents_cache_on_seed(self, mem: Memory):
         """Seeding AGENTS.md should invalidate the agents cache entry."""
-        mem._cache_put(mem._agents_cache, "chat1", (1.0, "old"))
+        # Populate agents cache via underlying LRUDict (MtimeCache has no __setitem__)
+        mem._agents_cache._cache["chat1"] = (1.0, "old")
         mem.ensure_workspace("chat1")
         assert "chat1" not in mem._agents_cache
 
     def test_does_not_clear_agents_cache_if_agents_exists(self, mem: Memory):
         """If AGENTS.md already exists, the cache should not be touched."""
         mem.ensure_workspace("chat1")  # creates AGENTS.md
-        mem._cache_put(mem._agents_cache, "chat1", (1.0, "cached"))
+        mem._agents_cache._cache["chat1"] = (1.0, "cached")
         mem.ensure_workspace("chat1")  # should NOT evict
-        assert mem._cache_get(mem._agents_cache, "chat1") == (1.0, "cached")
+        assert mem._agents_cache._cache.get("chat1") == (1.0, "cached")
 
     def test_creates_parent_directories(self, mem: Memory):
         result = mem.ensure_workspace("deep/chat")
         assert result.is_dir()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Concurrent ensure_workspace
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestConcurrentEnsureWorkspace:
+    """Verify concurrent ensure_workspace calls for the same chat_id complete safely.
+
+    _atomic_seed uses os.O_EXCL for file creation, guaranteeing that only one
+    writer wins per seed file. Uses separate Memory instances sharing the same
+    workspace root to avoid LRUDict thread-safety issues — the test focuses on
+    filesystem-level atomicity.
+    """
+
+    def test_same_chat_id_no_error(self, workspace: Path):
+        """Multiple concurrent ensure_workspace calls for the same chat_id all
+        complete without error, producing a valid workspace."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        chat_id = "concurrent-chat"
+        num_workers = 8
+
+        # Each thread gets its own Memory instance (avoids LRUDict races)
+        # but they all share the same filesystem workspace.
+        instances = [Memory(str(workspace)) for _ in range(num_workers)]
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = [pool.submit(inst.ensure_workspace, chat_id) for inst in instances]
+            results = [f.result() for f in futures]
+
+        # All calls return the same path
+        assert all(r == results[0] for r in results)
+
+        # Directory exists
+        assert results[0].is_dir()
+
+        # AGENTS.md has correct content (not corrupted by concurrent writes)
+        agents = results[0] / AGENTS_FILENAME
+        assert agents.exists()
+        assert agents.read_text(encoding="utf-8") == _DEFAULT_AGENTS_MD
+
+        # .chat_id has correct content
+        chat_id_file = results[0] / Memory.ORIGIN_ID_FILENAME
+        assert chat_id_file.exists()
+        assert chat_id_file.read_text(encoding="utf-8") == chat_id
+
+        # No leftover .tmp files from failed atomic writes
+        tmp_files = list(results[0].glob("*.tmp"))
+        assert tmp_files == []
+
+    def test_different_chat_ids_isolated(self, workspace: Path):
+        """Concurrent calls for different chat_ids should not interfere."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        chat_ids = [f"chat{i}" for i in range(5)]
+        instances = [Memory(str(workspace)) for _ in chat_ids]
+
+        with ThreadPoolExecutor(max_workers=len(chat_ids)) as pool:
+            futures = [
+                pool.submit(inst.ensure_workspace, cid) for inst, cid in zip(instances, chat_ids)
+            ]
+            results = [f.result() for f in futures]
+
+        assert len(set(results)) == len(chat_ids)
+        for path in results:
+            assert path.is_dir()
+            assert (path / AGENTS_FILENAME).exists()
+
+    def test_mixed_same_and_different_chat_ids(self, workspace: Path):
+        """Mix of same and different chat_ids in concurrent calls."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        calls = ["shared"] * 5 + [f"unique{i}" for i in range(3)]
+        instances = [Memory(str(workspace)) for _ in calls]
+
+        with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+            futures = [
+                pool.submit(inst.ensure_workspace, cid) for inst, cid in zip(instances, calls)
+            ]
+            results = [f.result() for f in futures]
+
+        assert len(results) == len(calls)
+        for r in results:
+            assert r.is_dir()
+
+        # "shared" results all point to the same directory
+        shared = results[:5]
+        assert all(r == shared[0] for r in shared)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -320,7 +477,11 @@ class TestWriteMemory:
 
     @pytest.mark.asyncio
     async def test_invalidates_memory_cache(self, mem: Memory):
-        mem._cache_put(mem._memory_cache, "chat1", (1.0, "old"))
+        # Populate cache via a normal read
+        _write_memory_raw(mem._root, "chat1", "old")
+        await mem.read_memory("chat1")
+        assert "chat1" in mem._memory_cache
+
         await mem.write_memory("chat1", "new content")
         assert "chat1" not in mem._memory_cache
 
@@ -328,6 +489,95 @@ class TestWriteMemory:
     async def test_creates_directory_if_missing(self, mem: Memory, workspace: Path):
         await mem.write_memory("new-chat", "content")
         assert _memory_path(workspace, "new-chat").exists()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# write_memory cache invalidation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestWriteMemoryCacheInvalidation:
+    """Verify that write_memory() properly invalidates the mtime cache so
+    subsequent reads always reflect the freshly written content.
+
+    Covers:
+      (a) cache entry is removed (invalidate called)
+      (b) next read returns the new content, not stale cache
+      (c) cache miss counter increments on the post-write read
+    """
+
+    @pytest.mark.asyncio
+    async def test_invalidate_removes_cached_entry(self, mem: Memory, workspace: Path):
+        """write_memory() must call _memory_cache.invalidate(chat_id), removing
+        the cached entry so a subsequent read re-fetches from disk."""
+        # Arrange — populate cache via a normal read
+        _write_memory_raw(workspace, "chat1", "original")
+        await mem.read_memory("chat1")
+        assert "chat1" in mem._memory_cache  # cache populated
+
+        # Act
+        await mem.write_memory("chat1", "new content")
+
+        # Assert — cache entry removed
+        assert "chat1" not in mem._memory_cache
+
+    @pytest.mark.asyncio
+    async def test_next_read_returns_new_content(self, mem: Memory, workspace: Path):
+        """After write_memory(), a read must return the freshly written content
+        rather than the stale cached version."""
+        # Arrange
+        _write_memory_raw(workspace, "chat1", "old")
+        await mem.read_memory("chat1")
+        assert await mem.read_memory("chat1") == "old"  # cached
+
+        # Act
+        await mem.write_memory("chat1", "updated")
+
+        # Assert
+        result = await mem.read_memory("chat1")
+        assert result == "updated"
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_counter_increments(self, mem: Memory, workspace: Path):
+        """The post-write read should be a cache miss (invalidated entry forces
+        a fresh stat+read from disk), so the miss counter must increment."""
+        # Arrange — populate cache
+        _write_memory_raw(workspace, "chat1", "initial")
+        await mem.read_memory("chat1")
+        misses_before = mem._memory_cache.misses
+
+        # Act — write invalidates, then read must go to disk
+        await mem.write_memory("chat1", "replacement")
+        await mem.read_memory("chat1")
+
+        # Assert — exactly one additional miss
+        assert mem._memory_cache.misses == misses_before + 1
+
+    @pytest.mark.asyncio
+    async def test_write_then_read_populates_cache_with_new_content(
+        self, mem: Memory, workspace: Path
+    ):
+        """After write→read, the cache should store the new content and mtime
+        so subsequent reads are cache hits with the correct data."""
+        # Arrange
+        _write_memory_raw(workspace, "chat1", "v1")
+        await mem.read_memory("chat1")
+
+        # Act
+        await mem.write_memory("chat1", "v2")
+        await mem.read_memory("chat1")
+
+        # Assert — cache now holds v2 (accessed via underlying LRUDict)
+        cached = mem._memory_cache._cache.get("chat1")
+        assert cached is not None
+        # MtimeCache stores raw file content; write_memory appends \n
+        assert cached[1].strip() == "v2"
+
+        # Further read should be a cache hit
+        hits_before = mem._memory_cache.hits
+        result = await mem.read_memory("chat1")
+        assert result == "v2"
+        assert mem._memory_cache.hits == hits_before + 1
 
 
 class TestReadMemory:
@@ -354,7 +604,7 @@ class TestReadMemory:
     async def test_populates_cache_on_read(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "cached content")
         await mem.read_memory("chat1")
-        cached = mem._cache_get(mem._memory_cache, "chat1")
+        cached = mem._memory_cache._cache.get("chat1")
         assert cached is not None
         assert cached[1] == "cached content"
 
@@ -367,9 +617,7 @@ class TestReadMemory:
         assert result == "content"
 
     @pytest.mark.asyncio
-    async def test_cache_invalidated_on_mtime_change(
-        self, mem: Memory, workspace: Path
-    ):
+    async def test_cache_invalidated_on_mtime_change(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "original")
         await mem.read_memory("chat1")
 
@@ -426,9 +674,7 @@ class TestReadAgentsMd:
         assert "Agent Instructions" in result
 
     @pytest.mark.asyncio
-    async def test_raises_file_not_found_when_missing(
-        self, mem: Memory, workspace: Path
-    ):
+    async def test_raises_file_not_found_when_missing(self, mem: Memory, workspace: Path):
         # Create directory but NOT AGENTS.md
         chat_dir = _chat_dir(workspace, "chat1")
         chat_dir.mkdir(parents=True, exist_ok=True)
@@ -439,7 +685,7 @@ class TestReadAgentsMd:
     async def test_caches_content(self, mem: Memory):
         mem.ensure_workspace("chat1")
         await mem.read_agents_md("chat1")
-        cached = mem._cache_get(mem._agents_cache, "chat1")
+        cached = mem._agents_cache._cache.get("chat1")
         assert cached is not None
         assert "Agent Instructions" in cached[1]
 
@@ -452,9 +698,7 @@ class TestReadAgentsMd:
         assert first == second
 
     @pytest.mark.asyncio
-    async def test_cache_refreshed_on_external_modification(
-        self, mem: Memory, workspace: Path
-    ):
+    async def test_cache_refreshed_on_external_modification(self, mem: Memory, workspace: Path):
         mem.ensure_workspace("chat1")
         await mem.read_agents_md("chat1")
 
@@ -475,19 +719,19 @@ class TestReadAgentsMd:
 class TestChecksumCalculation:
     """Tests for _calculate_checksum."""
 
-    def test_produces_16_char_hex(self, mem: Memory):
+    def test_produces_32_char_hex(self, mem: Memory):
         cs = mem._calculate_checksum("hello")
-        assert len(cs) == 16
+        assert len(cs) == 32
         assert all(c in "0123456789abcdef" for c in cs)
 
-    def test_matches_sha256_first_16(self, mem: Memory):
+    def test_matches_sha256_first_32(self, mem: Memory):
         content = "test content"
-        expected = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        expected = hashlib.sha256(content.encode("utf-8")).hexdigest()[:32]
         assert mem._calculate_checksum(content) == expected
 
     def test_empty_string(self, mem: Memory):
         cs = mem._calculate_checksum("")
-        assert len(cs) == 16
+        assert len(cs) == 32
 
     def test_deterministic(self, mem: Memory):
         assert mem._calculate_checksum("x") == mem._calculate_checksum("x")
@@ -518,17 +762,13 @@ class TestDetectMemoryCorruption:
 
     def test_detects_checksum_mismatch(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "corrupted content")
-        _checksum_path(workspace, "chat1").write_text(
-            "badchecksum12345", encoding="utf-8"
-        )
+        _checksum_path(workspace, "chat1").write_text("badchecksum12345", encoding="utf-8")
         result = mem.detect_memory_corruption("chat1")
         assert result.is_corrupted is True
         assert result.checksum_valid is False
         assert any("Checksum mismatch" in e for e in result.error_details)
 
-    def test_detects_corruption_after_content_tampering(
-        self, mem: Memory, workspace: Path
-    ):
+    def test_detects_corruption_after_content_tampering(self, mem: Memory, workspace: Path):
         """Write with checksum, then tamper with the file on disk."""
         _write_memory_raw(workspace, "chat1", "original content")
         cs = mem._calculate_checksum("original content")
@@ -566,37 +806,37 @@ class TestBackupMemoryFile:
     """Tests for backup_memory_file."""
 
     def test_returns_none_for_nonexistent(self, mem: Memory):
-        result = mem.backup_memory_file("no-such-chat")
+        result = mem._backup_memory_file_sync("no-such-chat")
         assert result is None
 
     def test_creates_backup_file(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "important data")
-        backup_path = mem.backup_memory_file("chat1")
+        backup_path = mem._backup_memory_file_sync("chat1")
         assert backup_path is not None
         assert Path(backup_path).exists()
         assert Path(backup_path).read_text(encoding="utf-8") == "important data"
 
     def test_backup_file_has_bak_extension(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "data")
-        backup_path = mem.backup_memory_file("chat1")
+        backup_path = mem._backup_memory_file_sync("chat1")
         assert backup_path is not None
         assert backup_path.endswith(".md.bak")
 
     def test_backup_file_in_backups_directory(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "data")
-        backup_path = mem.backup_memory_file("chat1")
+        backup_path = mem._backup_memory_file_sync("chat1")
         assert backup_path is not None
         assert BACKUP_DIR in backup_path
 
     def test_backup_file_name_contains_safe_chat_id(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat@1", "data")
-        backup_path = mem.backup_memory_file("chat@1")
+        backup_path = mem._backup_memory_file_sync("chat@1")
         assert backup_path is not None
-        assert "chat_1" in Path(backup_path).name
+        assert "chat_at_1" in Path(backup_path).name
 
     def test_backup_file_has_timestamp(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "data")
-        backup_path = mem.backup_memory_file("chat1")
+        backup_path = mem._backup_memory_file_sync("chat1")
         assert backup_path is not None
         # Should contain a YYYYMMDD_HHMMSS timestamp
         name = Path(backup_path).stem  # e.g. "chat1_20260410_143000.md"
@@ -611,10 +851,10 @@ class TestBackupMemoryFile:
         (timestamp may be the same second, so names could collide — but copy2
         would overwrite). Verify at least one backup exists."""
         _write_memory_raw(workspace, "chat1", "data")
-        b1 = mem.backup_memory_file("chat1")
+        b1 = mem._backup_memory_file_sync("chat1")
         # Small sleep to ensure different timestamp
         time.sleep(1.1)
-        b2 = mem.backup_memory_file("chat1")
+        b2 = mem._backup_memory_file_sync("chat1")
         assert b1 is not None
         assert b2 is not None
 
@@ -629,7 +869,7 @@ class TestRepairMemoryFile:
 
     def test_no_repair_when_not_corrupted(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "clean data")
-        result = mem.repair_memory_file("chat1")
+        result = mem._repair_memory_file_sync("chat1")
         assert result.is_corrupted is False
         assert result.repaired is False
         # File should still have content
@@ -637,11 +877,9 @@ class TestRepairMemoryFile:
 
     def test_repairs_corrupted_file(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "corrupted")
-        _checksum_path(workspace, "chat1").write_text(
-            "wrong_checksum", encoding="utf-8"
-        )
+        _checksum_path(workspace, "chat1").write_text("wrong_checksum", encoding="utf-8")
 
-        result = mem.repair_memory_file("chat1")
+        result = mem._repair_memory_file_sync("chat1")
         assert result.repaired is True
         # File should be cleared
         assert _memory_path(workspace, "chat1").read_text() == ""
@@ -650,14 +888,14 @@ class TestRepairMemoryFile:
         _write_memory_raw(workspace, "chat1", "corrupted")
         _checksum_path(workspace, "chat1").write_text("wrong", encoding="utf-8")
 
-        mem.repair_memory_file("chat1")
+        mem._repair_memory_file_sync("chat1")
         assert not _checksum_path(workspace, "chat1").exists()
 
     def test_creates_backup_before_repair(self, mem: Memory, workspace: Path):
         _write_memory_raw(workspace, "chat1", "corrupted data")
         _checksum_path(workspace, "chat1").write_text("bad", encoding="utf-8")
 
-        result = mem.repair_memory_file("chat1", backup=True)
+        result = mem._repair_memory_file_sync("chat1", backup=True)
         assert result.backup_path is not None
         assert Path(result.backup_path).exists()
         assert Path(result.backup_path).read_text() == "corrupted data"
@@ -666,11 +904,92 @@ class TestRepairMemoryFile:
         _write_memory_raw(workspace, "chat1", "corrupted data")
         _checksum_path(workspace, "chat1").write_text("bad", encoding="utf-8")
 
-        result = mem.repair_memory_file("chat1", backup=False)
+        result = mem._repair_memory_file_sync("chat1", backup=False)
         assert result.backup_path is None
 
     def test_no_repair_for_missing_file(self, mem: Memory):
-        result = mem.repair_memory_file("no-such-chat")
+        result = mem._repair_memory_file_sync("no-such-chat")
+        assert result.is_corrupted is False
+        assert result.repaired is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Async backup / async repair
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAsyncBackupMemoryFile:
+    """Tests for abackup_memory_file — async, non-blocking counterpart."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_nonexistent(self, mem: Memory):
+        result = await mem.abackup_memory_file("no-such-chat")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_creates_backup_file(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "async backup data")
+        backup_path = await mem.abackup_memory_file("chat1")
+        assert backup_path is not None
+        assert Path(backup_path).exists()
+        assert Path(backup_path).read_text(encoding="utf-8") == "async backup data"
+
+    @pytest.mark.asyncio
+    async def test_backup_in_backups_dir(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "data")
+        backup_path = await mem.abackup_memory_file("chat1")
+        assert backup_path is not None
+        assert BACKUP_DIR in backup_path
+
+    @pytest.mark.asyncio
+    async def test_backup_has_bak_extension(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "data")
+        backup_path = await mem.abackup_memory_file("chat1")
+        assert backup_path is not None
+        assert backup_path.endswith(".md.bak")
+
+
+class TestAsyncRepairMemoryFile:
+    """Tests for arepair_memory_file — async, non-blocking counterpart."""
+
+    @pytest.mark.asyncio
+    async def test_no_repair_when_not_corrupted(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "clean data")
+        result = await mem.arepair_memory_file("chat1")
+        assert result.is_corrupted is False
+        assert result.repaired is False
+        assert _memory_path(workspace, "chat1").read_text() == "clean data"
+
+    @pytest.mark.asyncio
+    async def test_repairs_corrupted_file(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "corrupted")
+        _checksum_path(workspace, "chat1").write_text("wrong_checksum", encoding="utf-8")
+
+        result = await mem.arepair_memory_file("chat1")
+        assert result.repaired is True
+        assert _memory_path(workspace, "chat1").read_text() == ""
+
+    @pytest.mark.asyncio
+    async def test_creates_backup_before_repair(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "corrupted data")
+        _checksum_path(workspace, "chat1").write_text("bad", encoding="utf-8")
+
+        result = await mem.arepair_memory_file("chat1", backup=True)
+        assert result.backup_path is not None
+        assert Path(result.backup_path).exists()
+        assert Path(result.backup_path).read_text() == "corrupted data"
+
+    @pytest.mark.asyncio
+    async def test_skips_backup_when_requested(self, mem: Memory, workspace: Path):
+        _write_memory_raw(workspace, "chat1", "corrupted data")
+        _checksum_path(workspace, "chat1").write_text("bad", encoding="utf-8")
+
+        result = await mem.arepair_memory_file("chat1", backup=False)
+        assert result.backup_path is None
+
+    @pytest.mark.asyncio
+    async def test_no_repair_for_missing_file(self, mem: Memory):
+        result = await mem.arepair_memory_file("no-such-chat")
         assert result.is_corrupted is False
         assert result.repaired is False
 
@@ -716,7 +1035,7 @@ class TestWriteMemoryWithChecksum:
     async def test_writes_checksum_file(self, mem: Memory, workspace: Path):
         await mem.write_memory_with_checksum("chat1", "hello")
         checksum = _checksum_path(workspace, "chat1").read_text(encoding="utf-8")
-        expected = mem._calculate_checksum("hello")
+        expected = mem._calculate_checksum("hello\n")
         assert checksum == expected
 
     @pytest.mark.asyncio
@@ -725,7 +1044,7 @@ class TestWriteMemoryWithChecksum:
         content = _memory_path(workspace, "chat1").read_text(encoding="utf-8")
         assert content.startswith("hello")
         checksum = _checksum_path(workspace, "chat1").read_text(encoding="utf-8")
-        expected = mem._calculate_checksum("hello")
+        expected = mem._calculate_checksum("hello\n")
         assert checksum == expected
 
     @pytest.mark.asyncio
@@ -752,10 +1071,8 @@ class TestWriteMemoryWithChecksum:
 class TestLogRecoveryEvent:
     """Tests for log_recovery_event."""
 
-    def test_creates_recovery_log(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event(
-            "chat1", preserved_count=5, rebuilt_count=3, total_count=8
-        )
+    async def test_creates_recovery_log(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("chat1", preserved_count=5, rebuilt_count=3, total_count=8)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         assert recovery.exists()
         content = recovery.read_text(encoding="utf-8")
@@ -764,29 +1081,23 @@ class TestLogRecoveryEvent:
         assert "3" in content
         assert "8" in content
 
-    def test_log_has_header(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event(
-            "chat1", preserved_count=0, rebuilt_count=0, total_count=0
-        )
+    async def test_log_has_header(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("chat1", preserved_count=0, rebuilt_count=0, total_count=0)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         content = recovery.read_text(encoding="utf-8")
         assert content.startswith("# Message Index Recovery Log")
 
-    def test_appends_to_existing_log(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event(
-            "chat1", preserved_count=1, rebuilt_count=2, total_count=3
-        )
-        mem.log_recovery_event(
-            "chat1", preserved_count=4, rebuilt_count=5, total_count=9
-        )
+    async def test_appends_to_existing_log(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("chat1", preserved_count=1, rebuilt_count=2, total_count=3)
+        await mem.log_recovery_event("chat1", preserved_count=4, rebuilt_count=5, total_count=9)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         content = recovery.read_text(encoding="utf-8")
         # Should have two recovery events
         assert content.count("Recovery Event") == 2
 
-    def test_includes_errors(self, mem: Memory, workspace: Path):
+    async def test_includes_errors(self, mem: Memory, workspace: Path):
         errors = ["file missing", "read error"]
-        mem.log_recovery_event(
+        await mem.log_recovery_event(
             "chat1",
             preserved_count=0,
             rebuilt_count=0,
@@ -798,9 +1109,9 @@ class TestLogRecoveryEvent:
         assert "file missing" in content
         assert "read error" in content
 
-    def test_limits_errors_to_five(self, mem: Memory, workspace: Path):
+    async def test_limits_errors_to_five(self, mem: Memory, workspace: Path):
         errors = [f"error {i}" for i in range(10)]
-        mem.log_recovery_event(
+        await mem.log_recovery_event(
             "chat1", preserved_count=0, rebuilt_count=0, total_count=0, errors=errors
         )
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
@@ -809,16 +1120,14 @@ class TestLogRecoveryEvent:
         assert "error 4" in content
         assert "error 5" not in content
 
-    def test_no_errors_section_when_none(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event(
-            "chat1", preserved_count=0, rebuilt_count=0, total_count=0
-        )
+    async def test_no_errors_section_when_none(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("chat1", preserved_count=0, rebuilt_count=0, total_count=0)
         recovery = _chat_dir(workspace, "chat1") / RECOVERY_LOG_FILENAME
         content = recovery.read_text(encoding="utf-8")
         assert "Errors" not in content
 
-    def test_creates_chat_directory(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event("brand-new-chat", 1, 1, 2)
+    async def test_creates_chat_directory(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("brand-new-chat", 1, 1, 2)
         assert _chat_dir(workspace, "brand-new-chat").is_dir()
 
 
@@ -828,16 +1137,16 @@ class TestHasRecoveryEvents:
     def test_returns_false_when_no_log(self, mem: Memory):
         assert mem.has_recovery_events("chat1") is False
 
-    def test_returns_true_after_logging(self, mem: Memory):
-        mem.log_recovery_event("chat1", 0, 0, 0)
+    async def test_returns_true_after_logging(self, mem: Memory):
+        await mem.log_recovery_event("chat1", 0, 0, 0)
         assert mem.has_recovery_events("chat1") is True
 
 
 class TestClearRecoveryLog:
     """Tests for clear_recovery_log."""
 
-    def test_removes_recovery_log(self, mem: Memory, workspace: Path):
-        mem.log_recovery_event("chat1", 0, 0, 0)
+    async def test_removes_recovery_log(self, mem: Memory, workspace: Path):
+        await mem.log_recovery_event("chat1", 0, 0, 0)
         assert mem.has_recovery_events("chat1") is True
 
         mem.clear_recovery_log("chat1")
@@ -851,3 +1160,388 @@ class TestClearRecoveryLog:
         """clear_recovery_log calls _ensure_chat_dir, which creates dirs."""
         mem.clear_recovery_log("new-chat")
         assert _chat_dir(workspace, "new-chat").is_dir()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Path Traversal Validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPathTraversalValidation:
+    """Security tests ensuring workspace confinement in Memory."""
+
+    def test_normal_chat_id_passes(self, mem: Memory):
+        """Legitimate chat IDs should work without issue."""
+        path = mem.ensure_workspace("1234567890@s.whatsapp.net")
+        assert path.is_dir()
+        assert is_path_in_workspace(mem._root / "whatsapp_data", path)
+
+    def test_dotdot_in_chat_id_blocked(self, mem: Memory):
+        """`..` is rejected by sanitize_path_component (dots-only stripped),
+        preventing path traversal before it reaches _validate_path."""
+        with pytest.raises((PathSecurityError, ValueError)):
+            mem.ensure_workspace("..")
+
+    def test_resolve_stays_within_workspace(self, mem: Memory, workspace: Path):
+        """Verify that created paths resolve within workspace_data."""
+        d = mem._chat_dir("normal-chat")
+        assert is_path_in_workspace(workspace / "whatsapp_data", d.resolve())
+
+    def test_ensure_workspace_raises_on_escape(self, mem: Memory, monkeypatch):
+        """If sanitize_path_component returned a traversal, _validate_path blocks it."""
+        monkeypatch.setattr("src.memory.sanitize_path_component", lambda x: "../../etc")
+        with pytest.raises(PathSecurityError, match="Workspace escape blocked"):
+            mem.ensure_workspace("evil")
+
+    def test_chat_dir_raises_on_escape(self, mem: Memory, monkeypatch):
+        """_chat_dir also validates (read path protection)."""
+        monkeypatch.setattr("src.memory.sanitize_path_component", lambda x: "../../etc")
+        with pytest.raises(PathSecurityError, match="Workspace escape blocked"):
+            mem._chat_dir("evil")
+
+    def test_write_memory_raises_on_escape(self, mem: Memory, monkeypatch):
+        """write_memory calls _ensure_chat_dir which validates."""
+        monkeypatch.setattr("src.memory.sanitize_path_component", lambda x: "../../etc")
+        with pytest.raises(PathSecurityError):
+            import asyncio
+
+            asyncio.get_event_loop().run_until_complete(mem.write_memory("evil", "data"))
+
+    def test_symlink_escape_blocked(self, workspace: Path):
+        """A symlink inside whatsapp_data pointing outside should be caught."""
+        import os
+
+        ws = workspace / "whatsapp_data"
+        ws.mkdir()
+        # Create a symlink that points outside workspace
+        link_target = workspace.parent  # one level above workspace
+        link_path = ws / "evil_link"
+        try:
+            os.symlink(str(link_target), str(link_path))
+        except (OSError, NotImplementedError):
+            pytest.skip("Symlinks not supported on this platform")
+
+        m = Memory(str(workspace))
+        # sanitize_path_component("evil_link") returns "evil_link" unchanged
+        # but resolve() follows the symlink and detects the escape
+        with pytest.raises(PathSecurityError, match="Workspace escape blocked"):
+            m.ensure_workspace("evil_link")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mtime Cache Consistency After External File Modification
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestMtimeCacheConsistency:
+    """Verify that mtime-based caching correctly invalidates when an external
+    process (e.g. a skill) modifies the file on disk between reads."""
+
+    @pytest.mark.asyncio
+    async def test_external_memory_modification_invalidates_cache(
+        self, mem: Memory, workspace: Path
+    ):
+        """An external write to MEMORY.md changes mtime, so the next
+        read_memory() must return the new content, not the stale cache."""
+        _write_memory_raw(workspace, "chat1", "original content")
+        first = await mem.read_memory("chat1")
+        assert first == "original content"
+
+        # External process modifies the file (mtime changes)
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "externally modified")
+
+        second = await mem.read_memory("chat1")
+        assert second == "externally modified"
+
+    @pytest.mark.asyncio
+    async def test_multiple_external_modifications_detected(self, mem: Memory, workspace: Path):
+        """Each successive external modification is picked up independently."""
+        _write_memory_raw(workspace, "chat1", "v1")
+        assert await mem.read_memory("chat1") == "v1"
+
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "v2")
+        assert await mem.read_memory("chat1") == "v2"
+
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "v3")
+        assert await mem.read_memory("chat1") == "v3"
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_then_external_mod_returns_fresh(self, mem: Memory, workspace: Path):
+        """After a cache hit (same mtime), an external modification still
+        causes the next read to return fresh content."""
+        _write_memory_raw(workspace, "chat1", "initial")
+        await mem.read_memory("chat1")
+        # Second read is a cache hit (mtime unchanged)
+        assert await mem.read_memory("chat1") == "initial"
+
+        # External modification
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "updated by skill")
+
+        result = await mem.read_memory("chat1")
+        assert result == "updated by skill"
+
+    @pytest.mark.asyncio
+    async def test_external_agents_md_modification_invalidates_cache(
+        self, mem: Memory, workspace: Path
+    ):
+        """Same mtime-based cache invalidation applies to AGENTS.md reads."""
+        mem.ensure_workspace("chat1")
+        first = await mem.read_agents_md("chat1")
+        assert "Agent Instructions" in first
+
+        # External process overwrites AGENTS.md
+        time.sleep(0.05)
+        agents = _agents_path(workspace, "chat1")
+        agents.write_text("# Custom Agent\nNew instructions.", encoding="utf-8")
+
+        result = await mem.read_agents_md("chat1")
+        assert result == "# Custom Agent\nNew instructions."
+
+    @pytest.mark.asyncio
+    async def test_external_mod_to_empty_invalidates_cache(self, mem: Memory, workspace: Path):
+        """External modification that empties the file returns None (stripped
+        whitespace-only content is treated as missing)."""
+        _write_memory_raw(workspace, "chat1", "has content")
+        assert await mem.read_memory("chat1") == "has content"
+
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "")
+
+        result = await mem.read_memory("chat1")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_cache_entry_reflects_last_external_content(self, mem: Memory, workspace: Path):
+        """After external modification and re-read, the internal cache entry
+        stores the new content and mtime — not the old values."""
+        _write_memory_raw(workspace, "chat1", "first")
+        await mem.read_memory("chat1")
+        old_cached = mem._memory_cache._cache.get("chat1")
+        assert old_cached[1] == "first"
+
+        time.sleep(0.05)
+        _write_memory_raw(workspace, "chat1", "second")
+        await mem.read_memory("chat1")
+
+        new_cached = mem._memory_cache._cache.get("chat1")
+        assert new_cached[1] == "second"
+        assert new_cached[0] != old_cached[0]  # mtime changed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _resolve_chat_path() caching correctness
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestResolveChatPathCaching:
+    """Verify _resolve_chat_path() LRU caching behaviour.
+
+    Covers:
+      (a) Repeated calls with same chat_id return the same cached Path
+      (b) Cache invalidated when ensure_workspace() creates a new chat
+      (c) Invalid chat_id raises PathSecurityError before caching
+      (d) Cache respects the max size bound
+    """
+
+    def test_cache_populated_after_first_call(self, mem: Memory):
+        """After the first call, the path is stored in _path_cache."""
+        assert mem._path_cache.get("chat1") is None
+        mem._resolve_chat_path("chat1")
+        assert mem._path_cache.get("chat1") is not None
+
+    def test_repeated_calls_return_equivalent_path(self, mem: Memory):
+        """Repeated calls with the same chat_id return equivalent Paths."""
+        first = mem._resolve_chat_path("chat1")
+        second = mem._resolve_chat_path("chat1")
+        assert first == second
+
+    def test_repeated_calls_use_cache(self, mem: Memory):
+        """The second call returns the exact same object from the cache."""
+        first = mem._resolve_chat_path("chat1")
+        second = mem._resolve_chat_path("chat1")
+        assert first is second
+
+    def test_different_chat_ids_cached_independently(self, mem: Memory):
+        """Each chat_id gets its own cache entry."""
+        path_a = mem._resolve_chat_path("alice")
+        path_b = mem._resolve_chat_path("bob")
+        assert path_a != path_b
+        assert mem._path_cache.get("alice") is not None
+        assert mem._path_cache.get("bob") is not None
+
+    def test_ensure_workspace_invalidates_and_repoulates(self, mem: Memory):
+        """ensure_workspace() pops the stale cache entry, then re-resolves."""
+        original = mem._resolve_chat_path("chat1")
+        assert not original.exists()
+
+        result = mem.ensure_workspace("chat1")
+        assert result.is_dir()
+        assert result == original
+
+        # Cache should be repopulated with the valid path
+        cached = mem._path_cache.get("chat1")
+        assert cached is not None
+        assert cached.is_dir()
+
+    def test_ensure_workspace_for_existing_chat_keeps_valid_cache(self, mem: Memory):
+        """For an already-created chat, ensure_workspace still works."""
+        mem.ensure_workspace("chat1")
+        cached_after_first = mem._path_cache.get("chat1")
+        assert cached_after_first is not None
+
+        # Second call invalidates and repopulates
+        mem.ensure_workspace("chat1")
+        cached_after_second = mem._path_cache.get("chat1")
+        assert cached_after_second is not None
+        assert cached_after_second.is_dir()
+
+    def test_invalid_chat_id_raises_before_caching(self, mem: Memory, monkeypatch):
+        """If _validate_path raises, the invalid entry must NOT be cached."""
+        monkeypatch.setattr("src.memory.sanitize_path_component", lambda x: "../../etc")
+        with pytest.raises(PathSecurityError):
+            mem._resolve_chat_path("evil")
+
+        assert mem._path_cache.get("evil") is None
+
+    def test_valid_id_cached_even_after_invalid_attempt(self, mem: Memory, monkeypatch):
+        """A failed validation for one chat_id doesn't affect others."""
+        mem._resolve_chat_path("good-chat")
+        assert mem._path_cache.get("good-chat") is not None
+
+        monkeypatch.setattr("src.memory.sanitize_path_component", lambda x: "../../etc")
+        with pytest.raises(PathSecurityError):
+            mem._resolve_chat_path("evil")
+
+        # good-chat should still be cached
+        assert mem._path_cache.get("good-chat") is not None
+
+    def test_cache_respects_max_size_bound(self, mem: Memory):
+        """Cache evicts oldest entries when max_size is exceeded."""
+        max_size = 10
+        mem._path_cache = LRUDict(max_size=max_size)
+
+        for i in range(max_size + 5):
+            mem._resolve_chat_path(f"chat-{i:04d}")
+
+        # Cache must not exceed max_size
+        assert len(mem._path_cache) <= max_size
+
+        # Most recent entries are preserved
+        assert mem._path_cache.get("chat-0014") is not None
+
+        # Oldest entries are evicted
+        assert mem._path_cache.get("chat-0000") is None
+
+    def test_cache_lru_eviction_preserves_recent_entries(self, mem: Memory):
+        """Accessing an entry refreshes it, preventing eviction."""
+        max_size = 5
+        mem._path_cache = LRUDict(max_size=max_size)
+
+        # Fill cache: entries 0-4
+        for i in range(max_size):
+            mem._resolve_chat_path(f"chat-{i:04d}")
+
+        # Touch chat-0000 to make it recently used
+        mem._resolve_chat_path("chat-0000")
+
+        # Add one more to trigger eviction of the now-oldest (chat-0001)
+        mem._resolve_chat_path("chat-0005")
+
+        # chat-0000 was refreshed, so it survives
+        assert mem._path_cache.get("chat-0000") is not None
+        # chat-0001 was the oldest after refresh, so it gets evicted
+        assert mem._path_cache.get("chat-0001") is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ensure Chat Dir Caching
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEnsureChatDirCaching:
+    """Verify _ensure_chat_dir() caches known-existing directories.
+
+    Covers:
+      (a) First call creates the directory and caches the chat_id
+      (b) Subsequent calls skip mkdir() (directory is cached)
+      (c) Cache is bounded and evicts oldest entries
+      (d) ensure_workspace() invalidates the known-dirs cache
+    """
+
+    def test_first_call_creates_and_caches(self, mem: Memory):
+        """The first call creates the directory and adds to _known_dirs."""
+        assert mem._known_dirs.get("chat1") is None
+        d = mem._ensure_chat_dir("chat1")
+        assert d.is_dir()
+        assert mem._known_dirs.get("chat1") is True
+
+    def test_subsequent_call_uses_cache(self, mem: Memory):
+        """Subsequent calls return the path without re-invoking mkdir."""
+        first = mem._ensure_chat_dir("chat1")
+        assert mem._known_dirs.get("chat1") is True
+
+        # Replace mkdir with a sentinel that fails if called again
+        mkdir_called = False
+        original_mkdir = first.__class__.mkdir
+
+        def _sentinel(self_inner, *args, **kwargs):
+            nonlocal mkdir_called
+            mkdir_called = True
+            return original_mkdir(self_inner, *args, **kwargs)
+
+        import unittest.mock
+
+        with unittest.mock.patch.object(Path, "mkdir", _sentinel):
+            second = mem._ensure_chat_dir("chat1")
+            assert not mkdir_called
+            assert second == first
+
+    def test_different_chat_ids_cached_independently(self, mem: Memory):
+        """Each chat_id gets its own cache entry."""
+        mem._ensure_chat_dir("alice")
+        mem._ensure_chat_dir("bob")
+        assert mem._known_dirs.get("alice") is True
+        assert mem._known_dirs.get("bob") is True
+
+    def test_ensure_workspace_invalidates_known_dirs(self, mem: Memory):
+        """ensure_workspace() pops the _known_dirs entry so it re-validates."""
+        mem._ensure_chat_dir("chat1")
+        assert mem._known_dirs.get("chat1") is True
+
+        mem.ensure_workspace("chat1")
+        # After ensure_workspace, _ensure_chat_dir was called again internally
+        # and the entry should be repopulated
+        assert mem._known_dirs.get("chat1") is True
+        assert (mem._root / "whatsapp_data" / _safe_name("chat1")).is_dir()
+
+    def test_cache_respects_max_size_bound(self, mem: Memory):
+        """_known_dirs evicts oldest entries when max_size is exceeded."""
+        max_size = 10
+        mem._known_dirs = LRUDict(max_size=max_size)
+
+        for i in range(max_size + 5):
+            mem._ensure_chat_dir(f"chat-{i:04d}")
+
+        assert len(mem._known_dirs) <= max_size
+        # Most recent entry should be present
+        assert mem._known_dirs.get("chat-0014") is not None
+        # Oldest entry should be evicted
+        assert mem._known_dirs.get("chat-0000") is None
+
+    def test_cache_invalidation_allows_recreation(self, mem: Memory):
+        """After popping from _known_dirs, mkdir runs again."""
+        d = mem._ensure_chat_dir("chat1")
+        assert d.is_dir()
+
+        # Manually pop from cache
+        mem._known_dirs.pop("chat1")
+        assert mem._known_dirs.get("chat1") is None
+
+        # Calling again should still work (mkdir is idempotent)
+        d2 = mem._ensure_chat_dir("chat1")
+        assert d2.is_dir()
+        assert mem._known_dirs.get("chat1") is True

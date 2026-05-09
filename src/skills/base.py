@@ -21,12 +21,15 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from functools import cached_property, wraps
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar, cast
 
+from src.constants import DEFAULT_SKILL_TIMEOUT
 from src.exceptions import SkillError
 
 if TYPE_CHECKING:
+    from pathlib import Path
+    from src.llm import LLMProvider
+    from src.security.sandbox import ResourceSandboxConfig
     from src.utils.protocols import Skill
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -155,7 +158,7 @@ def validate_input(func: F) -> F:
 
         return await func(self, workspace_dir, **kwargs)
 
-    return cast(F, wrapper)
+    return cast("F", wrapper)
 
 
 class BaseSkill(ABC):
@@ -166,7 +169,40 @@ class BaseSkill(ABC):
     #: Human-readable description the LLM uses to decide when to call this tool
     description: str = ""
     #: JSON Schema object describing the function parameters
+    # (each subclass gets its own copy via __init_subclass__)
     parameters: Dict[str, Any] = {"type": "object", "properties": {}, "required": []}
+    #: Per-skill timeout in seconds (overrides DEFAULT_SKILL_TIMEOUT).
+    # Subclasses that need more time (e.g. web_research) should set this.
+    timeout_seconds: float = DEFAULT_SKILL_TIMEOUT
+    #: Whether this skill consumes expensive external resources (e.g. API
+    #: calls, web scraping) and should be subject to stricter rate limits.
+    expensive: bool = False
+    #: Per-skill resource sandbox configuration.  When set, the tool
+    #: executor applies CPU time limits, memory limits, and filesystem
+    #: access boundaries via ``ResourceSandbox``.  ``None`` means the
+    #: skill uses the default sandbox settings.
+    sandbox_config: ResourceSandboxConfig | None = None
+    #: Whether this skill performs destructive actions (shell, file write,
+    #: delete, bulk ops) requiring human-in-the-loop approval before execution.
+    dangerous: bool = False
+    #: Optional output schema for tool result validation.
+    #: When set, the ToolResultValidator checks the result against these
+    #: constraints before feeding it back to the LLM.
+    #: Supported keys: ``type`` ("json"), ``required_fields`` (list[str]),
+    #: ``min_length`` (int), ``max_length`` (int).
+    output_schema: dict[str, Any] | None = None
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Give each subclass its own copy of the parameters dict to prevent
+        # shared-mutable-state bugs where one skill's mutations leak to others.
+        if "parameters" not in cls.__dict__:
+            parent = cls.parameters
+            cls.parameters = {
+                "type": parent.get("type", "object"),
+                "properties": dict(parent.get("properties", {})),
+                "required": list(parent.get("required", [])),
+            }
 
     @abstractmethod
     async def execute(self, workspace_dir: Path, **kwargs: Any) -> str:
@@ -201,6 +237,16 @@ class BaseSkill(ABC):
     def to_tool_definition(self) -> Dict[str, Any]:
         """Deprecated: Use tool_definition property instead."""
         return self.tool_definition
+
+    # ── LLM wiring (self-service) ──────────────────────────────────────────
+
+    def needs_llm(self) -> bool:
+        """Return True if this skill requires an LLM client to execute."""
+        return False
+
+    def wire_llm(self, llm: "LLMProvider") -> None:
+        """Inject the shared LLM client. Override alongside needs_llm()."""
+        pass
 
     def __repr__(self) -> str:
         return f"<Skill {self.name!r}>"

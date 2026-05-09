@@ -10,12 +10,10 @@ Provides:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import tempfile
 from dataclasses import asdict
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,10 +21,12 @@ import pytest
 from src.config import (
     Config,
     LLMConfig,
-    WhatsAppConfig,
     NeonizeConfig,
+    WhatsAppConfig,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures: Temporary directories
@@ -89,22 +89,29 @@ def test_config_file(temp_config_path: Path, test_config: Config) -> Path:
 
 
 class MockChatCompletion:
-    """Mock ChatCompletion response from OpenAI API."""
+    """Mock ChatCompletion response from OpenAI API.
 
-    class Choice:
-        class Message:
-            content: str = "Hello! I'm a test assistant. How can I help you today?"
-            tool_calls: Optional[list] = None
+    Uses __init__ to create instance-level attributes, avoiding
+    shared mutable class-level state that causes test pollution.
+    """
 
-        finish_reason: str = "stop"
-        message: Message = Message()
+    def __init__(self) -> None:
+        self.choices = [self._make_choice()]
+        self.usage: Dict[str, int] = {
+            "prompt_tokens": 10,
+            "completion_tokens": 20,
+            "total_tokens": 30,
+        }
 
-    choices: list = [Choice()]
-    usage: Dict[str, int] = {
-        "prompt_tokens": 10,
-        "completion_tokens": 20,
-        "total_tokens": 30,
-    }
+    @staticmethod
+    def _make_choice() -> Any:
+        msg = MagicMock()
+        msg.content = "Hello! I'm a test assistant. How can I help you today?"
+        msg.tool_calls = None
+        choice = MagicMock()
+        choice.finish_reason = "stop"
+        choice.message = msg
+        return choice
 
 
 @pytest.fixture
@@ -136,7 +143,7 @@ def mock_llm_client(mock_llm_response: MockChatCompletion):
 @pytest.fixture
 def mock_neonize_backend():
     """Mock the NeonizeBackend for tests that need WhatsApp connectivity."""
-    from src.channels.whatsapp import NeonizeBackend
+    from src.channels.neonize_backend import NeonizeBackend
 
     backend = MagicMock(spec=NeonizeBackend)
     backend.is_connected = False
@@ -159,20 +166,6 @@ def cli_runner():
     from click.testing import CliRunner
 
     return CliRunner()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Fixtures: Event loop (for pytest-asyncio)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create an event loop for async tests."""
-    policy = asyncio.get_event_loop_policy()
-    loop = policy.new_event_loop()
-    yield loop
-    loop.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

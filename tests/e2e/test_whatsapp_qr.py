@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests: NeonizeBackend connection lifecycle
 # ─────────────────────────────────────────────────────────────────────────────
@@ -35,8 +34,8 @@ async def test_neonize_backend_connects_successfully():
         - Client is initialized
         - Event handlers are registered
     """
-    from src.channels.whatsapp import NeonizeBackend
-    from src.config import WhatsAppConfig, NeonizeConfig
+    from src.channels.neonize_backend import NeonizeBackend
+    from src.config import NeonizeConfig, WhatsAppConfig
 
     cfg = WhatsAppConfig(
         provider="neonize",
@@ -48,7 +47,7 @@ async def test_neonize_backend_connects_successfully():
     mock_client.on = MagicMock(return_value=lambda f: f)
     mock_client.connect = MagicMock()
 
-    with patch("src.channels.whatsapp.neonize") as mock_neonize:
+    with patch("src.channels.neonize_backend.neonize") as mock_neonize:
         # Mock the neonize imports inside connect()
         mock_neonize.client.NewClient.return_value = mock_client
         mock_neonize.events.ConnectedEv = MagicMock()
@@ -76,8 +75,8 @@ async def test_neonize_backend_is_connected_property():
     Assert:
         - Initially False, True after connected
     """
-    from src.channels.whatsapp import NeonizeBackend
-    from src.config import WhatsAppConfig, NeonizeConfig
+    from src.channels.neonize_backend import NeonizeBackend
+    from src.config import NeonizeConfig, WhatsAppConfig
 
     cfg = WhatsAppConfig(
         provider="neonize",
@@ -106,8 +105,8 @@ async def test_neonize_backend_disconnect():
         - Client is set to None
         - is_connected is False
     """
-    from src.channels.whatsapp import NeonizeBackend
-    from src.config import WhatsAppConfig, NeonizeConfig
+    from src.channels.neonize_backend import NeonizeBackend
+    from src.config import NeonizeConfig, WhatsAppConfig
 
     cfg = WhatsAppConfig(
         provider="neonize",
@@ -140,8 +139,8 @@ async def test_neonize_backend_send_when_not_connected():
     Assert:
         - RuntimeError is raised
     """
-    from src.channels.whatsapp import NeonizeBackend
-    from src.config import WhatsAppConfig, NeonizeConfig
+    from src.channels.neonize_backend import NeonizeBackend
+    from src.config import NeonizeConfig, WhatsAppConfig
 
     cfg = WhatsAppConfig(
         provider="neonize",
@@ -167,8 +166,8 @@ async def test_neonize_backend_poll_message_timeout():
     Assert:
         - Returns None (timeout)
     """
-    from src.channels.whatsapp import NeonizeBackend
-    from src.config import WhatsAppConfig, NeonizeConfig
+    from src.channels.neonize_backend import NeonizeBackend
+    from src.config import NeonizeConfig, WhatsAppConfig
 
     cfg = WhatsAppConfig(
         provider="neonize",
@@ -200,7 +199,7 @@ def test_whatsapp_channel_get_channel_prompt():
         - Contains key formatting rules
     """
     from src.channels.whatsapp import WhatsAppChannel
-    from src.config import WhatsAppConfig, NeonizeConfig
+    from src.config import NeonizeConfig, WhatsAppConfig
 
     cfg = WhatsAppConfig(
         provider="neonize",
@@ -225,7 +224,7 @@ def test_whatsapp_channel_prompt_forbids_markdown():
         - Prompt mentions NO headers
     """
     from src.channels.whatsapp import WhatsAppChannel
-    from src.config import WhatsAppConfig, NeonizeConfig
+    from src.config import NeonizeConfig, WhatsAppConfig
 
     cfg = WhatsAppConfig(
         provider="neonize",
@@ -255,7 +254,7 @@ async def test_whatsapp_channel_close():
         - Shutdown is requested
     """
     from src.channels.whatsapp import WhatsAppChannel
-    from src.config import WhatsAppConfig, NeonizeConfig
+    from src.config import NeonizeConfig, WhatsAppConfig
 
     cfg = WhatsAppConfig(
         provider="neonize",
@@ -290,8 +289,8 @@ def test_neonize_backend_uses_config_db_path():
     Assert:
         - Backend stores the db_path
     """
-    from src.channels.whatsapp import NeonizeBackend
-    from src.config import WhatsAppConfig, NeonizeConfig
+    from src.channels.neonize_backend import NeonizeBackend
+    from src.config import NeonizeConfig, WhatsAppConfig
 
     db_path = "custom/path/session.db"
     cfg = WhatsAppConfig(

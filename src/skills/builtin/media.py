@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 import markdown
+
 from src.skills.base import BaseSkill, validate_input
 
 log = logging.getLogger(__name__)
@@ -120,8 +121,7 @@ class SendVoiceNote(BaseSkill):
             "language": {
                 "type": "string",
                 "description": (
-                    "Language code (e.g. 'en', 'es', 'fr'). "
-                    "Defaults to English if not specified."
+                    "Language code (e.g. 'en', 'es', 'fr'). Defaults to English if not specified."
                 ),
             },
         },
@@ -156,12 +156,13 @@ class SendVoiceNote(BaseSkill):
                 voice,
             )
 
-            # Send via callback if available
+            # Convert MP3 → OGG/Opus before sending (WhatsApp requires Opus for PTT)
             if send_media:
-                await send_media("audio", mp3_path, "")
+                ogg_path = _convert_to_ogg(mp3_path)
+                await send_media("audio", ogg_path, "")
                 return f"Voice note sent ({char_count} characters, voice: {voice})"
             else:
-                return f"Voice note generated at {audio_path} (no send_media callback)"
+                return f"Voice note generated at {mp3_path} (no send_media callback)"
 
         except Exception as exc:
             log.error("Failed to generate voice note: %s", exc)
@@ -306,8 +307,7 @@ class GeneratePDFReport(BaseSkill):
             "filename": {
                 "type": "string",
                 "description": (
-                    "Custom filename for the PDF (without extension). "
-                    "Defaults to the title."
+                    "Custom filename for the PDF (without extension). Defaults to the title."
                 ),
             },
         },
@@ -323,9 +323,7 @@ class GeneratePDFReport(BaseSkill):
 
         # Sanitize filename
         safe_name = custom_filename or title
-        safe_name = "".join(
-            c if c.isalnum() or c in (" ", "-", "_") else "_" for c in safe_name
-        )
+        safe_name = "".join(c if c.isalnum() or c in (" ", "-", "_") else "_" for c in safe_name)
         safe_name = safe_name.strip()[:60] or "report"
 
         # Generate paths

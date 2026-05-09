@@ -11,7 +11,6 @@ import random
 import time
 from collections import OrderedDict
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-chat cooldown tracker (OrderedDict for O(1) LRU eviction)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -30,12 +29,9 @@ def cooldown_remaining(chat_id: str) -> float:
 
 def mark_sent(chat_id: str) -> None:
     """Record that a reply was just sent to this chat (O(1) LRU eviction)."""
-    if chat_id in _last_sent:
-        _last_sent.move_to_end(chat_id)
-    else:
-        if len(_last_sent) >= _MAX_TRACKED_CHATS:
-            _last_sent.popitem(last=False)  # O(1) eviction of oldest
-        _last_sent[chat_id] = time.monotonic()
+    if chat_id not in _last_sent and len(_last_sent) >= _MAX_TRACKED_CHATS:
+        _last_sent.popitem(last=False)  # O(1) eviction of oldest
+    _last_sent[chat_id] = time.monotonic()
     _last_sent.move_to_end(chat_id)  # Mark as most recently used
 
 

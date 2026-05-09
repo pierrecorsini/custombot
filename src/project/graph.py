@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, TYPE_CHECKING
 
-from src.project.store import ProjectStore
+
+if TYPE_CHECKING:
+    from src.project.store import ProjectStore
 
 log = logging.getLogger(__name__)
 
@@ -46,9 +48,7 @@ class ProjectGraph:
                     all_links.append((link["to_id"], link["relation"], link["weight"]))
             for link in incoming:
                 if relation is None or link["relation"] == relation:
-                    all_links.append(
-                        (link["from_id"], link["relation"], link["weight"])
-                    )
+                    all_links.append((link["from_id"], link["relation"], link["weight"]))
 
             for neighbor_id, rel, weight in all_links:
                 if neighbor_id in visited:
@@ -129,8 +129,7 @@ class ProjectGraph:
                 edge_results.append(
                     {
                         "from_id": edge["from_id"],
-                        "from_title": from_entry.get("title")
-                        or from_entry["text"][:60],
+                        "from_title": from_entry.get("title") or from_entry["text"][:60],
                         "to_id": edge["to_id"],
                         "to_title": to_entry.get("title") or to_entry["text"][:60],
                         "relation": edge["relation"],

@@ -14,18 +14,46 @@ Tools:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 from pathlib import Path
 from typing import Any, List, Optional
 
 from src.constants import WORKSPACE_DIR
+from src.core.errors import NonCriticalCategory, log_noncritical
 from src.skills.base import BaseSkill
-from src.utils.async_executor import AsyncExecutor
 
+log = logging.getLogger(__name__)
+from src.utils.async_executor import AsyncExecutor
 
 # Directory where user skills are installed (relative to project root)
 USER_SKILLS_DIR = Path(__file__).parent.parent.parent / WORKSPACE_DIR / "skills"
+
+
+async def _run_npx(
+    args: list[str],
+    timeout: float,
+    error_context: str,
+) -> tuple[bool, str]:
+    """Execute an npx command with standardized error handling.
+
+    Returns (success, output_message).
+    """
+    try:
+        executor = AsyncExecutor(timeout=timeout)
+        result = await executor.run(["npx", *args])
+        if result.timed_out:
+            return False, f"❌ {error_context} timed out. Please try again."
+        if not result.success and not result.stdout:
+            return False, f"❌ {error_context} failed: {result.stderr or 'Unknown error'}"
+        if not result.stdout:
+            return True, ""
+        return True, result.stdout.strip()
+    except FileNotFoundError:
+        return False, "❌ Error: 'npx' command not found. Please install Node.js."
+    except Exception as exc:
+        return False, f"❌ Error {error_context.lower()}: {exc}"
 
 
 class SkillsFindSkill(BaseSkill):
@@ -60,25 +88,16 @@ class SkillsFindSkill(BaseSkill):
         if not query:
             return "❌ Error: Please provide a search query."
 
-        try:
-            executor = AsyncExecutor(timeout=30.0)
-            result = await executor.run(["npx", "skills", "find", query])
-
-            if result.timed_out:
-                return "❌ Search timed out. Please try again."
-
-            if not result.success and not result.stdout:
-                return f"❌ Search failed: {result.stderr or 'Unknown error'}"
-
-            if not result.stdout:
-                return f"🔍 No skills found for '{query}'. Try different keywords."
-
-            return f"🔍 **Skills matching '{query}':**\n\n{result.stdout.strip()}"
-
-        except FileNotFoundError:
-            return "❌ Error: 'npx' command not found. Please install Node.js."
-        except Exception as e:
-            return f"❌ Error searching skills: {e}"
+        success, output = await _run_npx(
+            ["skills", "find", query],
+            timeout=30.0,
+            error_context="Search",
+        )
+        if not success:
+            return output
+        if not output:
+            return f"🔍 No skills found for '{query}'. Try different keywords."
+        return f"🔍 **Skills matching '{query}':**\n\n{output}"
 
 
 class SkillsAddSkill(BaseSkill):
@@ -113,25 +132,16 @@ class SkillsAddSkill(BaseSkill):
         if not package:
             return "❌ Error: Please provide a package name (e.g., 'owner/repo@skill')."
 
-        # Ensure workspace/skills directory exists
         USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 
-        try:
-            executor = AsyncExecutor(timeout=60.0)
-            result = await executor.run(["npx", "skills", "add", package, "-y"])
-
-            if result.timed_out:
-                return "❌ Installation timed out. Please try again."
-
-            if not result.success:
-                return f"❌ Failed to install skill: {result.stderr or result.stdout or 'Unknown error'}"
-
-            return f"✅ Skill installed successfully!\n\n{result.stdout.strip()}\n\nUse `skills_list` to see installed skills."
-
-        except FileNotFoundError:
-            return "❌ Error: 'npx' command not found. Please install Node.js."
-        except Exception as e:
-            return f"❌ Error installing skill: {e}"
+        success, output = await _run_npx(
+            ["skills", "add", package, "-y"],
+            timeout=60.0,
+            error_context="Installation",
+        )
+        if not success:
+            return output
+        return f"✅ Skill installed successfully!\n\n{output}\n\nUse `skills_list` to see installed skills."
 
 
 class SkillsListSkill(BaseSkill):
@@ -176,6 +186,12 @@ class SkillsListSkill(BaseSkill):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except Exception:
+            log_noncritical(
+                NonCriticalCategory.SKILL_PARSING,
+                "Failed to parse skill file %s",
+                path,
+                logger=log,
+            )
             return []
 
         skills = []
@@ -186,9 +202,7 @@ class SkillsListSkill(BaseSkill):
                     if isinstance(item, ast.Assign):
                         for target in item.targets:
                             if isinstance(target, ast.Name):
-                                if target.id == "name" and isinstance(
-                                    item.value, ast.Constant
-                                ):
+                                if target.id == "name" and isinstance(item.value, ast.Constant):
                                     name_val = item.value.value
                                 elif target.id == "description" and isinstance(
                                     item.value, ast.Constant
@@ -230,7 +244,12 @@ class SkillsListSkill(BaseSkill):
                             desc = line.split(":", 1)[1].strip().strip("\"'")
                     return name, desc
         except Exception:
-            pass
+            log_noncritical(
+                NonCriticalCategory.SKILL_PARSING,
+                "Failed to parse skill metadata from %s",
+                path,
+                logger=log,
+            )
         return default_name, ""
 
 
@@ -281,5 +300,5 @@ class SkillsRemoveSkill(BaseSkill):
         try:
             shutil.rmtree(skill_dir)
             return f"✅ Skill '{name}' removed successfully."
-        except Exception as e:
-            return f"❌ Error removing skill: {e}"
+        except Exception as exc:
+            return f"❌ Error removing skill: {exc}"

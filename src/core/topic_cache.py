@@ -10,13 +10,17 @@ from LLM responses.
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 import re
 from collections import OrderedDict
 from pathlib import Path
+from typing import Any
 
 from src.constants import MAX_LRU_CACHE_SIZE
+from src.security import PathSecurityError, is_path_in_workspace
+from src.utils import JSONDecodeError, json_loads
+from src.utils.path import sanitize_path_component
 
 log = logging.getLogger(__name__)
 
@@ -52,8 +56,21 @@ class TopicCache:
         self._max_size = MAX_LRU_CACHE_SIZE
 
     def _summary_path(self, chat_id: str) -> Path:
-        safe = _safe_name(chat_id)
-        return self._root / "whatsapp_data" / safe / SUMMARY_FILENAME
+        safe = sanitize_path_component(chat_id)
+        path = self._root / "whatsapp_data" / safe / SUMMARY_FILENAME
+        self._validate_path(path, chat_id)
+        return path
+
+    def _validate_path(self, path: Path, chat_id: str) -> None:
+        """Ensure resolved path stays within the whatsapp_data workspace."""
+        workspace_data = self._root / "whatsapp_data"
+        if not is_path_in_workspace(workspace_data, path.resolve()):
+            log.warning("Path traversal blocked for chat_id=%s", chat_id)
+            raise PathSecurityError(
+                f"Workspace escape blocked for chat_id={chat_id!r}",
+                path=str(path),
+                reason="path_traversal",
+            )
 
     def _ensure_dir(self, chat_id: str) -> Path:
         d = self._summary_path(chat_id).parent
@@ -61,7 +78,11 @@ class TopicCache:
         return d
 
     def read(self, chat_id: str) -> str | None:
-        """Read cached topic summary, or None if absent."""
+        """Read cached topic summary, or None if absent.
+
+        Performs synchronous file I/O — callers running on the asyncio
+        event loop should use :meth:`aread` instead.
+        """
         path = self._summary_path(chat_id)
         if not path.exists():
             return None
@@ -73,6 +94,10 @@ class TopicCache:
         content = path.read_text(encoding="utf-8").strip()
         self._cache_put(chat_id, mtime, content)
         return content or None
+
+    async def aread(self, chat_id: str) -> str | None:
+        """Async read — offloads file I/O to a thread to avoid blocking the event loop."""
+        return await asyncio.to_thread(self.read, chat_id)
 
     def write(self, chat_id: str, summary: str) -> None:
         """Write topic summary for a chat."""
@@ -100,7 +125,7 @@ class TopicCache:
 # ── META parsing ──────────────────────────────────────────────────────────
 
 
-def parse_meta(response: str) -> tuple[str, dict | None]:
+def parse_meta(response: str) -> tuple[str, dict[str, Any] | None]:
     """Extract ---META--- block from LLM response.
 
     Returns (clean_text, meta_dict). If no valid META found,
@@ -112,13 +137,10 @@ def parse_meta(response: str) -> tuple[str, dict | None]:
 
     clean = response[: match.start()].rstrip()
     try:
-        meta = json.loads(match.group(1))
+        meta = json_loads(match.group(1))
+        if not isinstance(meta, dict):
+            return response, None
         return clean, meta
-    except json.JSONDecodeError:
+    except JSONDecodeError:
         log.warning("Failed to parse META JSON from LLM response")
         return response, None
-
-
-def _safe_name(chat_id: str) -> str:
-    """Strip characters unsafe for filesystem paths."""
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in chat_id)

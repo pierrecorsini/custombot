@@ -1,4 +1,4 @@
-<!-- Context: project-intelligence/guides/dev-environment | Priority: medium | Version: 3.0 | Updated: 2026-04-06 -->
+<!-- Context: project-intelligence/guides/dev-environment | Priority: medium | Version: 3.1 | Updated: 2026-05-06 -->
 
 # Development Environment
 
@@ -13,16 +13,19 @@ pip install -r requirements.txt
 # Run the bot
 python main.py start
 
+# Run diagnostics
+python main.py diagnose
+
+# Edit configuration (TUI)
+python main.py options
+
 # Run tests
 pytest tests/
-
-# Run CLI channel (no WhatsApp needed)
-python main.py cli
 ```
 
 ## Requirements
 
-- **Python**: 3.13+
+- **Python**: 3.11+ (see `pyproject.toml` requires-python)
 - **Platform**: Any (Linux, macOS, Windows)
 
 ## Onboarding Checklist
@@ -40,8 +43,8 @@ python main.py cli
 ```
 Environment: Local development / Single server
 Platform: Any (Linux, macOS, Windows)
-CI/CD: Not configured
-Monitoring: Log files + health endpoint (optional)
+CI/CD: GitHub Actions (ruff, mypy, pytest, pip-audit, coverage gate)
+Monitoring: Log files + health endpoint + OpenTelemetry (optional)
 ```
 
 ## WhatsApp Shutdown
@@ -53,9 +56,10 @@ Correct shutdown: **Ctrl+C** in the terminal running `python main.py start`
 
 ## Codebase References
 
-- `main.py` — CLI entry point (`start`, `cli` commands)
+- `main.py` — CLI entry point (`start`, `diagnose`, `options` commands)
+- `pyproject.toml` — Project config, deps, ruff, mypy, pytest
 - `requirements.txt` — Python dependencies
-- `src/setup_wizard.py` — Quick-start guide
+- `.github/workflows/ci.yml` — CI pipeline
 
 ## Related Files
 

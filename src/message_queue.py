@@ -13,20 +13,39 @@ Queue states:
     - pending: Message is being processed
     - completed: Message was successfully processed
     - stale: Message timed out (crash recovery candidate)
+
+Lock model: Uses AsyncLock (from src.utils.locking) for file I/O (same pattern as db.py).
+AsyncLock provides lazy-initialised asyncio.Lock that is safe to create before the
+event loop is running (Python 3.10+ / Windows ProactorEventLoop compatibility).
+All queue operations are async and wrapped in await asyncio.to_thread() for the
+actual disk writes.
+
+The background flush loop uses a swap-buffers pattern: the write buffer is
+detached under the lock (O(1) pointer swap), then flushed to disk *without*
+holding the lock so that enqueue/complete calls are never blocked by an
+in-progress fsync.  Inline flushes (from enqueue/complete thresholds) flush
+directly under the lock since the caller already holds it.
+
+Persistence is delegated to ``QueuePersistence`` (message_queue_persistence.py),
+which handles all JSONL file I/O, crash recovery, and integrity validation.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
-from dataclasses import dataclass, field, asdict
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
 
-from src.utils import safe_json_parse_line
+from src.constants import MAX_QUEUED_TEXT_LENGTH
+from src.utils.validation import _validate_chat_id
+from src.message_queue_buffer import FlushManager
+from src.message_queue_persistence import QueuePersistence
+from src.utils.locking import AsyncLockMixin
 
 if TYPE_CHECKING:
     from src.channels.base import IncomingMessage
@@ -41,7 +60,7 @@ class MessageStatus(str, Enum):
     COMPLETED = "completed"
 
 
-@dataclass
+@dataclass(slots=True)
 class QueuedMessage:
     """
     A message in the persistence queue.
@@ -50,6 +69,7 @@ class QueuedMessage:
         message_id: Unique message identifier
         chat_id: Chat/group ID
         text: Message content
+        sender_id: Sender's phone/user ID
         sender_name: Optional sender name
         channel: Source channel identifier
         metadata: Additional message metadata
@@ -61,6 +81,7 @@ class QueuedMessage:
     message_id: str
     chat_id: str
     text: str
+    sender_id: Optional[str] = None
     sender_name: Optional[str] = None
     channel: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -74,6 +95,7 @@ class QueuedMessage:
             "message_id": self.message_id,
             "chat_id": self.chat_id,
             "text": self.text,
+            "sender_id": self.sender_id,
             "sender_name": self.sender_name,
             "channel": self.channel,
             "metadata": self.metadata,
@@ -84,11 +106,20 @@ class QueuedMessage:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "QueuedMessage":
-        """Create from dictionary (JSON deserialization)."""
+        """Create from dictionary (JSON deserialization).
+
+        Validates ``chat_id`` at the deserialization boundary to prevent
+        malicious values loaded from the on-disk queue file from reaching
+        filesystem operations downstream.  This is the defense-in-depth
+        layer between disk persistence and IncomingMessage construction
+        during crash recovery.
+        """
+        _validate_chat_id(data["chat_id"])
         return cls(
             message_id=data["message_id"],
             chat_id=data["chat_id"],
             text=data["text"],
+            sender_id=data.get("sender_id"),
             sender_name=data.get("sender_name"),
             channel=data.get("channel"),
             metadata=data.get("metadata", {}),
@@ -104,13 +135,48 @@ class QueuedMessage:
             message_id=msg.message_id,
             chat_id=msg.chat_id,
             text=msg.text,
+            sender_id=msg.sender_id,
             sender_name=msg.sender_name,
-            channel=getattr(msg, "channel", None),
-            metadata=getattr(msg, "metadata", {}),
+            channel=msg.channel_type,
+            metadata={},  # IncomingMessage has no metadata attribute
         )
 
 
-class MessageQueue:
+@dataclass(slots=True)
+class QueueCorruptionResult:
+    """Result of queue file corruption detection and repair.
+
+    Follows the same pattern as db_integrity.CorruptionResult but
+    adapted for the queue's JSONL format and message status model.
+
+    Attributes:
+        file_path: Path to the queue file checked.
+        is_corrupted: Whether any corruption was detected.
+        corrupted_lines: 1-indexed line numbers that failed to parse.
+        checksum_mismatches: 1-indexed line numbers where CRC32 didn't match.
+        total_lines: Total non-empty lines in the file.
+        valid_lines: Lines that parsed as valid QueuedMessage dicts.
+        pending_lines: Lines representing pending (active) messages.
+        completed_lines: Lines representing completed/evicted messages.
+        error_details: Human-readable error descriptions per corrupted line.
+        backup_path: Path to the backup file, if one was created.
+        repaired: Whether a repair was performed.
+    """
+
+    file_path: str
+    is_corrupted: bool
+    corrupted_lines: List[int] = field(default_factory=list)
+    checksum_mismatches: List[int] = field(default_factory=list)
+    total_lines: int = 0
+    valid_lines: int = 0
+    pending_lines: int = 0
+    completed_lines: int = 0
+    error_details: List[str] = field(default_factory=list)
+    backup_path: Optional[str] = None
+    repaired: bool = False
+
+
+class MessageQueue(AsyncLockMixin):
     """
     Persistent message queue for crash recovery.
 
@@ -119,7 +185,7 @@ class MessageQueue:
     2. complete() - Mark message as completed after success
     3. recover_stale() - Find and return timed-out pending messages
 
-    Thread-safe via asyncio locks. Uses atomic writes for safety.
+    All JSONL file I/O is delegated to ``QueuePersistence``.
 
     Example:
         queue = MessageQueue(".data")
@@ -142,9 +208,7 @@ class MessageQueue:
 
     DEFAULT_STALE_TIMEOUT = 300  # 5 minutes
 
-    def __init__(
-        self, data_dir: str, stale_timeout: int = DEFAULT_STALE_TIMEOUT
-    ) -> None:
+    def __init__(self, data_dir: str, stale_timeout: int = DEFAULT_STALE_TIMEOUT) -> None:
         """
         Initialize message queue.
 
@@ -152,9 +216,11 @@ class MessageQueue:
             data_dir: Path to data directory for queue storage.
             stale_timeout: Seconds after which a pending message is considered stale.
         """
+        super().__init__()
         self._dir = Path(data_dir)
         self._queue_file = self._dir / "message_queue.jsonl"
         self._stale_timeout = stale_timeout
+        self._persistence = QueuePersistence(self._queue_file)
 
         # In-memory index of pending messages (message_id -> QueuedMessage)
         self._pending: Dict[str, QueuedMessage] = {}
@@ -163,28 +229,35 @@ class MessageQueue:
         self._completed_since_compact: int = 0
         self._compact_threshold: int = 20  # compact after this many completions
 
-        # Lock for thread-safe operations
-        self._lock = asyncio.Lock()
-
         self._initialized = False
+
+        # Populated after connect() with structured corruption metadata.
+        self._last_corruption_result: Optional[QueueCorruptionResult] = None
+
+        # Buffer/flush manager — owns the write buffer and background flush loop.
+        self._flush_mgr = FlushManager(self._lock, self._persistence, self._pending)
 
     async def connect(self) -> None:
         """
         Initialize queue storage and load pending messages.
 
         Creates the data directory if needed and loads any pending
-        messages from disk into memory.
-
-        Side Effects:
-            - Creates .data/ directory if missing
-            - Loads pending messages into _pending cache
-            - Sets _initialized flag to True
+        messages from disk into memory via the persistence layer.
         """
         self._dir.mkdir(parents=True, exist_ok=True)
 
-        await self._load_pending()
+        pending, corruption = await asyncio.to_thread(self._persistence.load_pending)
+        # Update in-place so FlushManager's shared reference stays valid.
+        self._pending.clear()
+        self._pending.update(pending)
+        self._last_corruption_result = corruption
 
         self._initialized = True
+
+        # Start background flush loop to drain buffered writes on the
+        # time-interval boundary during idle periods.
+        self._flush_mgr.start()
+
         log.info(
             "Message queue initialized with %d pending messages",
             len(self._pending),
@@ -192,27 +265,31 @@ class MessageQueue:
 
     async def close(self) -> None:
         """
-        Flush pending messages and close queue.
+        Flush pending writes and close queue.
 
-        Ensures all pending messages are persisted to disk.
-
-        Side Effects:
-            - Persists pending messages to disk
-            - Sets _initialized flag to False
+        Ensures all pending messages are persisted to disk, including
+        any buffered writes awaiting batch fsync.
         """
+        # Cancel background flush loop first so it doesn't race with
+        # the final flush below.
+        await self._flush_mgr.stop()
+
         async with self._lock:
-            await self._persist_pending()
+            await self._flush_mgr.persist_pending()
 
         self._initialized = False
-        log.info(
-            "Message queue closed, persisted %d pending messages", len(self._pending)
-        )
+        log.info("Message queue closed, persisted %d pending messages", len(self._pending))
 
     async def __aenter__(self) -> "MessageQueue":
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
         await self.close()
 
     # ── core operations ───────────────────────────────────────────────────────
@@ -229,16 +306,24 @@ class MessageQueue:
 
         Returns:
             The queued message object.
-
-        Side Effects:
-            - Adds message to in-memory pending index
-            - Appends to queue file atomically
         """
         queued = QueuedMessage.from_incoming_message(msg)
 
+        # Truncate excessively long text before persisting to the queue file.
+        if len(queued.text) > MAX_QUEUED_TEXT_LENGTH:
+            original_len = len(queued.text)
+            suffix = "…[truncated]"
+            queued.text = queued.text[: MAX_QUEUED_TEXT_LENGTH - len(suffix)] + suffix
+            log.warning(
+                "Truncated queued message %s text: %d → %d chars",
+                queued.message_id,
+                original_len,
+                len(queued.text),
+            )
+
         async with self._lock:
             self._pending[queued.message_id] = queued
-            await self._append_to_queue(queued)
+            await self._flush_mgr.append_to_queue(queued)
 
         log.debug(
             "Enqueued message %s for chat %s",
@@ -252,19 +337,13 @@ class MessageQueue:
         Mark a message as completed and remove from pending.
 
         Should be called after successful message processing.
-        Uses append-only write (appends COMPLETED entry) and only
-        rewrites the full file when the compaction threshold is reached.
+        Uses append-only write and periodically compacts the file.
 
         Args:
             message_id: ID of the message to complete.
 
         Returns:
             True if message was found and completed, False otherwise.
-
-        Side Effects:
-            - Removes message from in-memory pending index
-            - Appends completion marker to queue file
-            - Periodically compacts the queue file (full rewrite)
         """
         async with self._lock:
             if message_id not in self._pending:
@@ -279,18 +358,16 @@ class MessageQueue:
 
             # Compact (full rewrite) only when threshold is reached
             if self._completed_since_compact >= self._compact_threshold:
-                await self._persist_pending()
+                await self._flush_mgr.persist_pending()
                 self._completed_since_compact = 0
             else:
                 # Append-only: write a completion marker
-                await self._append_completion(message_id)
+                await self._flush_mgr.append_completion(message_id)
 
         log.debug("Completed message %s", message_id)
         return True
 
-    async def recover_stale(
-        self, timeout_seconds: Optional[int] = None
-    ) -> List[QueuedMessage]:
+    async def recover_stale(self, timeout_seconds: Optional[int] = None) -> List[QueuedMessage]:
         """
         Find and return stale pending messages for crash recovery.
 
@@ -303,13 +380,8 @@ class MessageQueue:
 
         Returns:
             List of stale messages that need reprocessing.
-
-        Side Effects:
-            - Logs recovery operations
-            - Updates timestamps for recovered messages
-            - Persists updated queue
         """
-        timeout = timeout_seconds or self._stale_timeout
+        timeout = timeout_seconds if timeout_seconds is not None else self._stale_timeout
         cutoff_time = time.time() - timeout
         stale_messages: List[QueuedMessage] = []
 
@@ -325,7 +397,6 @@ class MessageQueue:
                     timeout,
                 )
 
-                # Log each recovered message for debugging
                 for msg in stale_messages:
                     log.info(
                         "Recovering stale message %s from chat %s (age: %.1fs)",
@@ -334,11 +405,10 @@ class MessageQueue:
                         time.time() - msg.updated_at,
                     )
 
-                # Remove stale messages from pending (they'll be reprocessed)
                 for msg in stale_messages:
                     del self._pending[msg.message_id]
 
-                await self._persist_pending()
+                await self._flush_mgr.persist_pending()
 
         return stale_messages
 
@@ -365,139 +435,63 @@ class MessageQueue:
         async with self._lock:
             return [msg for msg in self._pending.values() if msg.chat_id == chat_id]
 
-    # ── persistence helpers ───────────────────────────────────────────────────
+    # ── integrity operations ─────────────────────────────────────────────────
 
-    async def _load_pending(self) -> None:
+    async def validate(self) -> QueueCorruptionResult:
         """
-        Load pending messages from queue file.
+        Check queue file integrity without loading into memory.
 
-        Reads the JSONL queue file and loads all pending messages
-        into the in-memory index. Completed messages are skipped.
-
-        Side Effects:
-            - Populates _pending in-memory dict
+        Safe to call at any time for health checks.
         """
-        if not self._queue_file.exists():
-            log.debug("Queue file does not exist, starting fresh")
-            return
+        async with self._lock:
+            return await asyncio.to_thread(self._persistence.validate_sync)
 
-        loaded_count = 0
-        pending_count = 0
+    async def repair(self) -> QueueCorruptionResult:
+        """
+        Detect and repair corruption in the queue file.
 
-        try:
-            content = self._queue_file.read_text(encoding="utf-8")
-            for line in content.splitlines():
-                data = safe_json_parse_line(line, default=None, log_errors=True)
-                if data is None:
-                    continue
+        Validates every line, backs up the corrupted file, and rewrites
+        it with only valid lines. The in-memory pending index is reloaded
+        from the repaired file.
+        """
+        async with self._lock:
+            # Step 1: Detect corruption
+            result = await asyncio.to_thread(self._persistence.validate_sync)
 
-                try:
-                    msg = QueuedMessage.from_dict(data)
-                    loaded_count += 1
+            if not result.is_corrupted:
+                return result
 
-                    # Only load pending messages; completed ones are skipped
-                    if msg.status == MessageStatus.PENDING:
-                        self._pending[msg.message_id] = msg
-                        pending_count += 1
-                except KeyError as e:
-                    log.warning(
-                        "Skipping invalid queue entry (missing key): %s",
-                        str(e)[:100],
-                    )
-                    continue
+            # Step 2: Backup before modifying
+            await asyncio.to_thread(self._persistence.backup_corrupted_file)
+
+            backup_dir = self._dir / "backups"
+            if backup_dir.exists():
+                backups = sorted(backup_dir.glob("message_queue_*.jsonl.bak"))
+                if backups:
+                    result.backup_path = str(backups[-1])
+
+            # Step 3: Rewrite with only valid lines
+            await asyncio.to_thread(self._persistence.repair_sync, result)
+            result.repaired = True
+
+            # Step 4: Reload pending from repaired file
+            self._pending.clear()
+            reloaded = await asyncio.to_thread(self._persistence.load_valid_lines_sync)
+            self._pending.update(reloaded)
+
+            self._last_corruption_result = result
 
             log.info(
-                "Loaded queue file: %d entries, %d pending",
-                loaded_count,
-                pending_count,
+                "Repaired queue file: removed %d corrupted lines, %d valid lines preserved",
+                len(result.corrupted_lines),
+                result.valid_lines,
             )
-        except Exception as e:
-            log.error("Failed to load queue file: %s", e)
-            # Continue with empty queue rather than crash
-            self._pending = {}
-
-    async def _append_to_queue(self, msg: QueuedMessage) -> None:
-        """
-        Append a message to the queue file.
-
-        Uses atomic append for thread safety.
-
-        Args:
-            msg: Message to append.
-
-        Side Effects:
-            - Appends to .data/message_queue.jsonl
-        """
-        try:
-            with self._queue_file.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(msg.to_dict(), ensure_ascii=False) + "\n")
-        except Exception as e:
-            log.error("Failed to append to queue file: %s", e)
-            raise
-
-    async def _append_completion(self, message_id: str) -> None:
-        """
-        Append a completion marker to the queue file (append-only optimization).
-
-        Instead of rewriting the entire file, we append a completed entry.
-        The next _load_pending call will skip completed entries.
-
-        Args:
-            message_id: The ID of the completed message.
-        """
-        try:
-            entry = (
-                json.dumps(
-                    {
-                        "message_id": message_id,
-                        "status": "completed",
-                        "completed_at": time.time(),
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-            with self._queue_file.open("a", encoding="utf-8") as f:
-                f.write(entry)
-        except Exception as e:
-            log.error("Failed to append completion to queue file: %s", e)
-            # Fall back to full persist on error
-            await self._persist_pending()
-
-    async def _persist_pending(self) -> None:
-        """
-        Atomically persist all pending messages to queue file.
-
-        Uses atomic write pattern: writes to temp file first, then
-        replaces the target file to prevent corruption.
-
-        Side Effects:
-            - Creates/overwrites .data/message_queue.jsonl
-            - Creates temporary .data/message_queue.tmp during write
-        """
-        temp_file = self._queue_file.with_suffix(".tmp")
-
-        try:
-            with temp_file.open("w", encoding="utf-8") as f:
-                for msg in self._pending.values():
-                    f.write(json.dumps(msg.to_dict(), ensure_ascii=False) + "\n")
-
-            temp_file.replace(self._queue_file)
-            log.debug("Persisted %d pending messages", len(self._pending))
-        except Exception as e:
-            log.error("Failed to persist queue: %s", e)
-            # Clean up temp file if it exists
-            if temp_file.exists():
-                temp_file.unlink()
-            raise
+            return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Async Context Manager for MessageQueue lifecycle
 # ─────────────────────────────────────────────────────────────────────────────
-
-from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 
 @asynccontextmanager

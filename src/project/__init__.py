@@ -12,8 +12,8 @@ Modules:
 """
 
 from src.project.dates import fmt_ts
-from src.project.store import ProjectStore
 from src.project.graph import ProjectGraph
 from src.project.recall import ProjectRecall
+from src.project.store import ProjectStore
 
 __all__ = ["ProjectStore", "ProjectGraph", "ProjectRecall", "fmt_ts"]

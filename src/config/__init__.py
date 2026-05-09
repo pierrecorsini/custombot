@@ -8,32 +8,31 @@ Provides:
   - CONFIG_PATH: Default configuration file path
 """
 
-from src.config.config import (
-    Config,
-    LLMConfig,
-    WhatsAppConfig,
-    NeonizeConfig,
-    MemoryConfig,
-    load_config,
-    save_config,
+from src.config.config_schema_defs import (
     CONFIG_PATH,
+    ConfigValidationError,
     DEPRECATED_OPTIONS,
     RENAMED_OPTIONS,
-)
-from src.config.config_schema import (
-    validate_config,
-    validate_config_dict,
-    ConfigValidationError,
+    Config,
+    LLMConfig,
+    MiddlewareConfig,
+    NeonizeConfig,
+    ShellConfig,
+    WhatsAppConfig,
     add_schema_version,
     format_validation_errors,
+    validate_config,
+    validate_config_dict,
 )
+from src.config.config_loader import load_config, save_config
 
 __all__ = [
     "Config",
     "LLMConfig",
     "WhatsAppConfig",
     "NeonizeConfig",
-    "MemoryConfig",
+    "ShellConfig",
+    "MiddlewareConfig",
     "load_config",
     "save_config",
     "CONFIG_PATH",

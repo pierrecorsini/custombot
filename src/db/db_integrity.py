@@ -8,13 +8,17 @@ Database thin wrappers to keep db.py focused on core CRUD operations.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+
+from src.utils.validation import _validate_chat_id
+from src.utils import JSONDecodeError, json_loads
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +26,7 @@ log = logging.getLogger(__name__)
 # ── dataclasses ─────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class CorruptionResult:
     """Result of message file corruption detection."""
 
@@ -37,7 +41,7 @@ class CorruptionResult:
     repaired: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class MessageLine:
     """Parsed message line with checksum validation."""
 
@@ -112,16 +116,16 @@ def detect_corruption_sync(msg_file: Path) -> CorruptionResult:
             if not line.strip():
                 continue
             try:
-                msg = json.loads(line)
+                msg = json_loads(line)
                 result.valid_lines += 1
 
                 is_valid, error = validate_checksum(msg)
                 if not is_valid:
                     result.checksum_mismatches.append(line_num)
                     result.error_details.append(f"Line {line_num}: {error}")
-            except json.JSONDecodeError as e:
+            except JSONDecodeError as exc:
                 result.corrupted_lines.append(line_num)
-                result.error_details.append(f"Line {line_num}: JSON parse error - {e}")
+                result.error_details.append(f"Line {line_num}: JSON parse error - {exc}")
 
         result.is_corrupted = bool(result.corrupted_lines or result.checksum_mismatches)
 
@@ -133,10 +137,10 @@ def detect_corruption_sync(msg_file: Path) -> CorruptionResult:
                 len(result.checksum_mismatches),
             )
 
-    except Exception as e:
+    except OSError as exc:
         result.is_corrupted = True
-        result.error_details.append(f"Failed to read file: {e}")
-        log.error("Failed to read message file %s: %s", msg_file.name, e)
+        result.error_details.append(f"Failed to read file: {exc}")
+        log.error("Failed to read message file %s: %s", msg_file.name, exc)
 
     return result
 
@@ -164,8 +168,8 @@ def backup_file_sync(msg_file: Path, data_dir: Path) -> Optional[str]:
         shutil.copy2(msg_file, backup_file)
         log.info("Created backup: %s", backup_file)
         return str(backup_file)
-    except Exception as e:
-        log.error("Failed to create backup: %s", e)
+    except OSError as exc:
+        log.error("Failed to create backup: %s", exc)
         return None
 
 
@@ -191,9 +195,7 @@ def repair_file_sync(
     if not msg_file.exists():
         return False
 
-    skip_lines = set(detection_result.corrupted_lines) | set(
-        detection_result.checksum_mismatches
-    )
+    skip_lines = set(detection_result.corrupted_lines) | set(detection_result.checksum_mismatches)
     if not skip_lines:
         return True  # Nothing to repair
 
@@ -201,9 +203,7 @@ def repair_file_sync(
         content = msg_file.read_text(encoding="utf-8")
         lines = content.splitlines()
 
-        valid_lines = [
-            line for line_num, line in enumerate(lines, 1) if line_num not in skip_lines
-        ]
+        valid_lines = [line for line_num, line in enumerate(lines, 1) if line_num not in skip_lines]
 
         new_content = "\n".join(valid_lines)
         if valid_lines:
@@ -218,8 +218,8 @@ def repair_file_sync(
         )
         return True
 
-    except Exception as e:
-        log.error("Failed to repair file %s: %s", msg_file.name, e)
+    except OSError as exc:
+        log.error("Failed to repair file %s: %s", msg_file.name, exc)
         return False
 
 
@@ -242,6 +242,14 @@ def validate_all_sync(
 
     for msg_file in messages_dir.glob("*.jsonl"):
         chat_id = msg_file.stem
+        try:
+            _validate_chat_id(chat_id)
+        except ValueError:
+            log.warning(
+                "Skipping message file with invalid chat_id stem: %s",
+                msg_file.name,
+            )
+            continue
         result = detect_corruption_sync(msg_file)
         results[chat_id] = result
 

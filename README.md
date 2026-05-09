@@ -36,8 +36,6 @@ A lightweight, **Python** personal AI assistant for **WhatsApp** — powered by 
   - [Philosophy](#philosophy)
   - [License](#license)
 
-> **[Feature Deep-Dives → FEATURES.md](FEATURES.md)** — Detailed schemas and internals for every subsystem.
-
 ---
 
 ## 🏗 High-Level Architecture
@@ -75,27 +73,87 @@ A lightweight, **Python** personal AI assistant for **WhatsApp** — powered by 
 
 ## ✨ Features
 
-| Feature | Details |
-|---|---|
-| 📱 **WhatsApp channel** | neonize (whatsmeow Go library) — native Python, no Node.js bridge |
-| 🧠 **Any OpenAI-compatible LLM** | OpenAI, OpenRouter, Ollama, LM Studio, Groq… |
-| 🔄 **ReAct agentic loop** | Tool calling with automatic result injection, max iteration guard |
-| 🧭 **Message Routing** | Priority-based rule matching by sender, content, channel, toMe/fromMe |
-| 🧩 **Skills system** | Python class skills + Markdown prompt skills (picoclaw-style) |
-| 📁 **Workspace isolation** | Each chat runs inside `.workspace/<chat_id>/` — no cross-chat leakage |
-| 📝 **Per-chat memory** | `MEMORY.md` + `AGENTS.md` with mtime caching + corruption detection |
-| 🔍 **Vector semantic memory** | sqlite-vec + OpenAI embeddings for semantic search across memories |
-| ⏰ **Task Scheduler** | Daily, interval, and cron schedules with result comparison |
-| 📊 **Project & Knowledge** | Create projects, add knowledge entries, link them, recall context |
-| 📋 **Planner** | Task planning with dependency tracking and execution ordering |
-| 🌐 **Web Research** | Search + crawl in one skill, CSS selector extraction |
-| 🔒 **Stealth mode** | Human-like delays (log-normal), per-chat cooldowns, typing simulation |
-| 🛡️ **Crash recovery** | Persistent message queue, stale message detection, auto-recovery |
-| 🚦 **Rate limiting** | Per-chat and per-skill sliding window rate limiting |
-| 💚 **Health checks** | HTTP `/health` endpoint checking DB, WhatsApp, LLM, memory, performance |
-| 📈 **Monitoring** | Token usage, LLM latency, message latency, queue depth, memory usage |
-| 🛑 **Graceful shutdown** | Signal handlers, in-flight operation tracking, ordered component cleanup |
-| 💬 **CLI** | `start`, `options` + verbosity & log-format flags |
+### Messaging
+
+- **WhatsApp via neonize** — Go whatsmeow binding, QR pairing, session persistence, auto-reconnect
+- **CLI channel** for terminal-based interaction
+- **Per-chat isolated memory** — file-based conversation history with mtime caching + corruption detection
+- **Semantic memory** via sqlite-vec vector search (embeddings stored locally)
+- **Deduplication** — inbound (message ID) and outbound (content hash via xxhash)
+- **Per-chat and per-skill rate limiting** (sliding window)
+
+### LLM / AI
+
+- **Any OpenAI-compatible provider** — OpenAI, OpenRouter, Ollama, Groq, LM Studio
+- **ReAct loop** with multi-step tool calls and configurable max iterations
+- **Streaming responses** with token-by-token chunking
+- **Circuit breaker** — auto-opens on repeated failures, background health probe recovers
+- **Structured error classification** (auth, rate-limit, timeout, server, content-filter) with retry
+- **Per-chat token usage tracking**
+- **Prompt injection detection**
+
+### Skills (Tools)
+
+- **Dual system** — Python classes (`BaseSkill`) + Markdown prompt files (picoclaw-style)
+- **Built-in skills** — web search (DuckDuckGo) + crawl, shell execution, file I/O, memory management, task planner, project management, TTS voice notes (edge-tts), PDF report generation, scheduled tasks
+- **Auto-discovery** of skill files from workspace directories
+- **Skill rate limiting and audit logging**
+
+### Routing & Context
+
+- **Priority-based message routing** via instruction file frontmatter
+- **Mtime-cached instruction loader** with hot-reload (watchdog)
+- **Context assembler** — merges system prompt, memory, project knowledge, routing instructions
+- **Project knowledge store** (SQLite) with knowledge graph (BFS traversal, linked entries)
+
+### Reliability
+
+- **Persistent message queue** (JSONL) with crash recovery and stale-message reprocessing
+- **Graceful shutdown** — ordered signal-based teardown (SIGINT/SIGTERM), in-flight operation tracking
+- **Generation-conflict detection** for concurrent writes
+- **State-machine lifecycle** (STARTING → RUNNING → SHUTTING_DOWN → STOPPED)
+
+### Observability
+
+- **OpenTelemetry distributed tracing** — span per message, tool call, LLM request
+- **Prometheus metrics endpoint** — LLM latency, token counts, queue depth, error rates
+- **Health check HTTP server** with liveness/ready probes
+- **Structured JSON logging** with correlation IDs
+- **LLM request/response file logging** (optional, per-session JSON files)
+- **Configurable log verbosity** (quiet / normal / verbose)
+
+### Security
+
+- **ACL gate** on all inbound messages — only channel-verified messages processed
+- **Prompt injection scoring and rejection**
+- **Path traversal validation** for file/skill operations
+- **URL sanitization** for log output
+- **Config file permission warnings** (Unix)
+- **Audit logging** for security-sensitive operations
+
+### Background Tasks
+
+- **Task scheduler** — cron-like scheduled LLM tasks per chat
+- **Step orchestrator** — dependency-ordered step execution for multi-step plans
+- **Background message delivery** with retries
+
+### CLI & Configuration
+
+- `start` — run the bot with optional health port, safe mode, LLM logging
+- `options` — TUI configuration editor
+- `diagnose` — system diagnostic report (config, connectivity, workspace, dependencies)
+- **Hot-reloadable config** (JSON) with environment variable overrides
+- **Config validation** and schema URI support
+
+### Architecture
+
+- **Fully async** (asyncio), Python 3.11+
+- **Modular package structure** — 18+ packages, 157 source files
+- **Event bus** — typed async pub/sub (7+ event types)
+- **Middleware pipeline** — configurable chain for message processing
+- **Builder pattern** for dependency injection (`BotDeps`, `BotComponents`)
+- **Typed dataclasses with slots** throughout
+- **Message queue buffer** for outbound message ordering
 
 ---
 

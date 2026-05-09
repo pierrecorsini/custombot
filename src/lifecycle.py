@@ -7,24 +7,56 @@ component status, and session metrics.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional
 
-from src.config import Config
-from src.constants import DEFAULT_SHUTDOWN_TIMEOUT, WORKSPACE_DIR
+from src.constants import CLEANUP_STEP_TIMEOUT, DEFAULT_SHUTDOWN_TIMEOUT, WORKSPACE_DIR
+from src.core.errors import NonCriticalCategory, log_noncritical
+from src.security.url_sanitizer import sanitize_url_for_logging
 
+if TYPE_CHECKING:
+    from src.config import Config
+    from concurrent.futures import ThreadPoolExecutor
+    from src.bot import Bot
+    from src.channels.base import BaseChannel
+    from src.db import Database
+    from src.health import HealthServer
+    from src.llm import LLMProvider
+    from src.message_queue import MessageQueue
+    from src.project.store import ProjectStore
+    from src.routing import RoutingEngine
+    from src.scheduler import TaskScheduler
+    from src.shutdown import GracefulShutdown
+    from src.vector_memory import VectorMemory
 
 log = logging.getLogger("lifecycle")
 
 
+_verbosity_cache: str | None = None
+
+
 def _get_verbosity() -> str:
-    """Get current verbosity level from logging config."""
+    """Get current verbosity level from logging config (cached after first call)."""
+    global _verbosity_cache
+    if _verbosity_cache is not None:
+        return _verbosity_cache
     try:
         from src.logging.logging_config import get_verbosity
 
-        return get_verbosity().value
+        _verbosity_cache = get_verbosity().value
+        return _verbosity_cache
     except Exception:
-        return "normal"
+        log_noncritical(
+            NonCriticalCategory.CONFIG_LOAD,
+            "Failed to resolve verbosity level, defaulting to 'normal'",
+            logger=log,
+        )
+        _verbosity_cache = "normal"
+        return _verbosity_cache
 
 
 def _log_startup_begin(config: Config) -> float:
@@ -45,7 +77,7 @@ def _log_startup_begin(config: Config) -> float:
         # Verbose mode: full config summary
         config_summary = {
             "llm_model": config.llm.model,
-            "llm_base_url": config.llm.base_url,
+            "llm_base_url": sanitize_url_for_logging(config.llm.base_url),
             "llm_api_key": "***REDACTED***" if config.llm.api_key else "NOT_SET",
             "whatsapp_provider": config.whatsapp.provider,
             "neonize_db_path": config.whatsapp.neonize.db_path,
@@ -116,23 +148,11 @@ def _log_skills_loaded(skills_registry) -> None:
         log.info("Skills loaded: %d", len(skills_list))
 
 
-def _log_connection_status(
-    service: str, status: str, details: str | None = None
+def _log_startup_complete(
+    start_time: float,
+    components: list[str],
+    component_durations: dict[str, float] | None = None,
 ) -> None:
-    """Log connection status for external services."""
-    verbosity = _get_verbosity()
-    if verbosity == "quiet":
-        return
-
-    if verbosity == "verbose":
-        if details:
-            log.info("[CONNECTION] %s - %s (%s)", service.upper(), status, details)
-        else:
-            log.info("[CONNECTION] %s - %s", service.upper(), status)
-    # Normal mode: skip connection logs (handled by CLI output)
-
-
-def _log_startup_complete(start_time: float, components: list[str]) -> None:
     """Log startup completion with timing and component summary."""
     duration = time.time() - start_time
     verbosity = _get_verbosity()
@@ -148,12 +168,14 @@ def _log_startup_complete(start_time: float, components: list[str]) -> None:
         log.info("Components initialized (%d):", len(components))
         for comp in components:
             log.info("  ✓ %s", comp)
+        if component_durations:
+            log.info("Per-component init timing:")
+            for name, dur in component_durations.items():
+                log.info("  %-25s %.3fs", name, dur)
         log.info("")
     else:
         # Normal mode: single line summary
-        log.info(
-            "Startup complete (%.2fs) — %d components ready", duration, len(components)
-        )
+        log.info("Startup complete (%.2fs) — %d components ready", duration, len(components))
 
 
 def _log_shutdown_begin(metrics: dict) -> None:
@@ -170,9 +192,7 @@ def _log_shutdown_begin(metrics: dict) -> None:
         log.info("=" * 60)
         log.info("Session metrics:")
         log.info("  %-25s = %s", "uptime", f"{metrics.get('uptime', 0):.1f}s")
-        log.info(
-            "  %-25s = %d", "messages_processed", metrics.get("messages_processed", 0)
-        )
+        log.info("  %-25s = %d", "messages_processed", metrics.get("messages_processed", 0))
         log.info("  %-25s = %d", "skills_executed", metrics.get("skills_executed", 0))
         log.info("  %-25s = %d", "errors_count", metrics.get("errors_count", 0))
     else:
@@ -214,3 +234,285 @@ def _log_shutdown_complete(start_time: float) -> None:
     else:
         # Normal mode: single line
         log.info("Shutdown complete (%.2fs)", duration)
+
+
+@dataclass(slots=True)
+class ShutdownContext:
+    """Structured parameter bag for ``perform_shutdown()``.
+
+    Replaces the former 14-parameter signature with a single dataclass,
+    mirroring ``StartupContext`` from ``src/core/startup.py``.
+
+    Required fields correspond to components that are always available
+    at shutdown time.  Optional fields (``health_server``, ``bot``,
+    ``executor``) may be ``None`` depending on configuration and startup
+    success.
+    """
+
+    shutdown: GracefulShutdown
+    channel: BaseChannel
+    scheduler: TaskScheduler
+    db: Database
+    project_store: ProjectStore
+    message_queue: MessageQueue
+    llm: LLMProvider
+    session_metrics: dict[str, Any]
+    log: logging.Logger
+
+    # Optional components
+    health_server: HealthServer | None = None
+    vector_memory: VectorMemory | None = None
+    bot: Bot | None = None
+    executor: ThreadPoolExecutor | None = None
+    routing_engine: RoutingEngine | None = None
+    verbose: bool = False
+
+
+async def perform_shutdown(ctx: ShutdownContext) -> None:
+    """Execute the 7-step graceful shutdown sequence."""
+    from src.ui.cli_output import cli as cli_output
+
+    shutdown_begin_time = time.time()
+    if "uptime" not in ctx.session_metrics:
+        ctx.session_metrics["uptime"] = time.time() - ctx.session_metrics.get(
+            "start_time", time.time()
+        )
+
+    _log_shutdown_begin(ctx.session_metrics)
+    cli_output.warning("Initiating graceful shutdown...")
+
+    total_cleanup_steps = 7
+    _shutdown_progress: dict[str, str] = {}
+
+    # 1. Stop accepting new messages
+    _log_cleanup_step(1, total_cleanup_steps, "Stopping message acceptance and polling")
+    ctx.shutdown.request_shutdown()
+    ctx.channel.request_shutdown()
+    _shutdown_progress["message_acceptance"] = "completed"
+
+    # 2. Wait for in-flight operations
+    _log_cleanup_step(2, total_cleanup_steps, "Waiting for in-flight operations")
+    cli_output.dim("  Waiting for in-flight operations to complete...")
+    completed = await ctx.shutdown.wait_for_in_flight()
+    if not completed:
+        _shutdown_progress["in_flight_ops"] = "timed_out"
+        ctx.log.warning("Force proceeding after timeout")
+        cli_output.warning("Timed out waiting for operations, forcing shutdown")
+    else:
+        _shutdown_progress["in_flight_ops"] = "completed"
+
+    # 3. Stop scheduler and health server in parallel
+    _log_cleanup_step(3, total_cleanup_steps, "Stopping scheduler, health server, and channel")
+    cli_output.dim("  Stopping background services...")
+
+    async def _stop_scheduler():
+        try:
+            await ctx.scheduler.stop()
+            _shutdown_progress["scheduler"] = "completed"
+        except Exception as exc:
+            _shutdown_progress["scheduler"] = f"failed: {exc}"
+            ctx.log.warning("Error stopping scheduler: %s", exc)
+
+    async def _stop_health():
+        if ctx.health_server:
+            try:
+                await ctx.health_server.stop()
+                _shutdown_progress["health_server"] = "completed"
+            except Exception as exc:
+                _shutdown_progress["health_server"] = f"failed: {exc}"
+                ctx.log.warning("Error stopping health server: %s", exc)
+        else:
+            _shutdown_progress["health_server"] = "skipped"
+
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(_stop_scheduler())
+        tg.create_task(_stop_health())
+
+    # 4. Close channel
+    _log_cleanup_step(4, total_cleanup_steps, "Closing channel connections")
+    cli_output.dim("  Closing channel connections...")
+    try:
+        await ctx.channel.close()
+        _shutdown_progress["channel"] = "completed"
+    except Exception as exc:
+        _shutdown_progress["channel"] = f"failed: {exc}"
+        ctx.log.warning("Error closing channel: %s", exc)
+
+    # 5. Close project store, vector memory, message queue, and LLM client in parallel
+    _log_cleanup_step(
+        5,
+        total_cleanup_steps,
+        "Closing project store, vector memory, message queue, routing engine, and LLM",
+    )
+    cli_output.dim("  Closing storage backends and LLM client...")
+
+    def _close_project_store():
+        try:
+            ctx.project_store.close()
+            _shutdown_progress["project_store"] = "completed"
+        except Exception as exc:
+            _shutdown_progress["project_store"] = f"failed: {exc}"
+            ctx.log.warning("Error closing project store: %s", exc)
+
+    def _close_vector_memory():
+        if ctx.vector_memory is None:
+            _shutdown_progress["vector_memory"] = "skipped"
+            return
+        try:
+            ctx.vector_memory.close()
+            _shutdown_progress["vector_memory"] = "completed"
+        except Exception as exc:
+            _shutdown_progress["vector_memory"] = f"failed: {exc}"
+            ctx.log.warning("Error closing vector memory: %s", exc)
+
+    def _close_routing_engine():
+        if ctx.routing_engine is None:
+            _shutdown_progress["routing_engine"] = "skipped"
+            return
+        try:
+            ctx.routing_engine.close()
+            _shutdown_progress["routing_engine"] = "completed"
+        except Exception as exc:
+            _shutdown_progress["routing_engine"] = f"failed: {exc}"
+            ctx.log.warning("Error closing routing engine: %s", exc)
+
+    async def _close_message_queue():
+        try:
+            await ctx.message_queue.close()
+            _shutdown_progress["message_queue"] = "completed"
+        except Exception as exc:
+            _shutdown_progress["message_queue"] = f"failed: {exc}"
+            ctx.log.warning("Error closing message queue: %s", exc)
+
+    async def _close_llm():
+        try:
+            await ctx.llm.close()
+            _shutdown_progress["llm"] = "completed"
+        except Exception as exc:
+            _shutdown_progress["llm"] = f"failed: {exc}"
+            ctx.log.warning("Error closing LLM client: %s", exc)
+
+    async def _stop_memory_monitoring():
+        if ctx.bot is None:
+            _shutdown_progress["memory_monitoring"] = "skipped"
+            return
+        try:
+            await ctx.bot.stop_memory_monitoring()
+            _shutdown_progress["memory_monitoring"] = "completed"
+        except Exception as exc:
+            _shutdown_progress["memory_monitoring"] = f"failed: {exc}"
+            ctx.log.warning("Error stopping memory monitoring: %s", exc)
+
+    def _close_executor():
+        if ctx.bot is None:
+            _shutdown_progress["tool_executor"] = "skipped"
+            return
+        try:
+            ctx.bot.close_executor()
+            _shutdown_progress["tool_executor"] = "completed"
+        except Exception as exc:
+            _shutdown_progress["tool_executor"] = f"failed: {exc}"
+            ctx.log.warning("Error closing tool executor: %s", exc)
+
+    await asyncio.gather(
+        asyncio.to_thread(_close_project_store),
+        asyncio.to_thread(_close_vector_memory),
+        asyncio.to_thread(_close_routing_engine),
+        _close_message_queue(),
+        _close_llm(),
+        _stop_memory_monitoring(),
+        asyncio.to_thread(_close_executor),
+    )
+
+    # 6. Close database before executor shutdown because DB flush paths use
+    # asyncio.to_thread() internally (save_chats/index writes).
+    _log_cleanup_step(6, total_cleanup_steps, "Closing database connections")
+    cli_output.dim("  Closing database connections...")
+    try:
+        await ctx.db.close()
+        _shutdown_progress["database"] = "completed"
+    except Exception as exc:
+        _shutdown_progress["database"] = f"failed: {exc}"
+        ctx.log.warning("Error closing database: %s", exc)
+
+    # 7. Shut down the thread pool executor after all components that may
+    # schedule work via to_thread() have completed.
+    _log_cleanup_step(7, total_cleanup_steps, "Shutting down thread pool executor")
+    if ctx.executor is not None:
+        try:
+            # Do not call executor.shutdown(wait=True) via asyncio.to_thread().
+            # If this executor is the loop default, to_thread may run inside the
+            # same pool and trigger "cannot join current thread".
+            done = threading.Event()
+            error_box: list[Exception] = []
+
+            def _shutdown_executor() -> None:
+                try:
+                    ctx.executor.shutdown(wait=True)
+                except RuntimeError as exc:
+                    msg = str(exc)
+                    # Expected during event loop teardown — the default executor
+                    # may already be shut down by asyncio.run() cleanup.
+                    if "cannot join current thread" in msg or (
+                        "cannot schedule new futures after shutdown" in msg
+                    ):
+                        ctx.log.debug(
+                            "Executor shutdown encountered expected teardown error: %s", msg
+                        )
+                    else:
+                        error_box.append(exc)
+                except Exception as exc:  # pragma: no cover - defensive
+                    error_box.append(exc)
+                finally:
+                    done.set()
+
+            t = threading.Thread(target=_shutdown_executor, name="executor-shutdown")
+            t.start()
+
+            waited = 0.0
+            poll_interval = 0.05
+            while not done.is_set() and waited < CLEANUP_STEP_TIMEOUT:
+                await asyncio.sleep(poll_interval)
+                waited += poll_interval
+
+            if not done.is_set():
+                _shutdown_progress["thread_pool_executor"] = "timed_out"
+                ctx.log.warning(
+                    "Thread pool executor shutdown timed out after %.1fs, proceeding",
+                    CLEANUP_STEP_TIMEOUT,
+                )
+            elif error_box:
+                _shutdown_progress["thread_pool_executor"] = f"failed: {error_box[0]}"
+                ctx.log.warning(
+                    "Error shutting down thread pool executor: %s", error_box[0]
+                )
+            else:
+                _shutdown_progress["thread_pool_executor"] = "completed"
+        except Exception as exc:
+            _shutdown_progress["thread_pool_executor"] = f"failed: {exc}"
+            ctx.log.warning("Error shutting down thread pool executor: %s", exc)
+    else:
+        _shutdown_progress["thread_pool_executor"] = "skipped"
+
+    # Safety net: close any leaked SQLite connections via the shared pool.
+    # Individual components (VectorMemory, ProjectStore) should have already
+    # closed their own connections, but this catches anything that slipped
+    # through (e.g. read connections from background threads).
+    from src.db.sqlite_utils import SqliteHelper
+
+    leaked = SqliteHelper.close_all_connections()
+    if leaked:
+        ctx.log.info(
+            "SQLite pool safety net closed %d leaked connection(s): %s",
+            len(leaked),
+            ", ".join(leaked),
+        )
+
+    ctx.log.info(
+        "Shutdown component status: %s",
+        ", ".join(f"{k}={v}" for k, v in _shutdown_progress.items()),
+        extra={"shutdown_progress": dict(_shutdown_progress)},
+    )
+
+    _log_shutdown_complete(shutdown_begin_time)
+    cli_output.success("Shutdown complete.")

@@ -7,19 +7,22 @@ Tests the TUI functions for configuration editing with mocked questionary.
 from __future__ import annotations
 
 import json
-import pytest
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from src.config import Config, LLMConfig, WhatsAppConfig, NeonizeConfig, save_config
+import pytest
+
+from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig, save_config
 from src.ui.options_tui import (
-    run_options_tui,
+    _edit_general_settings,
     _edit_llm_settings,
     _edit_whatsapp_settings,
-    _edit_general_settings,
     _show_main_menu,
+    run_options_tui,
 )
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures

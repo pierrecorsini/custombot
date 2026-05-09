@@ -1,12 +1,19 @@
 {
+  "_comment_env_vars": "Environment variables override config: OPENAI_API_KEY, OPENAI_BASE_URL",
   "llm": {
     "model": "gpt-4o",
     "base_url": "https://api.openai.com/v1",
     "api_key": "sk-your-api-key-here",
     "temperature": 0.7,
     "max_tokens": 4096,
+    "timeout": 120,
     "system_prompt_prefix": "",
-    "max_tool_iterations": 10
+    "max_tool_iterations": 10,
+    "embedding_model": "text-embedding-3-small",
+    "embedding_dimensions": 1536,
+    "embedding_base_url": "",
+    "embedding_api_key": "",
+    "stream_response": false
   },
   "whatsapp": {
     "provider": "neonize",
@@ -15,6 +22,14 @@
     },
     "allowed_numbers": [],
     "allow_all": false
+  },
+  "shell": {
+    "command_denylist": [],
+    "command_allowlist": []
+  },
+  "middleware": {
+    "middleware_order": [],
+    "extra_middleware_paths": []
   },
   "memory_max_history": 50,
   "load_history": false,
@@ -26,5 +41,13 @@
   "log_format": "text",
   "log_file": "workspace/logs/custombot.log",
   "log_max_bytes": 10485760,
-  "log_backup_count": 5
+  "log_backup_count": 5,
+  "log_verbosity": "normal",
+  "log_llm": false,
+  "max_thread_pool_workers": null,
+  "max_chat_lock_cache_size": 1000,
+  "max_chat_lock_eviction_policy": "grow",
+  "max_chat_lock_cache_ttl": null,
+  "max_concurrent_messages": 10,
+  "per_chat_timeout": 300
 }

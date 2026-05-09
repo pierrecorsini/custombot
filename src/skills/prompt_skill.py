@@ -21,10 +21,12 @@ Return ONLY the bullet points, nothing else.
 from __future__ import annotations
 
 import re
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.skills.base import BaseSkill
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class PromptSkill(BaseSkill):
@@ -45,7 +47,7 @@ class PromptSkill(BaseSkill):
         self.name = name
         self.description = description
         self._system_prompt = system_prompt
-        # LLM client will be injected by the bot when needed
+        # LLM client will be injected via wire_llm() by the registry
         self._llm: Any = None
 
     @classmethod
@@ -64,7 +66,10 @@ class PromptSkill(BaseSkill):
         system_prompt = content
         return cls(name=name, description=description, system_prompt=system_prompt)
 
-    def set_llm(self, llm: Any) -> None:
+    def needs_llm(self) -> bool:
+        return True
+
+    def wire_llm(self, llm: Any) -> None:
         self._llm = llm
 
     async def execute(self, workspace_dir: Path, input: str = "", **kwargs: Any) -> str:
