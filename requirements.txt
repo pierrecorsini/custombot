@@ -82,7 +82,7 @@ multidict==6.7.1
     #   yarl
 neonize==0.3.17.post0
     # via custombot (pyproject.toml)
-openai==2.29.0
+openai==2.36.0
     # via custombot (pyproject.toml)
 opentelemetry-api==1.30.0
     # via
