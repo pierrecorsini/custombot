@@ -10,7 +10,7 @@ dependencies = [
     "click~=8.3.0",
     "rich~=14.3.0",
     "python-dotenv~=1.2.0",
-    "psutil~=6.0.0",
+    "psutil>=6.0,<7.3",
     "pyyaml~=6.0.0",
     # Pinned to exact versions — native deps with frequent breaking changes.
     # Bump manually and test thoroughly; not covered by Dependabot.
