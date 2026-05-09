@@ -24,10 +24,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from src.ui.cli_output import cli
 from src.health import check_llm_credentials
+from src.ui.cli_output import cli
 
 if TYPE_CHECKING:
     from src.config import Config
@@ -40,16 +40,16 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ValidationResult:
     """Result of validating a single channel."""
 
     channel: str  # "llm" or "whatsapp"
     success: bool
     message: str
-    details: dict = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
             "channel": self.channel,
@@ -196,8 +196,8 @@ async def _validate_whatsapp(config: "Config") -> ValidationResult:
             message=message,
             details={"db_path": str(db_path)},
         )
-    except OSError as e:
-        message = f"WhatsApp session db_path not writable: {e}"
+    except OSError as exc:
+        message = f"WhatsApp session db_path not writable: {exc}"
         cli.error(message)
         return ValidationResult(
             channel="whatsapp",
@@ -206,7 +206,7 @@ async def _validate_whatsapp(config: "Config") -> ValidationResult:
             details={
                 "hint": "Ensure the directory for db_path exists and is writable",
                 "db_path": str(db_path),
-                "error": str(e),
+                "error": str(exc),
             },
         )
 

@@ -20,6 +20,8 @@ venv/
 .env
 .pytest_cache/
 .ruff_cache/
+.benchmarks/
+.hypothesis/
 
 # IDE / OS
 .vscode/settings.json
@@ -29,3 +31,4 @@ nul
 
 # AI assistant context (internal, not for public repo)
 .opencode/
+.opencode

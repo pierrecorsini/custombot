@@ -9,23 +9,30 @@ structured schedule parameters.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.skills.base import BaseSkill, validate_input
+from src.utils.singleton import _singleton_registry, reset_singleton
 
-_scheduler_instance = None
+if TYPE_CHECKING:
+    from pathlib import Path
+
+_SCHEDULER_KEY = "_scheduler_instance"
 
 
 def _get_scheduler():
     """Return the global scheduler instance (set during startup)."""
-    return _scheduler_instance
+    return _singleton_registry.get(_SCHEDULER_KEY)
 
 
 def set_scheduler_instance(scheduler) -> None:
     """Set the global scheduler instance (called during startup)."""
-    global _scheduler_instance
-    _scheduler_instance = scheduler
+    _singleton_registry[_SCHEDULER_KEY] = scheduler
+
+
+def reset_scheduler_instance() -> None:
+    """Reset the scheduler instance (for testing)."""
+    _singleton_registry.pop(_SCHEDULER_KEY, None)
 
 
 class TaskSchedulerSkill(BaseSkill):
@@ -109,9 +116,7 @@ class TaskSchedulerSkill(BaseSkill):
         chat_id = workspace_dir.name
 
         actions = {
-            "create": lambda: self._create(
-                scheduler, chat_id, label, prompt, schedule, compare
-            ),
+            "create": lambda: self._create(scheduler, chat_id, label, prompt, schedule, compare),
             "list": lambda: self._list(scheduler, chat_id),
             "cancel": lambda: self._cancel(scheduler, chat_id, task_id),
             "status": lambda: self._status(scheduler, chat_id, task_id),
@@ -142,9 +147,7 @@ class TaskSchedulerSkill(BaseSkill):
 
         stype = schedule.get("type", "")
         if stype not in ("daily", "interval", "cron"):
-            return (
-                f"❌ Type de schedule invalide: {stype}. Utilise: daily, interval, cron"
-            )
+            return f"❌ Type de schedule invalide: {stype}. Utilise: daily, interval, cron"
 
         if stype in ("daily", "cron") and "hour" not in schedule:
             return "❌ 'hour' est requis pour les types daily et cron"

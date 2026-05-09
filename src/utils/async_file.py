@@ -8,6 +8,7 @@ preventing event loop blocking.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Union
 
@@ -34,9 +35,7 @@ async def async_read_text(path: PathLike, encoding: str = "utf-8") -> str:
     return await asyncio.to_thread(path.read_text, encoding=encoding)
 
 
-async def async_write_text(
-    path: PathLike, content: str, encoding: str = "utf-8"
-) -> int:
+async def async_write_text(path: PathLike, content: str, encoding: str = "utf-8") -> int:
     """
     Write text file asynchronously. Creates parent directories if needed.
 
@@ -62,9 +61,7 @@ async def async_write_text(
     return await asyncio.to_thread(_write)
 
 
-async def async_append_text(
-    path: PathLike, content: str, encoding: str = "utf-8"
-) -> int:
+async def async_append_text(path: PathLike, content: str, encoding: str = "utf-8") -> int:
     """
     Append text to file asynchronously. Creates file and parent dirs if needed.
 
@@ -121,3 +118,37 @@ async def async_exists(path: PathLike) -> bool:
     """
     path = Path(path)
     return await asyncio.to_thread(path.exists)
+
+
+def sync_atomic_write(
+    file_path: Path,
+    content: str,
+    encoding: str = "utf-8",
+) -> None:
+    """
+    Synchronous atomic write: write to temp file, then replace target.
+
+    Prevents corruption from partial writes or crashes mid-write.
+
+    Args:
+        file_path: Target file path.
+        content: Text content to write.
+        encoding: Text encoding (default: utf-8).
+
+    Raises:
+        OSError: If filesystem errors occur.
+    """
+    temp_file = file_path.with_suffix(".tmp")
+    # Write to temp file with explicit flush+fsync before atomic rename
+    # to guarantee durability even if the process crashes mid-write.
+    with temp_file.open("w", encoding=encoding) as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        temp_file.replace(file_path)
+    except PermissionError:
+        # Windows: target may be locked. Fallback: remove then rename.
+        if file_path.exists():
+            file_path.unlink()
+        temp_file.rename(file_path)

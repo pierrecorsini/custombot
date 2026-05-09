@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 DEFAULT_MAX_SYSTEM_PROMPT_LENGTH = 100_000
 
 
-@dataclass
+@dataclass(slots=True)
 class InjectionDetectionResult:
     """Result of prompt injection detection."""
 
@@ -47,7 +47,7 @@ class InjectionDetectionResult:
     matched_patterns: list[str] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class ContentFilterResult:
     """Result of response content filtering."""
 
@@ -189,12 +189,26 @@ _MEDIUM_CONFIDENCE_PATTERNS: list[tuple[str, str]] = [
 ]
 
 # Compiled regex patterns for efficiency
-_HIGH_CONFIDENCE_COMPILED = [
-    (re.compile(p), name) for p, name in _HIGH_CONFIDENCE_PATTERNS
-]
-_MEDIUM_CONFIDENCE_COMPILED = [
-    (re.compile(p), name) for p, name in _MEDIUM_CONFIDENCE_PATTERNS
-]
+_HIGH_CONFIDENCE_COMPILED = [(re.compile(p), name) for p, name in _HIGH_CONFIDENCE_PATTERNS]
+_MEDIUM_CONFIDENCE_COMPILED = [(re.compile(p), name) for p, name in _MEDIUM_CONFIDENCE_PATTERNS]
+
+# Combined single-pass patterns: all patterns OR'd together for one regex.search()
+# instead of iterating N patterns sequentially. Used by detect_injection().
+_HIGH_COMBINED = re.compile(
+    "(?i)"
+    + "|".join(
+        f"(?P<_{i}>{p.removeprefix('(?i)')})" for i, (p, _) in enumerate(_HIGH_CONFIDENCE_PATTERNS)
+    )
+)
+_MEDIUM_COMBINED = re.compile(
+    "(?i)"
+    + "|".join(
+        f"(?P<_{i}>{p.removeprefix('(?i)')})"
+        for i, (p, _) in enumerate(_MEDIUM_CONFIDENCE_PATTERNS)
+    )
+)
+_HIGH_NAMES = [name for _, name in _HIGH_CONFIDENCE_PATTERNS]
+_MEDIUM_NAMES = [name for _, name in _MEDIUM_CONFIDENCE_PATTERNS]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -202,7 +216,7 @@ _MEDIUM_CONFIDENCE_COMPILED = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 # API key patterns
-_API_KEY_PATTERNS: list[tuple[re.Pattern, str]] = [
+_API_KEY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"sk-[a-zA-Z0-9]{20,}"), "openai_api_key"),
     (re.compile(r"sk-proj-[a-zA-Z0-9_-]{20,}"), "openai_project_key"),
     (re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"), "anthropic_api_key"),
@@ -215,7 +229,7 @@ _API_KEY_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 # Secret patterns
-_SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"(?i)(?:password|passwd|pwd)\s*[:=]\s*['\"]?[^\s'\"]{8,}"),
         "password",
@@ -229,7 +243,7 @@ _SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 # PII patterns
-_PII_PATTERNS: list[tuple[re.Pattern, str]] = [
+_PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Credit card numbers (basic pattern)
     (re.compile(r"\b(?:\d{4}[-\s]?){3}\d{4}\b"), "credit_card"),
     # SSN pattern (US)
@@ -238,14 +252,81 @@ _PII_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b"), "email"),
 ]
 
+# Combined single-pass detection pattern for all redactable categories.
+# Maps named group index to category name for O(1) lookup.
+_REDACTABLE_ALL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    *_API_KEY_PATTERNS,
+    *_SECRET_PATTERNS,
+    *_PII_PATTERNS,
+]
+
+
+def _strip_flags(pat: str) -> str:
+    """Remove leading (?i) from a pattern so it can be embedded in an alternation."""
+    return pat.removeprefix("(?i)")
+
+
+# Build combined pattern with global (?i) flag at the start.
+# Individual patterns may have embedded (?i) which must be stripped
+# to avoid 'global flags not at the start' errors.
+_REDACTABLE_COMBINED = re.compile(
+    "(?i)"
+    + "|".join(
+        f"(?P<_r{i}>{_strip_flags(p.pattern)})" for i, (p, _) in enumerate(_REDACTABLE_ALL_PATTERNS)
+    )
+)
+_REDACTABLE_NAMES = [name for _, name in _REDACTABLE_ALL_PATTERNS]
+
 # Sensitive file extensions in content
-_SENSITIVE_FILE_PATTERNS: list[tuple[re.Pattern, str]] = [
+_SENSITIVE_FILE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)\.env\b"), "env_file"),
     (re.compile(r"(?i)\.pem\b"), "pem_file"),
     (re.compile(r"(?i)\.key\b"), "key_file"),
     (re.compile(r"(?i)\.p12\b"), "p12_file"),
     (re.compile(r"(?i)\.pfx\b"), "pfx_file"),
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-compiled sanitization patterns (module-level for reuse)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Role injection markers
+_ROLE_INJECTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?i)^system\s*:\s*", re.MULTILINE), "[blocked]: "),
+    (re.compile(r"(?i)^assistant\s*:\s*", re.MULTILINE), "[blocked]: "),
+    (re.compile(r"(?i)^user\s*:\s*", re.MULTILINE), "[blocked]: "),
+]
+
+# System tag patterns
+_SYSTEM_TAG_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?i)<\s*/?system\s*>"), ""),
+    (re.compile(r"(?i)\[/?system\]"), ""),
+]
+
+# Injection phrase replacements
+_INJECTION_REPLACEMENTS_COMPILED: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?i)ignore\s+previous\s+instructions?"), "[injection attempt removed]"),
+    (re.compile(r"(?i)ignore\s+all\s+previous"), "[injection attempt removed]"),
+    (re.compile(r"(?i)forget\s+previous\s+instructions?"), "[injection attempt removed]"),
+    (
+        re.compile(r"(?i)disregard\s+(all\s+)?previous\s+(instructions?|rules?)"),
+        "[injection attempt removed]",
+    ),
+    (re.compile(r"(?i)override\s+(your\s+)?instructions?"), "[injection attempt removed]"),
+    (
+        re.compile(r"(?i)you\s+are\s+now\s+(?:a\s+)?(?:DAN|unrestricted)"),
+        "[injection attempt removed]",
+    ),
+    (re.compile(r"(?i)jailbreak"), "[blocked keyword]"),
+    (re.compile(r"(?i)prompt\s+injection"), "[blocked keyword]"),
+]
+
+# Strict-mode patterns
+_STRICT_INSTRUCTION_PATTERN = re.compile(
+    r"(?i)^(?:note|important|warning|attention)\s*:\s*", re.MULTILINE
+)
+_STRICT_BLOCK_PATTERN = re.compile(r"(?i)---+\s*(?:system|instructions?)\s*---+")
 
 
 def detect_injection(text: str) -> InjectionDetectionResult:
@@ -262,6 +343,9 @@ def detect_injection(text: str) -> InjectionDetectionResult:
     Supports English, German, French, Spanish, Russian, Chinese,
     Portuguese, and Japanese injection patterns.
 
+    Applies NFKC Unicode normalization to prevent bypasses via confusable
+    characters (e.g., Cyrillic 'о' instead of Latin 'o').
+
     Args:
         text: The user message text to check.
 
@@ -271,20 +355,31 @@ def detect_injection(text: str) -> InjectionDetectionResult:
     if not text or not text.strip():
         return InjectionDetectionResult(detected=False)
 
+    # Normalize Unicode to catch confusable character bypasses
+    normalized = unicodedata.normalize("NFKC", text)
+
     matched: list[str] = []
     max_confidence = 0.0
 
-    # Check high-confidence patterns (confidence = 0.9)
-    for pattern, name in _HIGH_CONFIDENCE_COMPILED:
-        if pattern.search(text):
-            matched.append(name)
-            max_confidence = max(max_confidence, 0.9)
+    # Single-pass scan using combined alternation regex (much faster than
+    # iterating N patterns sequentially — one regex engine pass per tier).
+    # Uses m.lastgroup for O(1) lookup instead of iterating all groups.
+    # Named groups are "_0", "_1", etc. — extract the index to find the name.
+    m = _HIGH_COMBINED.search(normalized)
+    if m and m.lastgroup:
+        idx_str = m.lastgroup.lstrip("_")
+        idx = int(idx_str) if idx_str.isdigit() else -1
+        if 0 <= idx < len(_HIGH_NAMES):
+            matched.append(_HIGH_NAMES[idx])
+        max_confidence = 0.9
 
-    # Check medium-confidence patterns (confidence = 0.6)
-    for pattern, name in _MEDIUM_CONFIDENCE_COMPILED:
-        if pattern.search(text):
-            matched.append(name)
-            max_confidence = max(max_confidence, 0.6)
+    m = _MEDIUM_COMBINED.search(normalized)
+    if m and m.lastgroup:
+        idx_str = m.lastgroup.lstrip("_")
+        idx = int(idx_str) if idx_str.isdigit() else -1
+        if 0 <= idx < len(_MEDIUM_NAMES):
+            matched.append(_MEDIUM_NAMES[idx])
+        max_confidence = max(max_confidence, 0.6)
 
     if matched:
         reason = f"Matched {len(matched)} injection pattern(s): {', '.join(matched)}"
@@ -321,43 +416,25 @@ def sanitize_user_input(text: str, *, strict: bool = False) -> str:
     if not text or not text.strip():
         return text or ""
 
-    result = text
+    # Normalize Unicode to catch confusable character bypasses
+    result = unicodedata.normalize("NFKC", text)
 
-    # Remove role injection markers
-    result = re.sub(r"(?i)^system\s*:\s*", "[blocked]: ", result, flags=re.MULTILINE)
-    result = re.sub(r"(?i)^assistant\s*:\s*", "[blocked]: ", result, flags=re.MULTILINE)
-    result = re.sub(r"(?i)^user\s*:\s*", "[blocked]: ", result, flags=re.MULTILINE)
+    # Remove role injection markers (pre-compiled patterns)
+    for pattern, replacement in _ROLE_INJECTION_PATTERNS:
+        result = pattern.sub(replacement, result)
 
-    # Remove system tag injections
-    result = re.sub(r"(?i)<\s*/?system\s*>", "", result)
-    result = re.sub(r"(?i)\[/?system\]", "", result)
+    # Remove system tag injections (pre-compiled patterns)
+    for pattern, replacement in _SYSTEM_TAG_PATTERNS:
+        result = pattern.sub(replacement, result)
 
-    # Escape common injection phrases (replace with safe alternatives)
-    injection_replacements = {
-        r"(?i)ignore\s+previous\s+instructions?": "[injection attempt removed]",
-        r"(?i)ignore\s+all\s+previous": "[injection attempt removed]",
-        r"(?i)forget\s+previous\s+instructions?": "[injection attempt removed]",
-        r"(?i)disregard\s+(all\s+)?previous\s+(instructions?|rules?)": "[injection attempt removed]",
-        r"(?i)override\s+(your\s+)?instructions?": "[injection attempt removed]",
-        r"(?i)you\s+are\s+now\s+(?:a\s+)?(?:DAN|unrestricted)": "[injection attempt removed]",
-        r"(?i)jailbreak": "[blocked keyword]",
-        r"(?i)prompt\s+injection": "[blocked keyword]",
-    }
-
-    for pattern, replacement in injection_replacements.items():
-        result = re.sub(pattern, replacement, result)
+    # Escape common injection phrases (pre-compiled patterns)
+    for pattern, replacement in _INJECTION_REPLACEMENTS_COMPILED:
+        result = pattern.sub(replacement, result)
 
     # Strict mode: additional sanitization
     if strict:
-        # Remove any remaining instruction-like patterns
-        result = re.sub(
-            r"(?i)^(?:note|important|warning|attention)\s*:\s*",
-            "",
-            result,
-            flags=re.MULTILINE,
-        )
-        # Remove potential multi-line instruction blocks
-        result = re.sub(r"(?i)---+\s*(?:system|instructions?)\s*---+", "", result)
+        result = _STRICT_INSTRUCTION_PATTERN.sub("", result)
+        result = _STRICT_BLOCK_PATTERN.sub("", result)
 
     return result
 
@@ -390,14 +467,18 @@ def check_system_prompt_length(
     return length <= max_length, length
 
 
-def filter_response_content(
-    content: str, *, redact: bool = True
-) -> ContentFilterResult:
+def filter_response_content(content: str, *, redact: bool = True) -> ContentFilterResult:
     """
     Filter outgoing LLM responses for sensitive content.
 
     Detects PII, API keys, secrets, and other sensitive data in
     responses. Optionally redacts the sensitive portions.
+
+    Optimisation strategy:
+    - ``redact=True``  — sequential per-pattern ``subn()`` (required for
+      per-category replacement strings).
+    - ``redact=False`` — single-pass scan via ``_REDACTABLE_COMBINED``
+      alternation regex, turning O(n × m) into O(n).
 
     Args:
         content: The LLM response text to check.
@@ -409,55 +490,43 @@ def filter_response_content(
     if not content or not content.strip():
         return ContentFilterResult(flagged=False, sanitized_content=content or "")
 
-    categories: list[str] = []
+    categories: set[str] = set()
     result = content
 
-    # Phase 1: Detect all patterns BEFORE any redaction (preserves original text for matching)
-    all_patterns: list[tuple[re.Pattern, str]] = [
-        *_API_KEY_PATTERNS,
-        *_SECRET_PATTERNS,
-        *_PII_PATTERNS,
-        *_SENSITIVE_FILE_PATTERNS,
-    ]
+    if redact:
+        # Redaction must run per-pattern for proper replacement text.
+        # Pattern order matters: _API_KEY_PATTERNS first (most specific),
+        # then _SECRET_PATTERNS, then _PII_PATTERNS.
+        for pattern, category in _REDACTABLE_ALL_PATTERNS:
+            new_result, count = pattern.subn(f"[REDACTED_{category.upper()}]", result)
+            if count > 0:
+                categories.add(category)
+                result = new_result
+    else:
+        # Detection-only: single-pass scan via combined alternation regex.
+        for m in _REDACTABLE_COMBINED.finditer(result):
+            if m.lastgroup:
+                idx_str = m.lastgroup.lstrip("_r")
+                idx = int(idx_str) if idx_str.isdigit() else -1
+                if 0 <= idx < len(_REDACTABLE_NAMES):
+                    categories.add(_REDACTABLE_NAMES[idx])
 
-    for pattern, category in all_patterns:
+    # Detection-only scan for sensitive file extensions (no redaction needed)
+    for pattern, category in _SENSITIVE_FILE_PATTERNS:
         if pattern.search(result):
-            categories.append(category)
-
-    # Deduplicate categories
-    seen: set[str] = set()
-    unique_categories: list[str] = []
-    for cat in categories:
-        if cat not in seen:
-            seen.add(cat)
-            unique_categories.append(cat)
-    categories = unique_categories
-
-    # Phase 2: Redact flagged content (only if redact=True)
-    if redact and categories:
-        # Reset result to original for redaction pass
-        result = content
-        for pattern, category in _API_KEY_PATTERNS:
-            if category in categories:
-                result = pattern.sub(f"[REDACTED_{category.upper()}]", result)
-        for pattern, category in _SECRET_PATTERNS:
-            if category in categories:
-                result = pattern.sub(f"[REDACTED_{category.upper()}]", result)
-        for pattern, category in _PII_PATTERNS:
-            if category in categories:
-                result = pattern.sub(f"[REDACTED_{category.upper()}]", result)
+            categories.add(category)
 
     if categories:
         log.warning(
             "Response content filter flagged %d categories: %s",
             len(categories),
-            categories,
-            extra={"filter_categories": categories},
+            sorted(categories),
+            extra={"filter_categories": sorted(categories)},
         )
 
     return ContentFilterResult(
-        flagged=len(categories) > 0,
-        categories=categories,
+        flagged=bool(categories),
+        categories=sorted(categories),
         sanitized_content=result,
     )
 

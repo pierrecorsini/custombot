@@ -1,7 +1,7 @@
 """
 src/monitoring/__init__.py — Memory monitoring and performance metrics.
 
-This package provides two separate concerns:
+This package provides several concerns:
 
 1. Memory Monitoring (memory.py):
    - Periodic memory usage tracking
@@ -14,9 +14,14 @@ This package provides two separate concerns:
    - Skill execution time
    - Database operation times
 
+3. OpenTelemetry Metrics (otel_metrics.py):
+   - Counters, histograms, and gauges for key application metrics
+   - No-op fallback when opentelemetry-api is not installed
+
 Usage:
     from src.monitoring import MemoryMonitor, get_memory_stats
     from src.monitoring import PerformanceMetrics, get_metrics_collector
+    from src.monitoring import ApplicationMetrics, get_otel_metrics
 
     # Create monitor with threshold
     monitor = MemoryMonitor(warning_threshold_percent=80.0)
@@ -34,51 +39,179 @@ Usage:
     metrics.track_message_latency(1.5)  # 1.5 seconds
     metrics.track_llm_latency(2.3)      # 2.3 seconds
     metrics.track_skill_time("bash", 0.8)
+
+    # Track OpenTelemetry metrics
+    otel = get_otel_metrics()
+    otel.llm_requests.add(1, {"model": "gpt-4o"})
+    otel.message_latency.record(1.5, {"chat_id": "123"})
 """
 
 from __future__ import annotations
 
 # Memory monitoring exports
 from src.monitoring.memory import (
-    MemoryStats,
-    MemoryMonitor,
-    get_memory_stats,
-    get_global_monitor,
-    check_memory_health,
-    DEFAULT_MEMORY_WARNING_THRESHOLD,
     DEFAULT_MEMORY_CHECK_INTERVAL,
+    DEFAULT_MEMORY_WARNING_THRESHOLD,
+    MemoryMonitor,
+    MemoryStats,
+    NullMemoryMonitor,
+    check_memory_health,
+    get_global_monitor,
+    get_memory_stats,
+    reset_global_monitor,
 )
 
-# Performance metrics exports
-from src.monitoring.performance import (
+# Workspace monitor exports
+from src.monitoring.workspace_monitor import (
+    WorkspaceMonitor,
+    WorkspaceStats,
+    check_workspace_health,
+    get_global_workspace_monitor,
+    reset_global_workspace_monitor,
+)
+
+# Tracing exports
+from src.monitoring.tracing import (
+    Span,
+    context_assembly_span,
+    db_guarded_write_span,
+    db_retry_attempt_span,
+    get_tracer,
+    get_tracing_status,
+    is_tracing_available,
+    llm_call_span,
+    message_pipeline_span,
+    react_loop_span,
+    record_exception_safe,
+    reset_tracer,
+    set_correlation_id_on_span,
+    skill_execution_span,
+    tool_calls_span,
+)
+
+# Metrics type exports (data models and statistical helpers)
+from src.monitoring.metrics_types import (
+    ChatConversationDepth,
+    ChatMessageCount,
+    DedupSnapshotStats,
+    ErrorWindowStats,
+    LatencyHistogram,
     LatencyStats,
+    OversizedArgsSizeStats,
     PerformanceSnapshot,
-    PerformanceMetrics,
-    _calculate_latency_stats,
-    get_metrics_collector,
-    check_performance_health,
+    SessionMetrics,
+    SkillMetrics,
+    SkillTimeoutRatio,
+    calculate_latency_stats,
+    calculate_timeout_ratio,
+    percentile,
+)
+
+# Performance metrics exports (collector, singleton, health check)
+from src.monitoring.performance import (
+    DEFAULT_ERROR_ALERT_THRESHOLDS,
+    DEFAULT_METRICS_LOG_INTERVAL,
+    DEFAULT_MAX_TRACKED_CHATS,
+    DEFAULT_TOP_CHATS,
+    ERROR_ALERT_COOLDOWN_SECONDS,
     METRICS_HISTORY_SIZE,
     METRICS_SUMMARY_INTERVAL,
-    DEFAULT_METRICS_LOG_INTERVAL,
+    PerformanceMetrics,
+    check_performance_health,
+    get_metrics_collector,
+    reset_metrics_collector,
+)
+
+# OpenTelemetry metrics exports (counters, histograms, gauges)
+from src.monitoring.otel_metrics import (
+    ApplicationMetrics,
+    get_metrics as get_otel_metrics,
+    get_meter,
+    reset_metrics as reset_otel_metrics,
+)
+
+# Conversation quality metrics exports
+from src.monitoring.quality_metrics import (
+    ConversationQualityMetrics,
+    QualityStats,
+)
+
+# LLM latency anomaly detector exports
+from src.monitoring.anomaly_detector import (
+    AnomalyStats,
+    LatencyAnomalyDetector,
 )
 
 __all__ = [
     # Memory monitoring
     "MemoryStats",
     "MemoryMonitor",
+    "NullMemoryMonitor",
     "get_memory_stats",
     "get_global_monitor",
+    "reset_global_monitor",
     "check_memory_health",
     "DEFAULT_MEMORY_WARNING_THRESHOLD",
     "DEFAULT_MEMORY_CHECK_INTERVAL",
-    # Performance metrics
+    # Metrics types (data models and statistical helpers)
+    "ChatConversationDepth",
+    "ChatMessageCount",
+    "ErrorWindowStats",
+    "LatencyHistogram",
     "LatencyStats",
+    "OversizedArgsSizeStats",
     "PerformanceSnapshot",
+    "SessionMetrics",
+    "SkillMetrics",
+    "SkillTimeoutRatio",
+    "calculate_latency_stats",
+    "calculate_timeout_ratio",
+    "percentile",
+    # Performance metrics (collector, singleton, health check)
     "PerformanceMetrics",
-    "_calculate_latency_stats",
     "get_metrics_collector",
+    "reset_metrics_collector",
     "check_performance_health",
     "METRICS_HISTORY_SIZE",
     "METRICS_SUMMARY_INTERVAL",
     "DEFAULT_METRICS_LOG_INTERVAL",
+    "DEFAULT_MAX_TRACKED_CHATS",
+    "DEFAULT_TOP_CHATS",
+    "DEFAULT_ERROR_ALERT_THRESHOLDS",
+    "ERROR_ALERT_COOLDOWN_SECONDS",
+    # Workspace monitor
+    "WorkspaceStats",
+    "WorkspaceMonitor",
+    "check_workspace_health",
+    "get_global_workspace_monitor",
+    "reset_global_workspace_monitor",
+    # Tracing
+    "Span",
+    "db_guarded_write_span",
+    "db_retry_attempt_span",
+    "get_tracer",
+    "get_tracing_status",
+    "is_tracing_available",
+    "reset_tracer",
+    "message_pipeline_span",
+    "react_loop_span",
+    "llm_call_span",
+    "skill_execution_span",
+    "tool_calls_span",
+    "context_assembly_span",
+    "set_correlation_id_on_span",
+    "record_exception_safe",
+    # OpenTelemetry metrics
+    "ApplicationMetrics",
+    "get_otel_metrics",
+    "get_meter",
+    "reset_otel_metrics",
+    # Conversation quality metrics
+    "ConversationQualityMetrics",
+    "QualityStats",
+    # LLM latency anomaly detector
+    "AnomalyStats",
+    "LatencyAnomalyDetector",
+    # Metrics types additions
+    "DedupSnapshotStats",
 ]

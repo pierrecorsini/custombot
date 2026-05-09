@@ -12,14 +12,16 @@ for dependency injection and not-found checks.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
-from src.skills.base import BaseSkill, validate_input
-from src.project.store import ProjectStore
-from src.project.graph import ProjectGraph
-from src.project.recall import ProjectRecall
 from src.project.dates import fmt_ts
+from src.skills.base import BaseSkill, validate_input
+
+if TYPE_CHECKING:
+    from src.project.graph import ProjectGraph
+    from src.project.store import ProjectStore
+    from src.project.recall import ProjectRecall
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -248,8 +250,8 @@ class ProjectUpdateSkill(_ProjectSkillBase):
                 status=kwargs.get("status"),
                 tags=kwargs.get("tags"),
             )
-        except ValueError as e:
-            return str(e)
+        except ValueError as exc:
+            return str(exc)
         if not updated:
             return f"Project '{pid}' not found."
         return f"Updated project '{updated['name']}' (status: {updated['status']})"
@@ -346,8 +348,8 @@ class KnowledgeAddSkill(_KnowledgeSkillBase):
                 link_to=link_to,
                 link_relation=link_relation,
             )
-        except ValueError as e:
-            return str(e)
+        except ValueError as exc:
+            return str(exc)
 
         link_str = ""
         if link_to:
@@ -467,8 +469,8 @@ class KnowledgeLinkSkill(_ProjectSkillBase):
 
         try:
             link_id = self._store.link_knowledge(from_id, to_id, relation)
-        except ValueError as e:
-            return str(e)
+        except ValueError as exc:
+            return str(exc)
 
         if link_id is None:
             return "Link already exists between those entries."
@@ -519,10 +521,7 @@ class KnowledgeListSkill(_ProjectSkillBase):
         ]
         for e in entries:
             title = e.get("title") or e["text"][:60]
-            lines.append(
-                f"- [id:{e['id']}] [{e['category']}] {title}\n"
-                f"  {fmt_ts(e['created_at'])}"
-            )
+            lines.append(f"- [id:{e['id']}] [{e['category']}] {title}\n  {fmt_ts(e['created_at'])}")
             if e.get("title"):
                 lines.append(f"  {e['text'][:150]}")
         return "\n".join(lines)

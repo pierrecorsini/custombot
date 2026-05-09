@@ -1,0 +1,78 @@
+# Runtime data
+workspace/
+.workspace/
+.data/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+.tox/
+
+# AI assistant context
+.opencode/
+.agents/
+.claude/
+
+# Temporary / session files
+.tmp/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+nul
+=6.100.0
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Documentation / planning
+README.md
+PLAN.md
+*.md
+
+# CI
+.github/
+
+# Config (mounted at runtime, not baked into image)
+config.json
+config.example.json
+
+# Pre-commit
+.pre-commit-config.yaml
+
+# Neonize WhatsApp session database
+*.db
+
+# Misc build artifacts that shouldn't be in the image
+h24loop.sh
+opencode.json
+pytest.ini
+
+# Test suite
+tests/
+conftest.py
+
+# Dev tooling config
+pyproject.toml
+
+# Environment files
+.env

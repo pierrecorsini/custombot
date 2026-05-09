@@ -131,7 +131,7 @@ def log_execution(
                     )
                     raise
 
-            return cast(F, async_wrapper)
+            return cast("F", async_wrapper)
         else:
 
             @functools.wraps(func)
@@ -181,7 +181,7 @@ def log_execution(
                     )
                     raise
 
-            return cast(F, sync_wrapper)
+            return cast("F", sync_wrapper)
 
     return decorator
 

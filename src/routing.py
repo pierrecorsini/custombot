@@ -7,20 +7,88 @@ routing rules embedded as YAML frontmatter in .md instruction files.
 The engine scans ``workspace/instructions/*.md``, parses the ``routing``
 key from each file's frontmatter, and builds an in-memory rule table.
 Messages are matched against rules in priority order (lower = first).
+
+File-change detection uses OS-native watching (watchdog / inotify /
+ReadDirectoryChanges) when available, with automatic fallback to
+debounced mtime polling.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from src.channels.base import IncomingMessage
-from src.utils.frontmatter import extract_routing_rules, parse_file
+import xxhash
+
+from src.constants import (
+    ROUTING_FRONTMATTER_CACHE_MAX_SIZE,
+    ROUTING_MATCH_CACHE_MAX_SIZE,
+    ROUTING_MATCH_CACHE_TTL_SECONDS,
+    ROUTING_RETRY_SLEEP_BUDGET_SECONDS,
+    ROUTING_WATCH_DEBOUNCE_SECONDS,
+)
+from src.utils import BoundedOrderedDict, LRUDict
+from src.utils.frontmatter import ParsedFile, extract_routing_rules, parse_file
+
+if TYPE_CHECKING:
+    from src.channels.base import ChannelType, IncomingMessage
+
+# Optional watchdog import — graceful degradation when not installed.
+_HAS_WATCHDOG = False
+try:
+    from watchdog.events import FileSystemEventHandler, FileMovedEvent
+    from watchdog.observers import Observer
+
+    _HAS_WATCHDOG = True
+except ImportError:
+    pass
 
 log = logging.getLogger(__name__)
+
+
+def _track_routing_cache_event(hit: bool) -> None:
+    """Report a routing match cache hit or miss to the performance metrics collector."""
+    try:
+        from src.monitoring.performance import get_metrics_collector
+
+        if hit:
+            get_metrics_collector().track_routing_cache_hit()
+        else:
+            get_metrics_collector().track_routing_cache_miss()
+    except Exception:
+        pass  # Metrics tracking must never break routing
+
+
+def _track_routing_latency(
+    duration_seconds: float, matched: bool, rule_count: int
+) -> None:
+    """Report routing match latency to the performance metrics collector."""
+    try:
+        from src.monitoring.performance import get_metrics_collector
+
+        get_metrics_collector().track_routing_latency(
+            duration_seconds, matched, rule_count
+        )
+    except Exception:
+        pass  # Metrics tracking must never break routing
+
+    try:
+        from src.monitoring.otel_metrics import get_metrics
+
+        otel = get_metrics()
+        otel.routing_latency.record(duration_seconds, {"matched": str(matched)})
+        if matched:
+            otel.routing_matches.add(1)
+        else:
+            otel.routing_misses.add(1)
+    except Exception:
+        pass
 
 
 @dataclass(slots=True, frozen=True)
@@ -46,7 +114,7 @@ class MatchingContext:
 
     sender_id: str
     chat_id: str
-    channel_type: str
+    channel_type: ChannelType | str
     text: str
     fromMe: bool = False
     toMe: bool = False
@@ -106,13 +174,14 @@ def _match_compiled(compiled: Optional[re.Pattern], pattern: str, value: str) ->
     return pattern == value
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class RoutingRule:
     """
-    Immutable routing rule that matches messages and maps to an instruction file.
+    Routing rule that matches messages and maps to an instruction file.
 
-    Frozen dataclass: cannot be modified after creation. Enables use as
-    dict keys and in sets. Thread-safe by design.
+    All regex patterns are compiled eagerly in ``__post_init__`` so the
+    instance is fully initialised after construction — no lazy compilation
+    or frozen-dataclass workarounds needed.
 
     Uses slots=True for memory efficiency when many routing rules are loaded.
     Reduces memory footprint per rule instance and speeds up attribute access.
@@ -147,36 +216,29 @@ class RoutingRule:
     toMe: Optional[bool] = None
     skillExecVerbose: str = ""
     showErrors: bool = True
-    # Pre-compiled regex patterns (computed once at construction)
-    _compiled_sender: Optional[re.Pattern] = field(
-        default=None, repr=False, compare=False
-    )
-    _compiled_recipient: Optional[re.Pattern] = field(
-        default=None, repr=False, compare=False
-    )
-    _compiled_channel: Optional[re.Pattern] = field(
-        default=None, repr=False, compare=False
-    )
-    _compiled_content: Optional[re.Pattern] = field(
-        default=None, repr=False, compare=False
-    )
+    # Pre-compiled regex patterns (computed eagerly in __post_init__)
+    _compiled_sender: Optional[re.Pattern] = field(init=False, default=None, repr=False, compare=False)
+    _compiled_recipient: Optional[re.Pattern] = field(init=False, default=None, repr=False, compare=False)
+    _compiled_channel: Optional[re.Pattern] = field(init=False, default=None, repr=False, compare=False)
+    _compiled_content: Optional[re.Pattern] = field(init=False, default=None, repr=False, compare=False)
+    # Pre-computed flag: True when all four match patterns are "*"
+    _is_wildcard: bool = field(init=False, default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        # frozen=True requires object.__setattr__ to modify fields
-        object.__setattr__(self, "_compiled_sender", _compile_pattern(self.sender))
-        object.__setattr__(
-            self, "_compiled_recipient", _compile_pattern(self.recipient)
+        self._is_wildcard = (
+            self.sender == "*"
+            and self.recipient == "*"
+            and self.channel == "*"
+            and self.content_regex == "*"
         )
-        object.__setattr__(self, "_compiled_channel", _compile_pattern(self.channel))
-        object.__setattr__(
-            self, "_compiled_content", _compile_pattern(self.content_regex)
-        )
+        self._compiled_sender = _compile_pattern(self.sender)
+        self._compiled_recipient = _compile_pattern(self.recipient)
+        self._compiled_channel = _compile_pattern(self.channel)
+        self._compiled_content = _compile_pattern(self.content_regex)
 
     def __repr__(self) -> str:
         regex_preview = (
-            self.content_regex[:20] + "..."
-            if len(self.content_regex) > 20
-            else self.content_regex
+            self.content_regex[:20] + "..." if len(self.content_regex) > 20 else self.content_regex
         )
         status = "ON" if self.enabled else "OFF"
         return (
@@ -210,6 +272,30 @@ def _rule_from_dict(rule_dict: Dict[str, Any], filename: str) -> RoutingRule:
     )
 
 
+def _merge_priority_sorted(
+    a: list[RoutingRule],
+    b: list[RoutingRule],
+) -> list[RoutingRule]:
+    """Merge two pre-sorted rule lists preserving priority order.
+
+    Both input lists must already be sorted by ``priority`` ascending.
+    Returns a merged list in priority order.  Uses a two-pointer merge
+    (O(n+m)) instead of concatenation + sort (O((n+m) log(n+m))).
+    """
+    result: list[RoutingRule] = []
+    i = j = 0
+    while i < len(a) and j < len(b):
+        if a[i].priority <= b[j].priority:
+            result.append(a[i])
+            i += 1
+        else:
+            result.append(b[j])
+            j += 1
+    result.extend(a[i:])
+    result.extend(b[j:])
+    return result
+
+
 class RoutingEngine:
     """
     Engine for matching incoming messages to routing rules.
@@ -218,31 +304,269 @@ class RoutingEngine:
     frontmatter containing a ``routing`` key. The engine loads all
     rules into memory and evaluates them in priority order.
 
+    The engine auto-reloads rules when instruction files change on disk.
+    When *watchdog* is available (default), an OS-native file watcher
+    provides instant change detection with zero polling overhead.
+    When watchdog is not installed, a debounced mtime check runs before
+    each match as a fallback.
+
     The engine no longer depends on the Database for rule storage.
     Instead, it scans the instructions directory directly.
     """
 
-    def __init__(self, instructions_dir: str | Path) -> None:
+    def __init__(
+        self,
+        instructions_dir: str | Path,
+        *,
+        use_watchdog: bool = True,
+    ) -> None:
         """
         Initialize the routing engine.
 
         Args:
             instructions_dir: Path to the directory containing .md instruction files.
+            use_watchdog: When True and watchdog is installed, use OS-native file
+                watching for instant change detection. When False (or watchdog is
+                unavailable), fall back to debounced mtime polling.
         """
         self._instructions_dir = Path(instructions_dir)
-        self._rules: List[RoutingRule] = []
+        self._rules_list: List[RoutingRule] = []
+        self._file_mtimes: dict[str, float] = {}
+        self._last_stale_check: float = 0.0
+        # Pre-grouped rule index for faster matching.  Populated in
+        # load_rules() when the rule list changes.  Keyed by channel
+        # pattern — most messages target a single channel, so this
+        # reduces the evaluation set by ~75% for typical multi-channel
+        # rule sets.
+        self._rules_by_channel: dict[str, list[RoutingRule]] = {}
+        self._wildcard_rules: list[RoutingRule] = []
+        self._regex_channel_rules: list[RoutingRule] = []
+        # Pre-computed merged candidate lists per channel (built once on
+        # rebuild, avoiding per-message list allocation in match_with_rule).
+        self._candidates_by_channel: dict[str, list[RoutingRule]] = {}
+        self._default_candidates: list[RoutingRule] = []
+        # Single-rule fast-path reference: when only one rule exists the
+        # engine skips cache-key hashing, dict lookups, and list iteration
+        # entirely and evaluates the rule directly.
+        self._single_rule: RoutingRule | None = None
+        # Pooled xxhash instance for cache-key computation — avoids per-call
+        # object allocation on the hot path (mirrors DeduplicationService pattern).
+        self._cache_hasher = xxhash.xxh64()
+
+        # TTL-bounded LRU cache for match results (delegated to BoundedOrderedDict).
+        # Key: (fromMe, toMe, sender_id, chat_id, channel_type, text[:100])
+        # Value: (rule | None, instruction | None)
+        self._match_cache: BoundedOrderedDict[Tuple, Tuple] = BoundedOrderedDict(
+            max_size=ROUTING_MATCH_CACHE_MAX_SIZE,
+            eviction="half",
+            ttl=ROUTING_MATCH_CACHE_TTL_SECONDS,
+        )
+
+        # Parsed-frontmatter cache keyed by filename.  Stores (mtime, size, ParsedFile)
+        # so that unchanged .md files skip YAML re-parsing during hot-reload.
+        self._frontmatter_cache: LRUDict[str, tuple[float, int, Any]] = LRUDict(
+            max_size=ROUTING_FRONTMATTER_CACHE_MAX_SIZE,
+        )
+
+        # Watchdog-based file watching
+        self._use_watchdog: bool = use_watchdog and _HAS_WATCHDOG
+        self._dirty: bool = False
+        self._observer: Optional[Observer] = None  # type: ignore[name-defined]
+
+    # ── Watchdog file-watching helpers ─────────────────────────────────────
+
+    def _mark_dirty(self) -> None:
+        """Mark instruction files as changed (called from watchdog observer thread)."""
+        self._dirty = True
+
+    def _start_watcher(self) -> None:
+        """Start the OS-native file watcher for the instructions directory."""
+        if not self._use_watchdog or self._observer is not None:
+            return
+        if not self._instructions_dir.is_dir():
+            return
+
+        try:
+            handler = _RoutingFileEventHandler(self)
+            observer = Observer()  # type: ignore[name-defined]
+            observer.schedule(handler, str(self._instructions_dir), recursive=False)
+            observer.daemon = True
+            observer.start()
+            self._observer = observer
+            log.debug("Watchdog observer started for %s", self._instructions_dir)
+        except Exception as exc:
+            log.warning(
+                "Failed to start watchdog observer for %s, falling back to polling: %s",
+                self._instructions_dir,
+                exc,
+            )
+            self._observer = None
+            self._use_watchdog = False
+
+    def _stop_watcher(self) -> None:
+        """Stop the file watcher if running."""
+        if self._observer is not None:
+            try:
+                self._observer.stop()
+                self._observer.join(timeout=2.0)
+            except Exception:
+                pass
+            self._observer = None
+
+    def close(self) -> None:
+        """Stop the file watcher and release resources."""
+        self._stop_watcher()
+
+    @property
+    def _rules(self) -> List[RoutingRule]:
+        """Internal rules list (backed by _rules_list)."""
+        return self._rules_list
+
+    @_rules.setter
+    def _rules(self, value: List[RoutingRule]) -> None:
+        """Set rules, rebuild the channel index, and invalidate the match cache.
+
+        The frontmatter cache is intentionally NOT cleared here — it is
+        keyed by (mtime, size) so unchanged files naturally remain cached.
+        Entries are evicted by the LRU policy or refreshed when their
+        mtime/size changes on the next load_rules() call.
+        """
+        self._rules_list = value
+        self._single_rule = value[0] if len(value) == 1 else None
+        self._match_cache.clear()
+        self._rebuild_channel_index(value)
 
     @property
     def rules(self) -> List[RoutingRule]:
         """Read-only access to loaded routing rules."""
-        return self._rules
+        return self._rules_list
+
+    @property
+    def has_rules(self) -> bool:
+        """Whether any routing rules are currently loaded."""
+        return len(self._rules_list) > 0
 
     @property
     def instructions_dir(self) -> Path:
         """Read-only access to the instructions directory."""
         return self._instructions_dir
 
-    def load_rules(self) -> None:
+    def _rebuild_channel_index(self, rules: list[RoutingRule]) -> None:
+        """Pre-group rules by channel pattern for faster matching.
+
+        Builds three structures:
+        - ``_rules_by_channel``: maps specific channel strings to their
+          matching rules (e.g., ``{"whatsapp": [rule1, rule3]}``).
+        - ``_wildcard_rules``: rules with ``channel="*"`` that match all
+          channels — always evaluated.
+        - ``_regex_channel_rules``: rules whose channel is a non-wildcard
+          regex pattern (e.g., ``"te.*"``) — always evaluated alongside
+          wildcard rules since they can match any channel string.
+
+        Rules remain sorted by priority within each group.
+        """
+        by_channel: dict[str, list[RoutingRule]] = {}
+        wildcard: list[RoutingRule] = []
+        regex_channel: list[RoutingRule] = []
+        for rule in rules:
+            if rule.channel == "*":
+                wildcard.append(rule)
+            elif _compile_pattern(rule.channel) is not None:
+                # Regex channel pattern — must be evaluated for every message
+                regex_channel.append(rule)
+            else:
+                by_channel.setdefault(rule.channel, []).append(rule)
+        self._rules_by_channel = by_channel
+        self._wildcard_rules = wildcard
+        self._regex_channel_rules = regex_channel
+        # Pre-compute merged candidate lists so match_with_rule() can
+        # do a single dict lookup instead of two _merge_priority_sorted
+        # calls per message.
+        self._candidates_by_channel = {
+            channel: _merge_priority_sorted(
+                _merge_priority_sorted(rules, wildcard),
+                regex_channel,
+            )
+            for channel, rules in by_channel.items()
+        }
+        # Default candidates for channels not present in the index
+        # (wildcard + regex-channel rules only).
+        self._default_candidates = _merge_priority_sorted(wildcard, regex_channel)
+
+    def _scan_file_mtimes(self) -> dict[str, float]:
+        """Collect current mtimes for all .md files in the instructions directory.
+
+        Uses ``os.scandir()`` instead of ``glob()`` for lower overhead:
+        DirEntry objects cache stat results and avoid pattern-matching cost.
+        """
+        mtimes: dict[str, float] = {}
+        if self._instructions_dir.is_dir():
+            try:
+                with os.scandir(self._instructions_dir) as entries:
+                    for entry in entries:
+                        if entry.is_symlink():
+                            log.warning(
+                                "Skipping symlink in instructions directory: %s",
+                                entry.name,
+                            )
+                            continue
+                        if entry.is_file() and entry.name.endswith(".md"):
+                            try:
+                                mtimes[entry.name] = entry.stat().st_mtime
+                            except OSError:
+                                pass
+            except OSError:
+                # Directory may have been removed
+                pass
+        return mtimes
+
+    def _cached_parse(self, path: Path) -> ParsedFile:
+        """Parse a file with mtime+size-based frontmatter caching.
+
+        Returns the cached ``ParsedFile`` when the file's mtime and size
+        match the cache entry, avoiding redundant YAML parsing.  On miss,
+        calls ``parse_file()`` and stores the result.
+        """
+        filename = path.name
+        try:
+            stat = path.stat()
+            mtime = stat.st_mtime
+            size = stat.st_size
+        except OSError:
+            return parse_file(path)
+
+        cached = self._frontmatter_cache.get(filename)
+        if cached is not None and cached[0] == mtime and cached[1] == size:
+            parsed = cached[2]
+            # Ensure source path points to the current file
+            parsed.source = path
+            return parsed
+
+        parsed = parse_file(path)
+        self._frontmatter_cache[filename] = (mtime, size, parsed)
+        return parsed
+
+    def _is_stale(self) -> bool:
+        """Check whether instruction files have changed since last load.
+
+        When watchdog is active, returns the ``_dirty`` flag set by the
+        OS-native file watcher — instant check with zero I/O overhead.
+
+        When watchdog is unavailable, falls back to debounced mtime
+        polling (``os.scandir`` + ``stat``).
+        """
+        if self._use_watchdog:
+            dirty = self._dirty
+            self._dirty = False
+            return dirty
+        # Fallback: debounced mtime polling
+        now = time.monotonic()
+        if now - self._last_stale_check < ROUTING_WATCH_DEBOUNCE_SECONDS:
+            return False
+        self._last_stale_check = now
+        return self._scan_file_mtimes() != self._file_mtimes
+
+    async def load_rules(self) -> None:
         """
         Scan .md instruction files and extract routing rules from frontmatter.
 
@@ -251,7 +575,19 @@ class RoutingEngine:
         Rules are sorted by priority (ascending) after loading.
 
         Call this at startup and whenever instruction files are updated.
+
+        File I/O (``parse_file``) is offloaded to a thread pool via
+        ``asyncio.to_thread()`` so the event loop is not blocked during
+        reloads.  The retry delay uses ``asyncio.sleep()`` instead of
+        ``time.sleep()`` to remain non-blocking.
+
+        Graceful degradation: if a reload produces zero rules but rules
+        previously existed, the old rule set is retained and a warning is
+        logged.  This handles transient empty-file states (e.g. an editor
+        that truncates before writing).  File mtimes are intentionally left
+        stale so that the next debounced stale-check will retry the reload.
         """
+        previous_rules = list(self._rules_list)
         rules: List[RoutingRule] = []
 
         if not self._instructions_dir.is_dir():
@@ -259,13 +595,41 @@ class RoutingEngine:
             self._rules = rules
             return
 
-        for md_file in sorted(self._instructions_dir.glob("*.md")):
+        retry_sleep_spent: float = 0.0
+
+        for md_file in sorted(self._instructions_dir.glob("*.md"), key=lambda p: p.name):
+            if os.path.islink(md_file):
+                log.warning(
+                    "Skipping symlink in instructions directory: %s",
+                    md_file.name,
+                )
+                continue
             try:
-                parsed = parse_file(md_file)
+                parsed = await asyncio.to_thread(self._cached_parse, md_file)
                 rule_dicts = extract_routing_rules(parsed.metadata)
             except Exception as exc:
-                log.warning("Failed to parse %s: %s", md_file.name, exc)
-                continue
+                # Retry once for transient parse failures (e.g. concurrent writes),
+                # but only if the cumulative retry budget has not been exhausted.
+                budget_remaining = ROUTING_RETRY_SLEEP_BUDGET_SECONDS - retry_sleep_spent
+                if budget_remaining < 0.1:
+                    log.warning(
+                        "Retry budget exhausted (%.1fs spent), skipping %s: %s",
+                        retry_sleep_spent,
+                        md_file.name,
+                        exc,
+                    )
+                    continue
+                log.debug("Transient parse failure for %s, retrying: %s", md_file.name, exc)
+                await asyncio.sleep(0.1)
+                retry_sleep_spent += 0.1
+                try:
+                    # Invalidate cache for this file before retry
+                    self._frontmatter_cache.pop(md_file.name, None)
+                    parsed = await asyncio.to_thread(parse_file, md_file)
+                    rule_dicts = extract_routing_rules(parsed.metadata)
+                except Exception as retry_exc:
+                    log.warning("Failed to parse %s after retry: %s", md_file.name, retry_exc)
+                    continue
 
             for rule_dict in rule_dicts:
                 try:
@@ -282,24 +646,57 @@ class RoutingEngine:
 
         # Sort by priority ascending
         rules.sort(key=lambda r: r.priority)
+
+        # Graceful degradation: keep previous rules when reload yields nothing.
+        # Do NOT update _file_mtimes so the next stale-check retries the load.
+        if len(rules) == 0 and len(previous_rules) > 0:
+            log.warning(
+                "Reload produced zero routing rules from %s — retaining "
+                "previous rule set (%d rules). Instruction files may be "
+                "temporarily empty during editing.",
+                self._instructions_dir,
+                len(previous_rules),
+            )
+            self._dirty = False
+            return
+
         self._rules = rules
+        self._file_mtimes = self._scan_file_mtimes()
 
-        log.info(
-            "Loaded %d routing rule(s) from %s",
-            len(rules),
-            self._instructions_dir,
-        )
+        # Reset dirty flag after loading fresh state
+        self._dirty = False
 
-    def refresh_rules(self) -> None:
+        # Start OS-native file watcher if not already running
+        self._start_watcher()
+
+        if len(rules) == 0:
+            log.warning(
+                "No routing rules loaded from %s — messages will not be "
+                "matched. Add at least a 'chat.agent.md' with YAML routing "
+                "frontmatter. See src/templates/instructions/ for examples.",
+                self._instructions_dir,
+            )
+        else:
+            log.info(
+                "Loaded %d routing rule(s) from %s",
+                len(rules),
+                self._instructions_dir,
+            )
+
+    async def refresh_rules(self) -> None:
         """
         Reload routing rules by re-scanning instruction files.
 
         Convenience method that calls load_rules(). Use this when
         instruction files are modified at runtime.
         """
-        self.load_rules()
+        await self.load_rules()
 
-    def match(self, msg: IncomingMessage) -> Optional[str]:
+    async def match(
+        self,
+        msg: IncomingMessage,
+        ctx: MatchingContext | None = None,
+    ) -> Optional[str]:
         """
         Match an incoming message against loaded routing rules.
 
@@ -308,31 +705,87 @@ class RoutingEngine:
 
         Args:
             msg: The incoming message to match.
+            ctx: Optional pre-built MatchingContext to avoid redundant allocation.
 
         Returns:
             Instruction filename (e.g., 'chat.agent.md') if a rule matches,
             otherwise None.
         """
-        _, instruction = self.match_with_rule(msg)
+        _, instruction = await self.match_with_rule(msg, ctx)
         return instruction
 
-    def match_with_rule(
-        self, msg: IncomingMessage
+    def _cache_key(self, ctx: MatchingContext) -> Tuple:
+        """Build a hashable cache key from message signature attributes.
+
+        Uses a pooled xxhash instance via ``reset()`` to avoid per-call
+        object allocation (mirrors the DeduplicationService._hasher pattern).
+        """
+        self._cache_hasher.reset()
+        self._cache_hasher.update(ctx.text.encode("utf-8"))
+        text_hash = self._cache_hasher.hexdigest()
+        return (ctx.fromMe, ctx.toMe, ctx.sender_id, ctx.chat_id, ctx.channel_type, text_hash)
+
+    def _match_impl(
+        self,
+        ctx: MatchingContext,
     ) -> tuple[Optional["RoutingRule"], Optional[str]]:
+        """Core matching logic — pure CPU evaluation against cached rules.
+
+        Separated from the async ``match_with_rule()`` so that benchmarks
+        can call the hot-path matching directly without async overhead.
+        Stale-check and reload must be performed *before* calling this.
         """
-        Match an incoming message and return both the rule and instruction.
+        start = time.monotonic()
+        rule_count = 0
 
-        Same as match() but returns the full rule object for logging/debugging.
+        # ── Single-rule fast path ─────────────────────────────────────────
+        # When only one rule is loaded (common for simple deployments) the
+        # cache-key hashing, dict lookups, and list iteration are all
+        # unnecessary overhead.  Evaluate the single rule directly.
+        single = self._single_rule
+        if single is not None:
+            matched = False
+            if not single.enabled:
+                pass
+            elif single.fromMe is not None and single.fromMe != ctx.fromMe:
+                pass
+            elif single.toMe is not None and single.toMe != ctx.toMe:
+                pass
+            elif single._is_wildcard:
+                matched = True
+            elif (
+                _match_compiled(single._compiled_sender, single.sender, ctx.sender_id)
+                and _match_compiled(single._compiled_recipient, single.recipient, ctx.chat_id)
+                and _match_compiled(single._compiled_channel, single.channel, ctx.channel_type)
+                and _match_compiled(single._compiled_content, single.content_regex, ctx.text)
+            ):
+                matched = True
 
-        Args:
-            msg: The incoming message to match.
+            duration = time.monotonic() - start
+            _track_routing_latency(duration, matched, 1)
+            return (single, single.instruction) if matched else (None, None)
 
-        Returns:
-            Tuple of (rule, instruction_filename). Both are None if no match.
-        """
-        ctx = MatchingContext.from_message(msg)
+        cache_key = self._cache_key(ctx)
 
-        for rule in self._rules:
+        # Check cache first
+        cached = self._match_cache.get(cache_key)
+        if cached is not None:
+            _track_routing_cache_event(hit=True)
+            duration = time.monotonic() - start
+            _track_routing_latency(duration, cached[0] is not None, 0)
+            return cached  # type: ignore[return-value]
+
+        # Evaluate rules using pre-computed channel-grouped index
+        channel_str = str(ctx.channel_type)
+        candidates = self._candidates_by_channel.get(channel_str)
+        if candidates is not None:
+            candidate_rules = candidates
+        else:
+            candidate_rules = self._default_candidates
+
+        rule_count = len(candidate_rules)
+
+        for rule in candidate_rules:
             if not rule.enabled:
                 continue
 
@@ -342,24 +795,101 @@ class RoutingEngine:
             if rule.toMe is not None and rule.toMe != ctx.toMe:
                 continue
 
-            if not _match_compiled(rule._compiled_sender, rule.sender, ctx.sender_id):
-                continue
+            # Wildcard-only rules skip all regex/exact matching — fromMe/toMe
+            # (checked above) are the only discriminators.
+            if not rule._is_wildcard:
+                if not _match_compiled(rule._compiled_sender, rule.sender, ctx.sender_id):
+                    continue
 
-            if not _match_compiled(
-                rule._compiled_recipient, rule.recipient, ctx.chat_id
-            ):
-                continue
+                if not _match_compiled(rule._compiled_recipient, rule.recipient, ctx.chat_id):
+                    continue
 
-            if not _match_compiled(
-                rule._compiled_channel, rule.channel, ctx.channel_type
-            ):
-                continue
+                if not _match_compiled(rule._compiled_channel, rule.channel, ctx.channel_type):
+                    continue
 
-            if not _match_compiled(
-                rule._compiled_content, rule.content_regex, ctx.text
-            ):
-                continue
+                if not _match_compiled(rule._compiled_content, rule.content_regex, ctx.text):
+                    continue
 
-            return rule, rule.instruction
+            result = (rule, rule.instruction)
+            self._match_cache[cache_key] = result
+            _track_routing_cache_event(hit=False)
+            duration = time.monotonic() - start
+            _track_routing_latency(duration, True, rule_count)
+            return result
 
-        return None, None
+        result = (None, None)
+        self._match_cache[cache_key] = result
+        _track_routing_cache_event(hit=False)
+        duration = time.monotonic() - start
+        _track_routing_latency(duration, False, rule_count)
+        return result
+
+    async def match_with_rule(
+        self,
+        msg: IncomingMessage,
+        ctx: MatchingContext | None = None,
+    ) -> tuple[Optional["RoutingRule"], Optional[str]]:
+        """
+        Match an incoming message and return both the rule and instruction.
+
+        Same as match() but returns the full rule object for logging/debugging.
+        Auto-reloads rules if instruction files have changed on disk.
+        Results are cached for identical message signatures within a short TTL.
+
+        Args:
+            msg: The incoming message to match.
+            ctx: Optional pre-built MatchingContext. When provided, the internal
+                ``MatchingContext.from_message()`` call is skipped, avoiding
+                redundant object allocation when the caller already has a context
+                (e.g. from a prior preflight check).
+
+        Returns:
+            Tuple of (rule, instruction_filename). Both are None if no match.
+        """
+        if self._is_stale():
+            await self.load_rules()
+
+        if not self.has_rules:
+            return (None, None)
+
+        if ctx is None:
+            ctx = MatchingContext.from_message(msg)
+        return self._match_impl(ctx)
+
+
+# ── Watchdog event handler ─────────────────────────────────────────────────
+
+
+class _RoutingFileEventHandler(FileSystemEventHandler):  # type: ignore[name-defined]
+    """Watchdog handler that marks the engine dirty when .md files change."""
+
+    def __init__(self, engine: RoutingEngine) -> None:
+        self._engine = engine
+
+    def on_modified(self, event: Any) -> None:
+        if event.is_directory:
+            return
+        if event.src_path.endswith(".md"):
+            self._engine._mark_dirty()
+
+    def on_created(self, event: Any) -> None:
+        if event.is_directory:
+            return
+        if event.src_path.endswith(".md"):
+            self._engine._mark_dirty()
+
+    def on_deleted(self, event: Any) -> None:
+        if event.is_directory:
+            return
+        if event.src_path.endswith(".md"):
+            self._engine._mark_dirty()
+
+    def on_moved(self, event: Any) -> None:
+        if event.is_directory:
+            return
+        # Check both source and destination for .md extension
+        if isinstance(event, FileMovedEvent):  # type: ignore[name-defined]
+            if event.src_path.endswith(".md") or event.dest_path.endswith(".md"):
+                self._engine._mark_dirty()
+        elif event.src_path.endswith(".md"):
+            self._engine._mark_dirty()

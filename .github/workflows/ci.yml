@@ -1,0 +1,592 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Weekly Monday 06:00 UTC — catches dependency rot, base image CVEs,
+    # and flaky test regressions that accumulate when no PRs are open.
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Install ruff (version pinned in pyproject.toml)
+        run: pip install "$(python3 -c "import tomllib; specs=tomllib.loads(open('pyproject.toml').read())['project']['optional-dependencies']['dev']; print([s for s in specs if s.startswith('ruff')][0])")"
+
+      - name: Ruff lint
+        run: ruff check src tests main.py
+
+      - name: Ruff format check
+        run: ruff format --check src tests main.py
+
+  # Verify that requirements.txt and requirements-lock.txt are generated
+  # from pyproject.toml via pip-compile.  Regenerates both files and diffs
+  # against the committed versions — catches hand-edits and drift before
+  # they reach production.
+  check-deps-sync:
+    name: Dependency Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install pip-tools
+        run: pip install pip-tools
+
+      - name: Verify generated requirements are in sync
+        run: |
+          pip-compile --strip-extras --output-file=requirements.txt pyproject.toml --quiet
+          pip-compile --generate-hashes --output-file=requirements-lock.txt requirements.txt --quiet
+          git diff --exit-code requirements.txt requirements-lock.txt \
+            || (echo "ERROR: requirements files are out of sync with pyproject.toml. Run 'make requirements-all' to regenerate." && exit 1)
+          echo "✅ requirements.txt and requirements-lock.txt match pyproject.toml"
+
+  # Verify that .env.example documents every environment variable used in the
+  # source tree.  Greps src/ for os.environ.get / os.getenv calls and compares
+  # against the keys in .env.example.  Fails if a code-referenced variable is
+  # missing from .env.example.  Warns (but does not fail) on stale entries.
+  check-env-example-sync:
+    name: Env Example Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify .env.example matches source code env var usage
+        run: |
+          set -euo pipefail
+
+          # Extract env var names from os.environ.get("VAR") / os.getenv("VAR") calls.
+          CODE_VARS=$(grep -roP '(os\.environ\.get|os\.getenv)\(\s*["'"'"']\K[A-Z_][A-Z0-9_]*' src/ | sort -u)
+
+          # Extract env var names from constant definitions (e.g. _ENV: str = "VAR").
+          CONST_VARS=$(grep -roP '_ENV\s*(?::\s*[^=]+)?=\s*["'"'"']\K[A-Z_][A-Z0-9_]*' src/ | sort -u)
+
+          # Combine and deduplicate.
+          ALL_CODE_VARS=$(printf '%s\n%s\n' "$CODE_VARS" "$CONST_VARS" | sort -u | grep -v '^$')
+
+          # Extract keys from .env.example (KEY= lines, ignoring comments).
+          EXAMPLE_VARS=$(grep -oP '^[A-Z_][A-Z0-9_]*(?==)' .env.example | sort -u)
+
+          # Compare: code vars missing from .env.example (hard error).
+          MISSING_FROM_EXAMPLE=$(comm -23 <(echo "$ALL_CODE_VARS") <(echo "$EXAMPLE_VARS"))
+
+          # Compare: .env.example vars not found in code (warning only — may be
+          # used externally or reserved for future use).
+          MISSING_FROM_CODE=$(comm -13 <(echo "$ALL_CODE_VARS") <(echo "$EXAMPLE_VARS"))
+
+          ERRORS=0
+
+          if [ -n "$MISSING_FROM_EXAMPLE" ]; then
+            echo "::error::Env vars used in source but missing from .env.example:"
+            echo "$MISSING_FROM_EXAMPLE" | while read -r var; do
+              echo "::error::  - $var"
+            done
+            ERRORS=1
+          fi
+
+          if [ -n "$MISSING_FROM_CODE" ]; then
+            echo "::warning::Env vars in .env.example but not referenced in source:"
+            echo "$MISSING_FROM_CODE" | while read -r var; do
+              echo "::warning::  - $var"
+            done
+          fi
+
+          if [ "$ERRORS" -eq 1 ]; then
+            echo ""
+            echo "ERROR: .env.example is out of sync with source code."
+            echo "Add missing variables to .env.example."
+            exit 1
+          fi
+
+          echo "✅ .env.example is in sync with source code env var usage"
+          echo "   Source vars: $(echo "$ALL_CODE_VARS" | wc -l)"
+          echo "   Example vars: $(echo "$EXAMPLE_VARS" | wc -l)"
+
+  # Verify that config.example.json is in sync with CONFIG_SCHEMA.
+  # Parses config.example.json, extracts all field paths (recursively), and
+  # verifies each matches a property in the JSON Schema defined in
+  # src/config/config_schema_defs.py.  Prevents new config fields from
+  # silently appearing without documentation.
+  check-config-example-sync:
+    name: Config Example Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify config.example.json matches CONFIG_SCHEMA
+        run: python scripts/check_config_example_sync.py
+
+  # Validate PLAN.md checkbox syntax — catches malformed checkboxes
+  # (e.g. - [X], - [x ], - [ x]) that would be invisible to progress
+  # tracking scripts.
+  check-plan-syntax:
+    name: PLAN.md Checkbox Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate PLAN.md checkbox format
+        run: python scripts/check_plan_syntax.py
+
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install mypy==1.20.2
+
+      - name: mypy
+        run: mypy src main.py
+
+  # Progressive type-safety gate — runs mypy --strict on all of src/.
+  # Non-blocking (continue-on-error) until all modules are fully annotated.
+  # Tracks strict-typing violations so they can be fixed incrementally without
+  # blocking PRs.  When the job passes consistently, promote it to a hard gate
+  # by removing continue-on-error.
+  typecheck-strict:
+    name: Strict Type Check (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install mypy==1.20.2
+
+      - name: mypy --strict on src/
+        run: mypy --strict src
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.11"
+            experimental: false
+          - python-version: "3.12"
+            experimental: false
+          - python-version: "3.13"
+            experimental: true
+
+    continue-on-error: ${{ matrix.experimental }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: |
+            pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ".[dev]"
+
+      # Coverage Threshold Roadmap:
+      #   Phase 9-11: 60% (baseline — locked)
+      #   Phase 12:   65% (locked)
+      #   Phase 13:   70% (locked)
+      #   Phase 14:   75% (current)
+      # Each phase must contribute test coverage improvements before bumping.
+      # Update this value when the actual coverage consistently exceeds the next target.
+      - name: Run tests with coverage
+        run: |
+          pytest \
+            -n auto \
+            --cov=src \
+            --cov=main \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=75 \
+            --tb=short \
+            -v
+
+      - name: Upload coverage report
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+      # Coverage regression gate — compares actual coverage against the stored
+      # floor in .coverage-floor.  Fails the run if coverage has dropped below
+      # the threshold.  On main-branch pushes, --update ratchets the floor
+      # upward automatically so the baseline never goes stale.
+      - name: Coverage regression check
+        if: matrix.python-version == '3.11'
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            ARGS="--update"
+          fi
+          python scripts/check_coverage_floor.py $ARGS
+
+  # Dedicated Python 3.13 compatibility report.
+  # Runs the full test suite with verbose output, JUnit XML, and uploads a
+  # structured compatibility report so 3.13-specific failures are tracked
+  # independently of the main matrix job (which is continue-on-error).
+  test-3.13-compat:
+    name: Python 3.13 Compatibility Report
+    runs-on: ubuntu-latest
+    # Non-blocking — the purpose is to surface 3.13-specific issues, not gate PRs.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: |
+            pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ".[dev]"
+
+      - name: Run tests (verbose, JUnit output)
+        run: |
+          pytest \
+            -n auto \
+            --cov=src \
+            --cov=main \
+            --cov-report=term-missing \
+            --tb=long \
+            -v \
+            --junitxml=test-results-3.13.xml \
+            2>&1 | tee test-output-3.13.txt
+
+      - name: Generate compatibility summary
+        if: always()
+        run: |
+          echo "## Python 3.13 Compatibility Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Count total / passed / failed / errored / skipped from JUnit XML
+          if [ -f test-results-3.13.xml ]; then
+            TOTAL=$(grep -oP 'tests="\K[^"]+' test-results-3.13.xml | head -1)
+            FAILURES=$(grep -oP 'failures="\K[^"]+' test-results-3.13.xml | head -1)
+            ERRORS=$(grep -oP 'errors="\K[^"]+' test-results-3.13.xml | head -1)
+            SKIPPED=$(grep -oP 'skipped="\K[^"]+' test-results-3.13.xml | head -1)
+            PASSED=$((TOTAL - FAILURES - ERRORS - SKIPPED))
+
+            echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Total  | ${TOTAL:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Passed | ${PASSED:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Failed | ${FAILURES:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Errors | ${ERRORS:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Skipped| ${SKIPPED:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            # List 3.13-specific failures
+            FAILED_TESTS=$(grep -oP 'classname="[^"]*".*name="[^"]*"' test-results-3.13.xml 2>/dev/null || true)
+            if [ -n "$FAILED_TESTS" ]; then
+              echo "### Failed Tests" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              grep -B1 'failure ' test-results-3.13.xml | grep 'testcase' | sed 's/.*name="\([^"]*\)".*/\1/' >> "$GITHUB_STEP_SUMMARY" || true
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "⚠️ No JUnit results file found — tests may have failed to initialise." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_This job runs on every PR to track Python 3.13 compatibility. \`continue-on-error: true\` means it won't block merges._" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload 3.13 test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-3.13-compatibility-report
+          path: |
+            test-results-3.13.xml
+            test-output-3.13.txt
+          retention-days: 30
+
+  security:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install pip-audit
+        run: pip install pip-audit==2.10.0
+
+      - name: Cache pip-audit vulnerability database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip-audit
+          key: pip-audit-db-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pip-audit-db-${{ runner.os }}-
+
+      - name: Run pip-audit
+        run: pip-audit --desc
+
+      - name: Generate pip-audit SARIF report
+        if: always()
+        run: pip-audit --format sarif --output pip-audit-results.sarif || true
+
+      - name: Upload pip-audit SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: pip-audit-results.sarif
+          category: pip-audit
+
+  # ---------------------------------------------------------------------------
+  # Benchmark regression gate.
+  # Runs pytest-benchmark against critical hot paths and fails on >10%
+  # regression from a stored baseline.  On the first run (no baseline) the
+  # job autosaves a new baseline for future comparisons.
+  # ---------------------------------------------------------------------------
+  benchmark:
+    name: Benchmark Regression
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ".[dev]"
+
+      - name: Restore benchmark baseline
+        uses: actions/cache@v4
+        with:
+          path: .benchmarks
+          key: bench-baseline-${{ runner.os }}-py3.11
+          restore-keys: |
+            bench-baseline-${{ runner.os }}-py3.11
+
+      - name: Run benchmarks
+        run: |
+          pytest tests/unit/bench_regression.py \
+            --benchmark-only \
+            --benchmark-disable-gc \
+            --benchmark-autosave \
+            --benchmark-sort=mean \
+            --benchmark-compare-fail=mean:10% \
+            -v
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: .benchmarks/
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Docker build smoke test.
+  # Verifies the built image can start and respond to --help, catching
+  # dependency or import errors before deployment.
+  # Uses BuildKit layer caching via GitHub Actions cache backend (type=gha)
+  # to avoid rebuilding unchanged layers (~50% faster on source-only PRs).
+  # ---------------------------------------------------------------------------
+  docker-smoke:
+    name: Docker Smoke Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: custombot:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test — verify --help exits cleanly
+        run: docker run --rm custombot:smoke --help
+
+      - name: Smoke test — verify application imports
+        run: docker run --rm --entrypoint python custombot:smoke -c "import src; print('imports OK')"
+
+  # ---------------------------------------------------------------------------
+  # Docker image vulnerability scanning with Trivy.
+  # Builds the production image and scans it for OS and library CVEs.
+  # Non-blocking initially — once baseline is established, remove
+  # continue-on-error and add severity thresholds as needed.
+  # ---------------------------------------------------------------------------
+  docker-scan:
+    name: Docker Image Vulnerability Scan
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: custombot:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: custombot:scan
+          format: table
+          exit-code: 0
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          scanners: vuln
+
+      - name: Run Trivy SARIF report
+        if: always()
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: custombot:scan
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          scanners: vuln
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ---------------------------------------------------------------------------
+  # Mutation testing — non-blocking quality gate.
+  # Runs mutmut against core modules to measure test suite effectiveness.
+  # Results are informational only; failures do not block merges.
+  # Use 'make mutation-test' locally for faster iteration.
+  # ---------------------------------------------------------------------------
+  mutation-test:
+    name: Mutation Testing (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ".[dev]"
+          pip install mutmut
+
+      - name: Cache mutmut results
+        uses: actions/cache@v4
+        with:
+          path: .mutmut-cache
+          key: mutmut-${{ runner.os }}-${{ hashFiles('src/core/dedup.py', 'src/core/event_bus.py', 'src/routing.py', 'src/bot/react_loop.py', 'src/rate_limiter.py') }}
+          restore-keys: |
+            mutmut-${{ runner.os }}-
+
+      - name: Run mutation testing
+        run: |
+          mutmut run --config-file mutmut_config.py || true
+          echo "## Mutation Testing Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          mutmut results || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_Non-blocking — mutation score does not gate merges._" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mutmut cache
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-testing-results
+          path: .mutmut-cache/
+          retention-days: 30

@@ -11,12 +11,14 @@ Tests that the start command:
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from click.testing import CliRunner
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from click.testing import CliRunner
+    from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: Create test config files
@@ -161,8 +163,8 @@ async def test_start_validates_channels_success(cli_runner: CliRunner, tmp_path:
     config_path = tmp_path / "config.json"
     _create_valid_config(config_path, workspace)
 
-    from src.config import load_config
     from src.channels.validation import validate_channels
+    from src.config import load_config
 
     config = load_config(config_path)
 
@@ -204,8 +206,8 @@ async def test_start_validates_llm_credentials(cli_runner: CliRunner, tmp_path: 
     config_path = tmp_path / "config.json"
     _create_valid_config(config_path, workspace)
 
-    from src.config import load_config
     from src.channels.validation import _validate_llm
+    from src.config import load_config
 
     config = load_config(config_path)
 
@@ -245,8 +247,8 @@ async def test_start_validates_whatsapp_config(cli_runner: CliRunner, tmp_path: 
     config_path = tmp_path / "config.json"
     _create_valid_config(config_path, workspace)
 
-    from src.config import load_config
     from src.channels.validation import _validate_whatsapp
+    from src.config import load_config
 
     config = load_config(config_path)
 
@@ -254,9 +256,7 @@ async def test_start_validates_whatsapp_config(cli_runner: CliRunner, tmp_path: 
     result = await _validate_whatsapp(config)
 
     # Assert
-    assert result.success is True, (
-        f"WhatsApp validation should succeed: {result.message}"
-    )
+    assert result.success is True, f"WhatsApp validation should succeed: {result.message}"
     assert result.channel == "whatsapp"
 
 
@@ -286,8 +286,8 @@ async def test_start_fails_on_invalid_api_key(cli_runner: CliRunner, tmp_path: P
     config_path = tmp_path / "config.json"
     _create_config_with_invalid_api_key(config_path, workspace)
 
-    from src.config import load_config
     from src.channels.validation import validate_channels
+    from src.config import load_config
 
     config = load_config(config_path)
 
@@ -339,8 +339,8 @@ async def test_start_fails_on_missing_api_key(cli_runner: CliRunner, tmp_path: P
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config_data, f)
 
-    from src.config import load_config
     from src.channels.validation import validate_channels
+    from src.config import load_config
 
     config = load_config(config_path)
 
@@ -374,8 +374,8 @@ async def test_start_fails_on_invalid_db_path(cli_runner: CliRunner, tmp_path: P
     config_path = tmp_path / "config.json"
     _create_valid_config(config_path, workspace)
 
-    from src.config import load_config
     from src.channels.validation import validate_channels
+    from src.config import load_config
 
     config = load_config(config_path)
 
@@ -396,14 +396,10 @@ async def test_start_fails_on_invalid_db_path(cli_runner: CliRunner, tmp_path: P
     assert len(errors) > 0, "Should have at least one error"
 
     error_text = " ".join(errors).lower()
-    assert (
-        "db_path" in error_text or "whatsapp" in error_text or "neonize" in error_text
-    )
+    assert "db_path" in error_text or "whatsapp" in error_text or "neonize" in error_text
 
 
-def test_start_exits_with_code_1_on_validation_failure(
-    cli_runner: CliRunner, tmp_path: Path
-):
+def test_start_exits_with_code_1_on_validation_failure(cli_runner: CliRunner, tmp_path: Path):
     """
     E2E Test: Start command exits with code 1 when validation fails.
 
@@ -459,6 +455,7 @@ def test_start_command_help(cli_runner: CliRunner):
     assert "start" in result.output.lower()
     assert "--config" in result.output
     assert "--health-port" in result.output
+    assert "--health-host" in result.output
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -467,9 +464,7 @@ def test_start_command_help(cli_runner: CliRunner):
 
 
 @pytest.mark.asyncio
-async def test_validation_result_includes_details(
-    cli_runner: CliRunner, tmp_path: Path
-):
+async def test_validation_result_includes_details(cli_runner: CliRunner, tmp_path: Path):
     """
     E2E Test: Validation result includes helpful details.
 
@@ -489,8 +484,8 @@ async def test_validation_result_includes_details(
     config_path = tmp_path / "config.json"
     _create_valid_config(config_path, workspace)
 
-    from src.config import load_config
     from src.channels.validation import validate_all_channels
+    from src.config import load_config
 
     config = load_config(config_path)
 
@@ -539,8 +534,8 @@ async def test_llm_validation_timeout(cli_runner: CliRunner, tmp_path: Path):
     config_path = tmp_path / "config.json"
     _create_valid_config(config_path, workspace)
 
-    from src.config import load_config
     from src.channels.validation import _validate_llm
+    from src.config import load_config
 
     config = load_config(config_path)
 
@@ -615,8 +610,8 @@ async def test_both_channels_degraded(cli_runner: CliRunner, tmp_path: Path):
     config_path = tmp_path / "config.json"
     _create_valid_config(config_path, workspace)
 
-    from src.config import load_config
     from src.channels.validation import validate_channels
+    from src.config import load_config
 
     config = load_config(config_path)
 
@@ -640,9 +635,7 @@ async def test_both_channels_degraded(cli_runner: CliRunner, tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_mixed_status_llm_healthy_whatsapp_unhealthy(
-    cli_runner: CliRunner, tmp_path: Path
-):
+async def test_mixed_status_llm_healthy_whatsapp_unhealthy(cli_runner: CliRunner, tmp_path: Path):
     """
     E2E Test: Validation fails when WhatsApp config is invalid.
 
@@ -662,8 +655,8 @@ async def test_mixed_status_llm_healthy_whatsapp_unhealthy(
     config_path = tmp_path / "config.json"
     _create_valid_config(config_path, workspace)
 
-    from src.config import load_config
     from src.channels.validation import validate_channels
+    from src.config import load_config
 
     config = load_config(config_path)
     config.whatsapp.neonize.db_path = ""  # Make whatsapp invalid
@@ -682,9 +675,7 @@ async def test_mixed_status_llm_healthy_whatsapp_unhealthy(
 
 
 @pytest.mark.asyncio
-async def test_mixed_status_llm_unhealthy_whatsapp_healthy(
-    cli_runner: CliRunner, tmp_path: Path
-):
+async def test_mixed_status_llm_unhealthy_whatsapp_healthy(cli_runner: CliRunner, tmp_path: Path):
     """
     E2E Test: Validation fails when LLM is unhealthy.
 
@@ -704,8 +695,8 @@ async def test_mixed_status_llm_unhealthy_whatsapp_healthy(
     config_path = tmp_path / "config.json"
     _create_valid_config(config_path, workspace)
 
-    from src.config import load_config
     from src.channels.validation import validate_channels
+    from src.config import load_config
 
     config = load_config(config_path)
 

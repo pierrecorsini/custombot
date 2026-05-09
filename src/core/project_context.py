@@ -52,7 +52,7 @@ class ProjectContextLoader:
         try:
             self._ensure_initialized()
             projects = await asyncio.to_thread(self._store.get_chat_projects, chat_id)
-            parts = []
+            parts: list[str] = []
             for p in projects:
                 ctx = await asyncio.to_thread(self._recall.recall, p["id"])
                 if ctx:

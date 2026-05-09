@@ -7,6 +7,12 @@ Implements sliding window rate limiting to prevent abuse and resource exhaustion
   - Configurable via environment variables
   - Clear error messages when rate limited
 
+Lock model: Uses ThreadLock (from src.utils.locking) because rate checks
+are called from both sync (skill execution) and async (message pipeline)
+contexts.  ThreadLock wraps threading.Lock, which works in both; asyncio.Lock
+would require an event loop and can't be held across await boundaries in
+mixed code.  See src.utils.locking for the full locking policy.
+
 Usage:
     from src.rate_limiter import RateLimiter
 
@@ -22,9 +28,9 @@ import os
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from threading import Lock
-from typing import Dict, FrozenSet, Optional, Tuple
+from typing import FrozenSet, Optional, Tuple
 
+from src.utils.locking import ThreadLock
 from src.utils.singleton import get_or_create_singleton, reset_singleton
 
 log = logging.getLogger(__name__)
@@ -33,15 +39,22 @@ log = logging.getLogger(__name__)
 # Configuration Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Default rate limits (calls per minute)
-DEFAULT_CHAT_RATE_LIMIT: int = 30
-DEFAULT_EXPENSIVE_SKILL_RATE_LIMIT: int = 10
+# Import canonical rate-limit constants from central registry
+from src.constants import (
+    DEFAULT_CHAT_RATE_LIMIT,
+    DEFAULT_EXPENSIVE_SKILL_RATE_LIMIT,
+    MAX_RATE_LIMIT_TRACKED_CHATS,
+    RATE_LIMIT_EFFECTIVE_MAX,
+    RATE_LIMIT_MAX_VALUE,
+    RATE_LIMIT_MIN_VALUE,
+    RATE_LIMIT_WINDOW_SECONDS,
+)
 
 # Window size in seconds (1 minute sliding window)
-WINDOW_SIZE_SECONDS: float = 60.0
+WINDOW_SIZE_SECONDS: float = RATE_LIMIT_WINDOW_SECONDS
 
 # Maximum number of chat windows to track (prevents memory growth)
-MAX_TRACKED_CHATS: int = 1000
+MAX_TRACKED_CHATS: int = MAX_RATE_LIMIT_TRACKED_CHATS
 
 # Maximum timestamps to keep per chat (prevents unbounded memory growth)
 MAX_TIMESTAMPS_PER_CHAT: int = 100
@@ -61,7 +74,7 @@ EXPENSIVE_SKILLS: FrozenSet[str] = frozenset(
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class RateLimitConfig:
     """Configuration for rate limiting."""
 
@@ -72,29 +85,80 @@ class RateLimitConfig:
 
     @classmethod
     def from_env(cls) -> "RateLimitConfig":
-        """Load configuration from environment variables."""
-        chat_limit = os.environ.get("RATE_LIMIT_CHAT_PER_MINUTE", "")
-        expensive_limit = os.environ.get("RATE_LIMIT_EXPENSIVE_PER_MINUTES", "")
+        """Load configuration from environment variables.
+
+        Values are clamped to [RATE_LIMIT_MIN_VALUE, RATE_LIMIT_MAX_VALUE]
+        to prevent misconfiguration from disabling rate limiting.
+        """
+        raw_chat = os.environ.get("RATE_LIMIT_CHAT_PER_MINUTE", "")
+        raw_expensive = os.environ.get("RATE_LIMIT_EXPENSIVE_PER_MINUTES", "")
+
+        chat_limit = int(raw_chat) if raw_chat.isdigit() else DEFAULT_CHAT_RATE_LIMIT
+        expensive_limit = (
+            int(raw_expensive) if raw_expensive.isdigit() else DEFAULT_EXPENSIVE_SKILL_RATE_LIMIT
+        )
+
+        # Clamp to sensible bounds
+        if chat_limit < RATE_LIMIT_MIN_VALUE or chat_limit > RATE_LIMIT_MAX_VALUE:
+            log.warning(
+                "RATE_LIMIT_CHAT_PER_MINUTE=%d is out of bounds [%d, %d]; clamping to %d",
+                chat_limit,
+                RATE_LIMIT_MIN_VALUE,
+                RATE_LIMIT_MAX_VALUE,
+                max(RATE_LIMIT_MIN_VALUE, min(chat_limit, RATE_LIMIT_MAX_VALUE)),
+            )
+            chat_limit = max(RATE_LIMIT_MIN_VALUE, min(chat_limit, RATE_LIMIT_MAX_VALUE))
+
+        if expensive_limit < RATE_LIMIT_MIN_VALUE or expensive_limit > RATE_LIMIT_MAX_VALUE:
+            log.warning(
+                "RATE_LIMIT_EXPENSIVE_PER_MINUTES=%d is out of bounds [%d, %d]; clamping to %d",
+                expensive_limit,
+                RATE_LIMIT_MIN_VALUE,
+                RATE_LIMIT_MAX_VALUE,
+                max(RATE_LIMIT_MIN_VALUE, min(expensive_limit, RATE_LIMIT_MAX_VALUE)),
+            )
+            expensive_limit = max(RATE_LIMIT_MIN_VALUE, min(expensive_limit, RATE_LIMIT_MAX_VALUE))
+
+        # Advisory: warn when values exceed the effective maximum even though
+        # they are within hard bounds.  In containerized deployments, values
+        # near RATE_LIMIT_MAX_VALUE effectively disable rate limiting.
+        if chat_limit > RATE_LIMIT_EFFECTIVE_MAX:
+            log.warning(
+                "RATE_LIMIT_CHAT_PER_MINUTE=%d exceeds advisory effective max (%d); "
+                "rate limiting is nearly disabled — consider lowering this value",
+                chat_limit,
+                RATE_LIMIT_EFFECTIVE_MAX,
+            )
+        if expensive_limit > RATE_LIMIT_EFFECTIVE_MAX:
+            log.warning(
+                "RATE_LIMIT_EXPENSIVE_PER_MINUTES=%d exceeds advisory effective max (%d); "
+                "rate limiting is nearly disabled — consider lowering this value",
+                expensive_limit,
+                RATE_LIMIT_EFFECTIVE_MAX,
+            )
+
+        log.info(
+            "Rate limiter config: chat_limit=%d/min, expensive_skill_limit=%d/min, window=%.0fs",
+            chat_limit,
+            expensive_limit,
+            WINDOW_SIZE_SECONDS,
+        )
 
         return cls(
-            chat_rate_limit=int(chat_limit)
-            if chat_limit.isdigit()
-            else DEFAULT_CHAT_RATE_LIMIT,
-            expensive_skill_rate_limit=int(expensive_limit)
-            if expensive_limit.isdigit()
-            else DEFAULT_EXPENSIVE_SKILL_RATE_LIMIT,
+            chat_rate_limit=chat_limit,
+            expensive_skill_rate_limit=expensive_limit,
             window_size_seconds=WINDOW_SIZE_SECONDS,
             expensive_skills=EXPENSIVE_SKILLS,
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class RateLimitResult:
     """Result of a rate limit check."""
 
     allowed: bool
     remaining: int
-    reset_at: float  # Unix timestamp when the oldest entry in window expires
+    reset_at: float  # Monotonic timestamp when the oldest entry in window expires
     retry_after: float  # Seconds to wait before retrying (0 if allowed)
     limit_type: str  # "chat" or "skill"
     limit_value: int  # The actual limit that was hit
@@ -123,13 +187,17 @@ class SlidingWindowTracker:
     Uses a deque to store timestamps, automatically pruning
     entries older than the window size. Deque provides O(1) popleft
     amortized pruning vs O(n) for OrderedDict iteration.
+
+    Two-phase API:
+    - check_only() + record(): For multi-check flows where denied requests
+      must NOT consume a slot (prevents double-counting).
     """
 
     def __init__(self, window_size_seconds: float, max_limit: int):
         self._window_size = window_size_seconds
         self._max_limit = max_limit
         self._timestamps: deque[float] = deque()
-        self._lock = Lock()
+        self._lock = ThreadLock()
 
     def _prune_old_entries(self, now: float) -> None:
         """Remove entries older than the window size (O(1) amortized)."""
@@ -137,55 +205,59 @@ class SlidingWindowTracker:
         while self._timestamps and self._timestamps[0] < cutoff:
             self._timestamps.popleft()
 
-    def check_and_record(self, now: Optional[float] = None) -> Tuple[bool, int, float]:
-        """
-        Check if operation is allowed and record the timestamp if so.
+    def check_only(self, now: Optional[float] = None) -> Tuple[bool, int, float]:
+        """Read-only rate limit check without recording a timestamp.
 
-        Args:
-            now: Current timestamp (uses time.time() if not provided)
+        Use before multi-check flows (e.g. chat + skill) to avoid consuming
+        slots on denied requests. Call record() separately after all checks pass.
 
         Returns:
-            Tuple of (allowed, remaining, retry_after_seconds)
+            Tuple of (allowed, remaining_if_allowed, retry_after_if_denied)
         """
         if now is None:
-            now = time.time()
+            now = time.monotonic()
 
+        result: Tuple[bool, int, float]
         with self._lock:
             self._prune_old_entries(now)
 
-            current_count = len(self._timestamps)
-
-            if current_count >= self._max_limit:
-                # Rate limited - find when the oldest entry expires
+            if len(self._timestamps) >= self._max_limit:
                 if self._timestamps:
                     oldest_time = self._timestamps[0]
-                    retry_after = (oldest_time + self._window_size) - now
-                    retry_after = max(0.0, retry_after)
+                    retry_after = max(0.0, (oldest_time + self._window_size) - now)
                 else:
                     retry_after = 0.0
-                return False, 0, retry_after
-
-            # Allowed - record this request
-            self._timestamps.append(now)
-            remaining = self._max_limit - len(self._timestamps)
-
-            # Calculate reset time (when oldest entry expires)
-            if self._timestamps:
-                oldest_time = self._timestamps[0]
-                reset_at = oldest_time + self._window_size
+                result = (False, 0, retry_after)
             else:
-                reset_at = now + self._window_size
+                remaining = self._max_limit - len(self._timestamps)
 
-            return True, remaining, reset_at
+                if self._timestamps:
+                    oldest_time = self._timestamps[0]
+                    reset_at = oldest_time + self._window_size
+                else:
+                    reset_at = now + self._window_size
+
+                result = (True, remaining, reset_at)
+
+        return result
+
+    def record(self, now: Optional[float] = None) -> None:
+        """Record a timestamp after check_only() succeeds (write-only)."""
+        if now is None:
+            now = time.monotonic()
+        with self._lock:
+            self._timestamps.append(now)
 
     def get_current_count(self, now: Optional[float] = None) -> int:
         """Get the current count of operations in the window."""
         if now is None:
-            now = time.time()
+            now = time.monotonic()
 
+        count: int
         with self._lock:
             self._prune_old_entries(now)
-            return len(self._timestamps)
+            count = len(self._timestamps)
+        return count
 
 
 class RateLimiter:
@@ -216,39 +288,55 @@ class RateLimiter:
         # Per-chat rate limiters (keyed by chat_id) — OrderedDict for LRU eviction
         self._chat_limiters: OrderedDict[str, SlidingWindowTracker] = OrderedDict()
 
-        # Per-skill rate limiters for expensive skills (keyed by skill_name)
-        self._skill_limiters: Dict[str, SlidingWindowTracker] = {}
+        # Per-skill rate limiters for expensive skills (keyed by skill_name) — OrderedDict for LRU eviction
+        self._skill_limiters: OrderedDict[str, SlidingWindowTracker] = OrderedDict()
+
+        # Separate dict for message-level rate tracking (avoids LRU eviction
+        # of actual chat/skill limiters)
+        self._message_rate_limiters: OrderedDict[str, SlidingWindowTracker] = OrderedDict()
 
         # Lock for managing the limiters dictionaries
-        self._limiters_lock = Lock()
+        self._limiters_lock = ThreadLock()
 
     def _get_or_create_chat_limiter(self, chat_id: str) -> SlidingWindowTracker:
-        """Get or create a rate limiter for a chat (LRU: move to end on access)."""
+        """Get or create a rate limiter for a chat (LRU: move to end on access).
+
+        Minimises lock scope: the global lock is held only for dict
+        operations (lookup / move_to_end / insert), not for tracker
+        operations which have their own internal lock.
+        """
         with self._limiters_lock:
             if chat_id in self._chat_limiters:
                 # Move to end (most recently used) for LRU eviction
                 self._chat_limiters.move_to_end(chat_id)
-                return self._chat_limiters[chat_id]
+            else:
+                # Prune old limiters if we have too many (evict least recently used)
+                if len(self._chat_limiters) >= MAX_TRACKED_CHATS:
+                    self._prune_inactive_chats()
 
-            # Prune old limiters if we have too many (evict least recently used)
-            if len(self._chat_limiters) >= MAX_TRACKED_CHATS:
-                self._prune_inactive_chats()
-
-            self._chat_limiters[chat_id] = SlidingWindowTracker(
-                window_size_seconds=self._config.window_size_seconds,
-                max_limit=self._config.chat_rate_limit,
-            )
-            return self._chat_limiters[chat_id]
+                self._chat_limiters[chat_id] = SlidingWindowTracker(
+                    window_size_seconds=self._config.window_size_seconds,
+                    max_limit=self._config.chat_rate_limit,
+                )
+            result = self._chat_limiters[chat_id]
+        return result
 
     def _get_or_create_skill_limiter(self, skill_name: str) -> SlidingWindowTracker:
-        """Get or create a rate limiter for a skill."""
+        """Get or create a rate limiter for a skill (LRU: move to end on access)."""
         with self._limiters_lock:
-            if skill_name not in self._skill_limiters:
+            if skill_name in self._skill_limiters:
+                self._skill_limiters.move_to_end(skill_name)
+            else:
+                if len(self._skill_limiters) >= MAX_TRACKED_CHATS:
+                    evicted_key, _ = self._skill_limiters.popitem(last=False)
+                    log.debug("Evicted skill rate limiter for %q (LRU cap)", evicted_key)
+
                 self._skill_limiters[skill_name] = SlidingWindowTracker(
                     window_size_seconds=self._config.window_size_seconds,
                     max_limit=self._config.expensive_skill_rate_limit,
                 )
-            return self._skill_limiters[skill_name]
+            result = self._skill_limiters[skill_name]
+        return result
 
     def _prune_inactive_chats(self) -> None:
         """Remove least recently used chat limiters to prevent memory growth.
@@ -260,6 +348,18 @@ class RateLimiter:
         for _ in range(prune_count):
             self._chat_limiters.popitem(last=False)
         log.debug("Pruned %d inactive chat rate limiters (LRU eviction)", prune_count)
+
+    def register_expensive_skill(self, name: str) -> None:
+        """Dynamically add a skill to the expensive set.
+
+        Merges skill-declared expensive names into the config at
+        registration time, so dynamically-loaded or third-party skills
+        can opt into stricter rate limits without editing EXPENSIVE_SKILLS.
+        """
+        name_lower = name.lower()
+        if name_lower not in self._config.expensive_skills:
+            self._config.expensive_skills = self._config.expensive_skills | frozenset({name_lower})
+            log.info("Registered expensive skill: %s", name)
 
     def is_expensive_skill(self, skill_name: str) -> bool:
         """Check if a skill is considered expensive."""
@@ -286,25 +386,22 @@ class RateLimiter:
             RateLimitResult with allowed status and details
         """
         if now is None:
-            now = time.time()
+            now = time.monotonic()
 
-        # Check per-chat rate limit
+        is_expensive = self.is_expensive_skill(skill_name)
+
+        # Phase 1: Read-only checks — no slots consumed on denial
         chat_limiter = self._get_or_create_chat_limiter(chat_id)
-        chat_allowed, chat_remaining, chat_reset_at = chat_limiter.check_and_record(now)
+        chat_allowed, chat_remaining, chat_reset_at = chat_limiter.check_only(now)
 
-        # Check per-skill rate limit if this is an expensive skill
         skill_allowed = True
         skill_remaining = 0
         skill_reset_at = now
-        is_expensive = self.is_expensive_skill(skill_name)
-
         if is_expensive:
             skill_limiter = self._get_or_create_skill_limiter(skill_name)
-            skill_allowed, skill_remaining, skill_reset_at = (
-                skill_limiter.check_and_record(now)
-            )
+            skill_allowed, skill_remaining, skill_reset_at = skill_limiter.check_only(now)
 
-        # Determine the result (most restrictive wins)
+        # Phase 2: Return early if denied — no timestamps recorded
         if not chat_allowed:
             retry_after = max(0.0, chat_reset_at - now)
             log.info(
@@ -340,28 +437,35 @@ class RateLimiter:
                 limit_value=self._config.expensive_skill_rate_limit,
             )
 
-        # Both checks passed
+        # Phase 3: All checks passed — record timestamps now
+        chat_limiter.record(now)
+        if is_expensive:
+            skill_limiter.record(now)
+
+        effective_remaining = (
+            min(chat_remaining, skill_remaining) if is_expensive else chat_remaining
+        )
+
         log.debug(
-            "Rate limit check passed for skill %s in chat %s (chat remaining: %d, skill remaining: %d)",
+            "Rate limit check passed for skill %s in chat %s (chat remaining: %d, skill remaining: %s)",
             skill_name,
             chat_id,
             chat_remaining,
             skill_remaining if is_expensive else "N/A",
         )
 
+        limit_value = (
+            self._config.expensive_skill_rate_limit if is_expensive
+            else self._config.chat_rate_limit
+        )
+
         return RateLimitResult(
             allowed=True,
-            remaining=min(chat_remaining, skill_remaining)
-            if is_expensive
-            else chat_remaining,
-            reset_at=max(chat_reset_at, skill_reset_at)
-            if is_expensive
-            else chat_reset_at,
+            remaining=effective_remaining,
+            reset_at=max(chat_reset_at, skill_reset_at) if is_expensive else chat_reset_at,
             retry_after=0.0,
             limit_type="skill" if is_expensive else "chat",
-            limit_value=self._config.expensive_skill_rate_limit
-            if is_expensive
-            else self._config.chat_rate_limit,
+            limit_value=limit_value,
         )
 
     def get_chat_usage(self, chat_id: str) -> int:
@@ -409,17 +513,21 @@ class RateLimiter:
         Returns:
             RateLimitResult with allowed status and metadata
         """
-        key = f"msg_rate:{chat_id}"
-
         with self._limiters_lock:
-            if key not in self._chat_limiters:
-                self._chat_limiters[key] = SlidingWindowTracker(
+            if chat_id not in self._message_rate_limiters:
+                self._message_rate_limiters[chat_id] = SlidingWindowTracker(
                     window_size_seconds=float(window_seconds),
                     max_limit=limit,
                 )
-            tracker = self._chat_limiters[key]
+            # LRU: move to end
+            self._message_rate_limiters.move_to_end(chat_id)
+            # Evict oldest if at capacity
+            if len(self._message_rate_limiters) > MAX_TRACKED_CHATS:
+                self._message_rate_limiters.popitem(last=False)
+            tracker = self._message_rate_limiters[chat_id]
 
-        allowed, remaining_or_zero, reset_at_or_retry = tracker.check_and_record()
+        # Read-only check first — don't consume a slot if denied
+        allowed, remaining_or_zero, reset_at_or_retry = tracker.check_only()
 
         if not allowed:
             return RateLimitResult(
@@ -430,6 +538,9 @@ class RateLimiter:
                 limit_type="message_rate",
                 limit_value=limit,
             )
+
+        # All checks passed — record the timestamp
+        tracker.record()
 
         return RateLimitResult(
             allowed=True,
@@ -445,9 +556,6 @@ class RateLimiter:
 # Module-level singleton for convenience (thread-safe)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Module-level instance for backward compatibility
-_global_rate_limiter: Optional[RateLimiter] = None
-
 
 def get_rate_limiter() -> RateLimiter:
     """
@@ -455,16 +563,11 @@ def get_rate_limiter() -> RateLimiter:
 
     Thread-safe singleton using get_or_create_singleton from utils.
     """
-    global _global_rate_limiter
-    if _global_rate_limiter is None:
-        _global_rate_limiter = get_or_create_singleton(RateLimiter)
-    return _global_rate_limiter
+    return get_or_create_singleton(RateLimiter)
 
 
 def reset_rate_limiter() -> None:
     """Reset the global rate limiter (useful for testing)."""
-    global _global_rate_limiter
-    _global_rate_limiter = None
     reset_singleton(RateLimiter)
 
 

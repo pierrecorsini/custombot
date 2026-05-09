@@ -8,12 +8,16 @@ when a WhatsAppChannel is passed to bot.handle_message().
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.bot._bot import BotConfig, BotDeps
 from src.channels.base import IncomingMessage
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_text_response(text: str):
@@ -54,11 +58,11 @@ async def test_whatsapp_channel_prompt_injected_into_system_message(tmp_path: Pa
     the WhatsApp formatting prompt must appear in the LLM system message.
     """
     from src.bot import Bot
-    from src.config import Config, LLMConfig, WhatsAppConfig, NeonizeConfig
+    from src.channels.whatsapp import WhatsAppChannel
+    from src.config import Config, LLMConfig, NeonizeConfig, WhatsAppConfig
     from src.db import Database
     from src.memory import Memory
     from src.skills import SkillRegistry
-    from src.channels.whatsapp import WhatsAppChannel
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -71,9 +75,7 @@ async def test_whatsapp_channel_prompt_injected_into_system_message(tmp_path: Pa
     await db.connect()
 
     config = Config(
-        llm=LLMConfig(
-            api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
-        )
+        llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
     )
     memory = Memory(str(workspace))
     skills = SkillRegistry()
@@ -95,14 +97,29 @@ async def test_whatsapp_channel_prompt_injected_into_system_message(tmp_path: Pa
         llm = LLMClient(config.llm)
         routing = _create_mock_routing_engine(workspace)
 
+        bot_config = BotConfig(
+            max_tool_iterations=5,
+            memory_max_history=50,
+            system_prompt_prefix="",
+        )
+
+        mock_dedup = AsyncMock()
+        mock_dedup.is_inbound_duplicate = AsyncMock(return_value=False)
+
         bot = Bot(
-            config=config,
-            db=db,
-            llm=llm,
-            memory=memory,
-            skills=skills,
-            routing=routing,
-            instructions_dir=str(instructions_dir),
+            BotDeps(
+                config=bot_config,
+                db=db,
+                llm=llm,
+                memory=memory,
+                skills=skills,
+                routing=routing,
+                instructions_dir=str(instructions_dir),
+                dedup=mock_dedup,
+                rate_limiter=MagicMock(),
+                tool_executor=AsyncMock(),
+                context_assembler=AsyncMock(),
+            )
         )
 
         # Create a real WhatsAppChannel
@@ -118,6 +135,7 @@ async def test_whatsapp_channel_prompt_injected_into_system_message(tmp_path: Pa
             sender_name="Test User",
             text="Hello",
             timestamp=1000.0,
+            acl_passed=True,
         )
 
         # Act — pass the channel
@@ -162,9 +180,7 @@ async def test_no_channel_means_no_channel_prompt(tmp_path: Path):
     await db.connect()
 
     config = Config(
-        llm=LLMConfig(
-            api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1"
-        )
+        llm=LLMConfig(api_key="sk-test", model="gpt-4o-mini", base_url="https://api.openai.com/v1")
     )
     memory = Memory(str(workspace))
     skills = SkillRegistry()
@@ -186,14 +202,29 @@ async def test_no_channel_means_no_channel_prompt(tmp_path: Path):
         llm = LLMClient(config.llm)
         routing = _create_mock_routing_engine(workspace)
 
+        bot_config = BotConfig(
+            max_tool_iterations=5,
+            memory_max_history=50,
+            system_prompt_prefix="",
+        )
+
+        mock_dedup = AsyncMock()
+        mock_dedup.is_inbound_duplicate = AsyncMock(return_value=False)
+
         bot = Bot(
-            config=config,
-            db=db,
-            llm=llm,
-            memory=memory,
-            skills=skills,
-            routing=routing,
-            instructions_dir=str(instructions_dir),
+            BotDeps(
+                config=bot_config,
+                db=db,
+                llm=llm,
+                memory=memory,
+                skills=skills,
+                routing=routing,
+                instructions_dir=str(instructions_dir),
+                dedup=mock_dedup,
+                rate_limiter=MagicMock(),
+                tool_executor=AsyncMock(),
+                context_assembler=AsyncMock(),
+            )
         )
 
         msg = IncomingMessage(
@@ -203,6 +234,7 @@ async def test_no_channel_means_no_channel_prompt(tmp_path: Path):
             sender_name="Test User",
             text="Hello",
             timestamp=1000.0,
+            acl_passed=True,
         )
 
         # Act — no channel passed

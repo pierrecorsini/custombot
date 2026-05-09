@@ -26,14 +26,14 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional, Mapping
+from typing import Mapping, Optional
 
 from src.utils.logging_utils import log_execution
 
 log = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ExecutorResult:
     """Result of a subprocess execution."""
 
@@ -111,9 +111,7 @@ class AsyncExecutor:
                     env=process_env,
                 )
 
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
             stdout = stdout_bytes.decode("utf-8", errors="replace")
             stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -139,20 +137,20 @@ class AsyncExecutor:
                 timed_out=True,
             )
 
-        except FileNotFoundError as e:
+        except FileNotFoundError as exc:
             return ExecutorResult(
                 stdout="",
-                stderr=f"Command not found: {e}",
+                stderr=f"Command not found: {exc}",
                 return_code=-1,
                 success=False,
                 timed_out=False,
             )
 
-        except Exception as e:
-            log.error("AsyncExecutor error: %s: %s", type(e).__name__, e)
+        except Exception as exc:
+            log.error("AsyncExecutor error: %s: %s", type(exc).__name__, exc)
             return ExecutorResult(
                 stdout="",
-                stderr=f"Execution error: {type(e).__name__}: {e}",
+                stderr=f"Execution error: {type(exc).__name__}: {exc}",
                 return_code=-1,
                 success=False,
                 timed_out=False,

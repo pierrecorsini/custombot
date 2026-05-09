@@ -9,10 +9,13 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.skills.base import BaseSkill, validate_input
+from src.utils import JSONDecodeError, json_loads
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -82,13 +85,20 @@ class PlannerSkill(BaseSkill):
         path = self._plans_dir / f"{name}.json"
         if not path.exists():
             return {}
-        return json.loads(path.read_text())
+        try:
+            return json_loads(path.read_text(encoding="utf-8"))
+        except (JSONDecodeError, OSError) as exc:
+            log.error("Failed to load plan %s: %s", name, exc)
+            return {}
 
     def _save(self, name: str, data: dict) -> None:
         """Save plan to file."""
         path = self._plans_dir / f"{name}.json"
         data["updated"] = datetime.now().isoformat()
-        path.write_text(json.dumps(data, indent=2))
+        try:
+            path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            log.error("Failed to save plan %s: %s", name, exc)
 
     def _init(self, name: str, desc: str) -> str:
         """Create a new plan."""
@@ -141,11 +151,14 @@ class PlannerSkill(BaseSkill):
 
         lines = ["## Plans\n"]
         for p in plans:
-            data = json.loads(p.read_text())
-            tasks = data.get("tasks", [])
-            done = sum(1 for t in tasks if t.get("status") == "done")
-            total = len(tasks)
-            lines.append(f"- **{data['name']}** ({done}/{total} done)")
+            try:
+                data = json_loads(p.read_text(encoding="utf-8"))
+                tasks = data.get("tasks", [])
+                done = sum(1 for t in tasks if t.get("status") == "done")
+                total = len(tasks)
+                lines.append(f"- **{data['name']}** ({done}/{total} done)")
+            except (JSONDecodeError, KeyError) as exc:
+                log.warning("Skipping corrupt plan file %s: %s", p.name, exc)
 
         return "\n".join(lines)
 

@@ -1,65 +1,72 @@
-<!-- Context: project-intelligence/nav | Priority: high | Version: 3.0 | Updated: 2026-04-06 -->
+<!-- Context: project-intelligence/navigation | Priority: critical | Version: 2.15 | Updated: 2026-05-08 -->
 
 # Project Intelligence
 
-> Start here. Function-based context for quick project understanding.
+**Purpose**: Quick routes to project-specific context files
 
-## Structure
-
-```
-project-intelligence/
-├── navigation.md                    # ← You are here
-├── concepts/                        # Core understanding (what & why)
-│   ├── architecture.md              # Native Python architecture, patterns, constraints
-│   ├── business-domain.md           # Business context, users, value proposition
-│   └── business-tech-bridge.md      # Business needs → technical solutions mapping
-├── guides/                          # How-to knowledge (how)
-│   ├── dev-environment.md           # Setup, run, develop, deploy
-│   └── log-diagnostics.md           # Log file diagnosis and troubleshooting
-├── lookup/                          # Quick reference tables (what's what)
-│   ├── tech-stack.md                # All technologies, versions, roles
-│   ├── project-structure.md         # Directory tree and key locations
-│   ├── completed-sessions.md        # Development session history
-│   └── decisions-log.md             # Major decisions with rationale
-└── errors/                          # Problems and fixes (what's broken)
-    ├── known-issues.md              # Technical debt, open questions, active issues
-    └── bug-fixes.md                 # Past bugs fixed and patterns to watch
-```
+---
 
 ## Quick Routes
 
-| What You Need | File | Key Content |
-|---------------|------|-------------|
-| **Understand the architecture** | `concepts/architecture.md` | ctypes pattern, integrations, constraints |
-| **Why this project exists** | `concepts/business-domain.md` | Problem, users, value |
-| **How biz maps to tech** | `concepts/business-tech-bridge.md` | Business-technical trade-offs |
-| **Set up dev environment** | `guides/dev-environment.md` | Install, run, test, deploy |
-| **Diagnose a problem** | `guides/log-diagnostics.md` | Log location, search patterns |
-| **What technologies?** | `lookup/tech-stack.md` | Stack table, supporting modules |
-| **Where is X in the code?** | `lookup/project-structure.md` | Directory tree, key dirs |
-| **What was built?** | `lookup/completed-sessions.md` | Session history, pending work |
-| **Why was X decided?** | `lookup/decisions-log.md` | Decisions with alternatives |
-| **What's broken?** | `errors/known-issues.md` | Debt, open questions, issues |
-| **Past bug fixes** | `errors/bug-fixes.md` | Fixed bugs, diagnostic patterns |
+| File | Description | Priority |
+|------|-------------|----------|
+| `technical-domain.md` | Tech stack, architecture, code patterns, naming conventions | critical |
 
-## Onboarding Path
+---
 
-1. `navigation.md` (this file) — orient yourself
-2. `concepts/architecture.md` — understand the system
-3. `lookup/tech-stack.md` — know the tools
-4. `lookup/project-structure.md` — find your way around
-5. `guides/dev-environment.md` — get running
+## Concepts
 
-## Integration
+| File | Description | Priority |
+|------|-------------|----------|
+| `concepts/architecture.md` | Native Python architecture, integration points, resilience patterns | high |
+| `concepts/business-domain.md` | Business context and value (template — needs filling) | high |
+| `concepts/business-tech-bridge.md` | Business ↔ technical mapping (template — needs filling) | high |
 
-This folder is referenced from:
-- `.opencode/context/core/standards/` — standards and patterns
-- `.opencode/context/core/system/context-guide.md` — context loading
+## Guides
 
-## Maintenance
+| File | Description | Priority |
+|------|-------------|----------|
+| `guides/cli-reference.md` | All CLI commands, options, flags, workflows | high |
+| `guides/dev-environment.md` | Setup, run, develop, deploy | medium |
+| `guides/log-diagnostics.md` | Log-based issue diagnosis patterns | medium |
+| `guides/optimization-patterns.md` | Reusable micro-optimization patterns for hot paths | high |
 
-- Update when business direction or architecture changes
-- Document decisions as they're made in `lookup/decisions-log.md`
-- Review `errors/known-issues.md` weekly
-- Log bug fixes in `errors/bug-fixes.md`
-- Archive resolved items from known-issues
+## Lookup
+
+| File | Description | Priority |
+|------|-------------|----------|
+| `lookup/skills-reference.md` | Built-in skills, skill contract, adding custom skills | high |
+| `lookup/config-reference.md` | All config.json fields, types, defaults, LLM providers | high |
+| `lookup/project-structure.md` | Directory layout and key locations | high |
+| `lookup/tech-stack.md` | Technologies, versions, roles | high |
+| `lookup/decisions-log.md` | Architectural decisions with context and rationale | high |
+| `lookup/completed-sessions.md` | Session history and deliverables | medium |
+| `lookup/feature-index.md` | Bot capabilities organized by domain (Messaging, LLM, Skills, etc.) | high |
+| `lookup/remaining-tasks.md` | Pending Round 18 items — roadmap for implementation | medium |
+
+## Errors
+
+| File | Description | Priority |
+|------|-------------|----------|
+| `errors/known-issues.md` | Active tech debt, open issues, gotchas | high |
+| `errors/bug-fixes.md` | Past bugs, fixes, patterns to watch | high |
+
+---
+
+## By Concern
+
+**Architecture** → concepts/architecture.md + technical-domain.md
+**Features** → lookup/feature-index.md
+**Config** → lookup/config-reference.md + guides/cli-reference.md
+**Skills** → lookup/skills-reference.md
+**Debugging** → errors/known-issues.md + guides/log-diagnostics.md
+**History** → lookup/completed-sessions.md + lookup/decisions-log.md + errors/bug-fixes.md
+**Roadmap** → lookup/remaining-tasks.md
+
+---
+
+## Management
+
+- Update patterns: `/add-context --update`
+- View structure: `/context map project-intelligence`
+- Validate: `/context validate`

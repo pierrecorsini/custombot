@@ -18,14 +18,22 @@ Usage:
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Optional, List, Callable, Any
+from typing import Any, Callable, List, Optional, TYPE_CHECKING
 
-import questionary
+try:
+    import questionary
+except ImportError:
+    raise ImportError(
+        "The 'options' command requires the 'tui' optional dependency. "
+        "Install it with: pip install custombot[tui]  or  pip install questionary"
+    ) from None
 
+from src.config import CONFIG_PATH, load_config, save_config
 from src.ui.cli_output import cli
-from src.config import Config, load_config, save_config, CONFIG_PATH
 
+if TYPE_CHECKING:
+    from src.config import Config
+    from pathlib import Path
 
 # Custom style for questionary prompts
 QUESTIONARY_STYLE = questionary.Style(
@@ -99,9 +107,7 @@ def _edit_field_list(
             )
 
         # Add navigation options
-        choices.append(
-            questionary.Choice("─────────────────────", value=None, disabled=True)
-        )
+        choices.append(questionary.Choice("─────────────────────", value=None, disabled=True))
         choices.append(questionary.Choice("✓ Done (save changes)", value="__done__"))
         choices.append(questionary.Choice("✗ Cancel", value="__cancel__"))
 
@@ -327,8 +333,8 @@ def run_options_tui(config_path: Path = CONFIG_PATH) -> bool:
     try:
         config = load_config(config_path)
         cli.info(f"Loaded configuration from {config_path}")
-    except Exception as e:
-        cli.error(f"Failed to load configuration: {e}")
+    except Exception as exc:
+        cli.error(f"Failed to load configuration: {exc}")
         return False
 
     # Main configuration loop
@@ -353,8 +359,8 @@ def run_options_tui(config_path: Path = CONFIG_PATH) -> bool:
                 save_config(config, config_path)
                 cli.success(f"Configuration saved to {config_path}")
                 return True
-            except Exception as e:
-                cli.error(f"Failed to save configuration: {e}")
+            except Exception as exc:
+                cli.error(f"Failed to save configuration: {exc}")
                 return False
 
     # Should never reach here, but satisfy type checker

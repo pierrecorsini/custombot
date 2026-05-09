@@ -16,13 +16,17 @@ import logging
 import sys
 import time
 import uuid
-from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from rich.console import Console
 from rich.panel import Panel
 
-from src.channels.base import BaseChannel, IncomingMessage, MessageHandler
+from src.channels.base import BaseChannel, IncomingMessage
+from src.core.errors import NonCriticalCategory, log_noncritical
+
+if TYPE_CHECKING:
+    from src.channels.base import MessageHandler
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +73,7 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
         """Start the interactive REPL loop."""
         self._running = True
         log.info("CommandLine channel starting (chat_id=%s)", self._chat_id)
+        self.mark_connected()
 
         # Print colorful welcome banner
         console.print("")
@@ -114,9 +119,7 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
                     channel_type="cli",
                     fromMe=False,
                     toMe=True,  # CLI is always a direct message to the bot
-                    correlation_id=str(uuid.uuid4())[
-                        :8
-                    ],  # Generate correlation ID for CLI
+                    correlation_id=str(uuid.uuid4())[:8],  # Generate correlation ID for CLI
                 )
 
                 # Create stream callback for real-time tool execution logging
@@ -125,9 +128,10 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
 
                 # Process the message with channel and stream callback
                 try:
-                    response = await handler(
-                        msg, channel=self, stream_callback=stream_callback
-                    )
+                    # CLI passes extra kwargs (channel, stream_callback) for
+                    # live tool-execution feedback; MessageHandler's narrow type
+                    # doesn't capture this — the actual runtime handler accepts **kwargs.
+                    response = await handler(msg)  # type: ignore[func-returns-value]
                     if response:
                         self._print_response(response)
                 except Exception as exc:
@@ -156,13 +160,18 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
         except EOFError:
             return None
         except Exception:
+            log_noncritical(
+                NonCriticalCategory.CHANNEL_INPUT,
+                "Failed to read CLI input",
+                logger=log,
+            )
             return None
 
     def _print_response(self, text: str) -> None:
         """Print the bot's response with colorful styling."""
         console.print(f"\n[bold green]🤖 Bot:[/bold green] {text}\n")
 
-    async def _send_message(self, chat_id: str, text: str) -> None:
+    async def _send_message(self, chat_id: str, text: str, *, skip_delays: bool = False) -> None:
         """
         Send a message (for CLI, this is handled by the handler response).
 
@@ -171,14 +180,10 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
         """
         self._print_response(text)
 
-    async def send_audio(
-        self, chat_id: str, file_path: Path, *, ptt: bool = False
-    ) -> None:
+    async def send_audio(self, chat_id: str, file_path: Path, *, ptt: bool = False) -> None:
         """Print audio file info in CLI mode."""
         kind = "voice note" if ptt else "audio"
-        console.print(
-            f"\n[bold magenta]🔊 {kind.title()}:[/bold magenta] {file_path}\n"
-        )
+        console.print(f"\n[bold magenta]🔊 {kind.title()}:[/bold magenta] {file_path}\n")
 
     async def send_document(
         self,
@@ -197,6 +202,10 @@ You are in terminal/CLI mode. Format responses for readability in a text termina
         """Show typing indicator (no-op for CLI)."""
         pass
 
-    def stop(self) -> None:
+    async def close(self) -> None:
+        """Close CLI channel (no-op)."""
+        pass
+
+    def request_shutdown(self) -> None:
         """Signal the channel to stop."""
         self._running = False

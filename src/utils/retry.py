@@ -20,6 +20,7 @@ import asyncio
 import functools
 import logging
 import random
+import time
 from typing import Any, Callable, Coroutine, Set, Tuple, TypeVar, Union
 
 from src.exceptions import LLMError
@@ -57,43 +58,103 @@ TRANSIENT_ERROR_PATTERNS: Tuple[str, ...] = (
     "try again",
 )
 
+# ── OpenAI SDK typed exception classification ──────────────────────────────
+
+try:
+    from openai import (
+        APIConnectionError as _APIConnectionError,
+        APITimeoutError as _APITimeoutError,
+        AuthenticationError as _AuthenticationError,
+        BadRequestError as _BadRequestError,
+        ConflictError as _ConflictError,
+        InternalServerError as _InternalServerError,
+        NotFoundError as _NotFoundError,
+        PermissionDeniedError as _PermissionDeniedError,
+        RateLimitError as _RateLimitError,
+        UnprocessableEntityError as _UnprocessableEntityError,
+    )
+
+    _OPENAI_AVAILABLE = True
+except ImportError:
+    _OPENAI_AVAILABLE = False
+
+# Retryable: network, timeout, rate-limit, server errors
+_RETRYABLE_OPENAI_TYPES: Tuple[type, ...] = (
+    (_APIConnectionError, _APITimeoutError, _RateLimitError, _InternalServerError)
+    if _OPENAI_AVAILABLE
+    else ()
+)
+
+# Non-retryable: auth, bad request, not found, permission, conflict, unprocessable
+_NON_RETRYABLE_OPENAI_TYPES: Tuple[type, ...] = (
+    (
+        _AuthenticationError,
+        _BadRequestError,
+        _PermissionDeniedError,
+        _NotFoundError,
+        _ConflictError,
+        _UnprocessableEntityError,
+    )
+    if _OPENAI_AVAILABLE
+    else ()
+)
+
 
 def is_transient_error(error: Exception) -> bool:
     """
     Determine if an error is transient and should be retried.
 
-    Transient errors include:
-      - Rate limiting (429)
-      - Timeouts (408, 504)
-      - Server errors (500, 502, 503)
-      - Connection issues
+    Classification strategy (ordered by reliability):
+
+    1. **OpenAI SDK typed exceptions** — isinstance checks against the SDK's
+       exception hierarchy.  Retryable: ``APIConnectionError``,
+       ``APITimeoutError``, ``RateLimitError``, ``InternalServerError``.
+       Non-retryable: ``AuthenticationError``, ``BadRequestError``,
+       ``PermissionDeniedError``, ``NotFoundError``, ``ConflictError``,
+       ``UnprocessableEntityError``.
+
+    2. **HTTP status code** — ``getattr(error, "status_code")`` compared
+       against :data:`TRANSIENT_STATUS_CODES`.
+
+    3. **String pattern matching** — last resort heuristic matching against
+       :data:`TRANSIENT_ERROR_PATTERNS`.
+
+    4. **Wrapped cause chain** — recurses into ``error.__cause__``.
 
     Args:
-        error: The exception to check
+        error: The exception to check.
 
     Returns:
-        True if the error is transient and should be retried
+        True if the error is transient and should be retried.
     """
-    error_str = str(error).lower()
-
-    # Check for transient error patterns in message
-    for pattern in TRANSIENT_ERROR_PATTERNS:
-        if pattern in error_str:
+    # 1. Type-based OpenAI classification (most reliable)
+    if _OPENAI_AVAILABLE:
+        if isinstance(error, _NON_RETRYABLE_OPENAI_TYPES):
+            log.debug("Non-retryable OpenAI error: %s", type(error).__name__)
+            return False
+        if isinstance(error, _RETRYABLE_OPENAI_TYPES):
+            log.debug("Retryable OpenAI error: %s", type(error).__name__)
             return True
 
-    # Check for HTTP status codes in exception attributes
+    # 2. HTTP status-code check
     status_code = getattr(error, "status_code", None)
     if status_code is not None and status_code in TRANSIENT_STATUS_CODES:
         return True
 
-    # Check OpenAI-specific error structure
-    if hasattr(error, "response"):
-        response = error.response
-        if hasattr(response, "status_code"):
-            if response.status_code in TRANSIENT_STATUS_CODES:
-                return True
+    # 3. Response object status-code check (OpenAI-specific structure)
+    response = getattr(error, "response", None)
+    if response is not None:
+        resp_status = getattr(response, "status_code", None)
+        if resp_status is not None and resp_status in TRANSIENT_STATUS_CODES:
+            return True
 
-    # Check for __cause__ (wrapped exceptions)
+    # 4. String pattern matching (least reliable, fallback)
+    error_str = str(error).lower()
+    for pattern in TRANSIENT_ERROR_PATTERNS:
+        if pattern in error_str:
+            return True
+
+    # 5. Wrapped cause chain
     if error.__cause__ is not None:
         return is_transient_error(error.__cause__)
 
@@ -120,6 +181,7 @@ def retry_with_backoff(
     max_retries: int = 3,
     initial_delay: float = 1.0,
     retryable_exceptions: Tuple[type, ...] = (Exception,),
+    max_total_seconds: float | None = None,
 ) -> Callable[
     [Callable[..., Coroutine[Any, Any, T]]],
     Callable[..., Coroutine[Any, Any, T]],
@@ -131,6 +193,10 @@ def retry_with_backoff(
         max_retries: Maximum number of retry attempts (default: 3)
         initial_delay: Initial delay in seconds before first retry (default: 1.0)
         retryable_exceptions: Tuple of exception types to catch (default: all)
+        max_total_seconds: Maximum total elapsed seconds across all attempts.
+            When set, retries stop once the cumulative wall-clock time (including
+            call durations and backoff waits) exceeds this budget.  Defaults to
+            ``None`` (no time budget, only attempt-count limiting).
 
     Returns:
         Decorated function with retry logic
@@ -140,7 +206,7 @@ def retry_with_backoff(
         async def call_llm():
             return await client.chat(messages)
 
-        @retry_with_backoff(max_retries=5, initial_delay=0.5)
+        @retry_with_backoff(max_retries=5, initial_delay=0.5, max_total_seconds=180)
         async def fetch_data():
             return await api.get("/data")
     """
@@ -152,6 +218,7 @@ def retry_with_backoff(
         async def wrapper(*args: Any, **kwargs: Any) -> T:
             last_error: Exception | None = None
             delay = initial_delay
+            start_time = time.monotonic() if max_total_seconds is not None else 0.0
 
             for attempt in range(max_retries + 1):
                 try:
@@ -176,6 +243,19 @@ def retry_with_backoff(
                             error,
                         )
                         raise
+
+                    # Check if the time budget is exhausted
+                    if max_total_seconds is not None:
+                        elapsed = time.monotonic() - start_time
+                        if elapsed >= max_total_seconds:
+                            log.warning(
+                                "Retry budget exhausted: %.1fs/%.1fs after %d attempts: %s",
+                                elapsed,
+                                max_total_seconds,
+                                attempt + 1,
+                                error,
+                            )
+                            raise
 
                     # Calculate delay with jitter
                     actual_delay = calculate_delay_with_jitter(delay)

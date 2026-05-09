@@ -13,9 +13,26 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from src.constants import MAX_INSTRUCTION_FILE_SIZE
+from src.security import PathSecurityError, is_path_in_workspace
 from src.utils.frontmatter import parse_frontmatter
 
 log = logging.getLogger(__name__)
+
+
+def _check_file_size(path: Path, max_bytes: int = MAX_INSTRUCTION_FILE_SIZE) -> None:
+    """Reject instruction files exceeding the size cap."""
+    size = path.stat().st_size
+    if size > max_bytes:
+        log.warning(
+            "Instruction file exceeds size cap: %s (%d bytes > %d bytes)",
+            path,
+            size,
+            max_bytes,
+        )
+        raise ValueError(
+            f"Instruction file too large: {path} ({size} bytes > {max_bytes} bytes)"
+        )
 
 
 class InstructionLoader:
@@ -24,6 +41,25 @@ class InstructionLoader:
     def __init__(self, instructions_dir: Path) -> None:
         self._dir = instructions_dir
         self._cache: dict[str, tuple[float, str]] = {}
+
+    def _validate_path(self, target: Path, filename: str) -> None:
+        """Validate that a file path stays within the instructions directory."""
+        # Reject filenames with directory components (path traversal / absolute paths)
+        if filename != Path(filename).name:
+            log.warning("Path traversal attempt in instruction loader: %r", filename)
+            raise PathSecurityError(
+                f"Path traversal blocked: {filename!r}",
+                path=filename,
+                reason="path_traversal",
+            )
+        # Verify resolved path stays within instructions directory
+        if not is_path_in_workspace(self._dir, target.resolve()):
+            log.warning("Instruction path escapes directory: %r", filename)
+            raise PathSecurityError(
+                f"Instruction path escape blocked: {filename!r}",
+                path=filename,
+                reason="path_traversal",
+            )
 
     def load(self, filename: str) -> str:
         """
@@ -39,6 +75,7 @@ class InstructionLoader:
         """
         safe_filename = Path(filename).name
         path = self._dir / safe_filename
+        self._validate_path(path, filename)
 
         if not (path.exists() and path.is_file()):
             log.critical(
@@ -46,6 +83,8 @@ class InstructionLoader:
                 path,
             )
             raise FileNotFoundError(f"Instruction file not found: {path}")
+
+        _check_file_size(path)
 
         mtime = path.stat().st_mtime
         cached = self._cache.get(safe_filename)
@@ -75,9 +114,11 @@ class InstructionLoader:
         """
         safe_filename = Path(filename).name
         path = self._dir / safe_filename
+        self._validate_path(path, filename)
 
         if not path.exists():
             return None
+        _check_file_size(path)
         return path.read_text(encoding="utf-8")
 
     def save(self, filename: str, content: str) -> None:
@@ -90,6 +131,7 @@ class InstructionLoader:
         """
         safe_filename = Path(filename).name
         path = self._dir / safe_filename
+        self._validate_path(path, filename)
         path.write_text(content, encoding="utf-8")
         # Invalidate cache
         self._cache.pop(safe_filename, None)
@@ -107,6 +149,7 @@ class InstructionLoader:
         """
         safe_filename = Path(filename).name
         path = self._dir / safe_filename
+        self._validate_path(path, filename)
 
         if not path.exists():
             return False

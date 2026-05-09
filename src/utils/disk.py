@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
+
+from src.utils.locking import ThreadLock
 
 log = logging.getLogger(__name__)
 
@@ -30,8 +33,15 @@ DEFAULT_MIN_DISK_SPACE: int = 100 * 1024 * 1024  # 100 MB in bytes
 # Warning threshold: 1GB - log warning when below this
 DISK_SPACE_WARNING_THRESHOLD: int = 1024 * 1024 * 1024  # 1 GB in bytes
 
+# Cache TTL for disk space checks (seconds)
+DISK_SPACE_CACHE_TTL: int = 30
 
-@dataclass
+# Thread-safe cache: resolved_path → (timestamp, total, used, free)
+_disk_cache: dict[str, tuple[float, int, int, int]] = {}
+_disk_cache_lock = ThreadLock()
+
+
+@dataclass(slots=True)
 class DiskSpaceResult:
     """
     Result of a disk space check operation.
@@ -123,15 +133,46 @@ def check_disk_space(
     if not check_path.exists():
         check_path = path_obj
 
+    cache_key = str(check_path.resolve())
+    now = time.monotonic()
+
+    # Fast path: return cached result if still fresh
+    with _disk_cache_lock:
+        cached = _disk_cache.get(cache_key)
+    if cached is not None:
+        ts, total, used, free = cached
+        if now - ts < DISK_SPACE_CACHE_TTL:
+            has_sufficient = free >= min_bytes
+            result = DiskSpaceResult(
+                has_sufficient_space=has_sufficient,
+                total_bytes=total,
+                used_bytes=used,
+                free_bytes=free,
+                min_required_bytes=min_bytes,
+                path_checked=str(check_path),
+            )
+            if not has_sufficient:
+                log.warning(
+                    "Insufficient disk space at %s: %.2fMB free, need %.2fMB",
+                    check_path,
+                    result.free_mb,
+                    min_bytes / (1024 * 1024),
+                )
+            return result
+
     try:
         usage = shutil.disk_usage(str(check_path))
-    except OSError as e:
-        log.error("Failed to check disk space for %s: %s", check_path, e)
+    except OSError as exc:
+        log.error("Failed to check disk space for %s: %s", check_path, exc)
         raise
 
     total = usage.total
     used = usage.used
     free = usage.free
+
+    # Update cache for next caller
+    with _disk_cache_lock:
+        _disk_cache[cache_key] = (now, total, used, free)
 
     has_sufficient = free >= min_bytes
 
@@ -187,8 +228,8 @@ def ensure_disk_space(
     Example:
         >>> try:
         ...     ensure_disk_space("/data", min_bytes=500_000_000)
-        ... except OSError as e:
-        ...     print(f"Cannot write: {e}")
+        ... except OSError as exc:
+        ...     print(f"Cannot write: {exc}")
     """
     result = check_disk_space(path, min_bytes)
 
@@ -201,10 +242,29 @@ def ensure_disk_space(
     return result
 
 
+def recursive_dir_size(directory: Path) -> int:
+    """Return total size (bytes) of all files under *directory*, recursively.
+
+    Safe for any directory — skips files that raise ``OSError``.
+    """
+    total = 0
+    try:
+        for entry in directory.rglob("*"):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return total
+
+
 __all__ = [
     "check_disk_space",
     "ensure_disk_space",
     "DiskSpaceResult",
     "DEFAULT_MIN_DISK_SPACE",
     "DISK_SPACE_WARNING_THRESHOLD",
+    "recursive_dir_size",
 ]

@@ -16,12 +16,12 @@ import json
 import logging
 import re
 import sqlite3
-import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.db.sqlite_utils import SqliteHelper
+from src.utils.locking import ThreadLockMixin
 
 log = logging.getLogger(__name__)
 
@@ -53,16 +53,20 @@ VALID_RELATIONS = {
 }
 
 
-class ProjectStore(SqliteHelper):
+class ProjectStore(ThreadLockMixin, SqliteHelper):
     """Manages projects, knowledge entries, and their relationships."""
 
     def __init__(self, db_path: str) -> None:
         self._db_path = Path(db_path)
-        self._lock = threading.Lock()
+        super().__init__()
 
     def connect(self) -> None:
         self._open_connection()
-        self._ensure_schema()
+        try:
+            self._ensure_schema()
+        except Exception:
+            self.close()
+            raise
 
     def _ensure_schema(self) -> None:
         assert self._db is not None
@@ -202,15 +206,11 @@ class ProjectStore(SqliteHelper):
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [project_id]
-        self._execute_and_commit(
-            f"UPDATE projects SET {set_clause} WHERE id = ?", values
-        )
+        self._execute_and_commit(f"UPDATE projects SET {set_clause} WHERE id = ?", values)
         return self.get_project(project_id)
 
     def delete_project(self, project_id: str) -> bool:
-        cur = self._execute_and_commit(
-            "DELETE FROM projects WHERE id = ?", (project_id,)
-        )
+        cur = self._execute_and_commit("DELETE FROM projects WHERE id = ?", (project_id,))
         return cur.rowcount > 0
 
     def _row_to_project(self, row: tuple) -> Dict[str, Any]:
@@ -279,9 +279,7 @@ class ProjectStore(SqliteHelper):
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [entry_id]
-        self._execute_and_commit(
-            f"UPDATE knowledge_entries SET {set_clause} WHERE id = ?", values
-        )
+        self._execute_and_commit(f"UPDATE knowledge_entries SET {set_clause} WHERE id = ?", values)
         return self.get_knowledge(entry_id)
 
     def delete_knowledge(self, entry_id: int) -> bool:
@@ -291,9 +289,7 @@ class ProjectStore(SqliteHelper):
                 "DELETE FROM knowledge_links WHERE from_id = ? OR to_id = ?",
                 (entry_id, entry_id),
             )
-            cur = self._db.execute(
-                "DELETE FROM knowledge_entries WHERE id = ?", (entry_id,)
-            )
+            cur = self._db.execute("DELETE FROM knowledge_entries WHERE id = ?", (entry_id,))
             self._db.commit()
             return cur.rowcount > 0
 
@@ -401,9 +397,7 @@ class ProjectStore(SqliteHelper):
 
     # ── Project-Chats Binding ─────────────────────────────────────────────
 
-    def bind_chat(
-        self, project_id: str, chat_id: str, role: str = "contributor"
-    ) -> None:
+    def bind_chat(self, project_id: str, chat_id: str, role: str = "contributor") -> None:
         self._execute_and_commit(
             "INSERT OR IGNORE INTO project_chats (project_id, chat_id, role) VALUES (?, ?, ?)",
             (project_id, chat_id, role),

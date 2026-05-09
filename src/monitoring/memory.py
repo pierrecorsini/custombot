@@ -29,10 +29,10 @@ import logging
 import platform
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import Any, Callable, Optional
 
-if TYPE_CHECKING:
-    pass
+from src.utils.background_service import BaseBackgroundService
+from src.utils.singleton import get_or_create_singleton, reset_singleton
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ DEFAULT_MEMORY_WARNING_THRESHOLD: float = 80.0
 DEFAULT_MEMORY_CHECK_INTERVAL: float = 60.0
 
 
-@dataclass
+@dataclass(slots=True)
 class MemoryStats:
     """Memory usage statistics for system and process."""
 
@@ -141,8 +141,8 @@ def get_memory_stats(
         for name, getter in cache_tracker.items():
             try:
                 cache_sizes[name] = getter()
-            except Exception as e:
-                log.debug("Failed to get cache size for %s: %s", name, e)
+            except Exception as exc:
+                log.debug("Failed to get cache size for %s: %s", name, exc)
                 cache_sizes[name] = -1
 
     return MemoryStats(
@@ -161,7 +161,27 @@ def get_memory_stats(
     )
 
 
-class MemoryMonitor:
+class NullMemoryMonitor:
+    """NullObject that satisfies the MemoryMonitor Protocol.
+
+    Used when psutil is unavailable or monitoring is disabled, eliminating
+    downstream ``None``-checks.  Every method is a safe no-op.
+    """
+
+    def register_cache(self, name: str, size_fn: Callable[[], int]) -> None:
+        """No-op cache registration."""
+
+    def unregister_cache(self, name: str) -> None:
+        """No-op cache removal."""
+
+    def start_periodic_check(self, interval_seconds: float = DEFAULT_MEMORY_CHECK_INTERVAL) -> None:
+        """No-op periodic check startup."""
+
+    async def stop(self) -> None:
+        """No-op stop."""
+
+
+class MemoryMonitor(BaseBackgroundService):
     """
     Memory monitor with periodic checking and threshold warnings.
 
@@ -189,11 +209,10 @@ class MemoryMonitor:
             warning_threshold_percent: Percentage at which to log warnings.
             critical_threshold_percent: Percentage at which to log errors.
         """
+        super().__init__()
         self._warning_threshold = warning_threshold_percent
         self._critical_threshold = critical_threshold_percent
         self._cache_trackers: dict[str, Callable[[], int]] = {}
-        self._task: Optional[asyncio.Task[None]] = None
-        self._running = False
         self._last_stats: Optional[MemoryStats] = None
         self._peak_memory_percent: float = 0.0
 
@@ -271,8 +290,9 @@ class MemoryMonitor:
 
         return result
 
-    async def _periodic_check(self, interval_seconds: float) -> None:
+    async def _run_loop(self) -> None:
         """Background task that checks memory periodically."""
+        interval_seconds = getattr(self, "_interval", DEFAULT_MEMORY_CHECK_INTERVAL)
         log.info(
             "Memory monitor started (interval=%.1fs, warning_threshold=%.1f%%, critical_threshold=%.1f%%)",
             interval_seconds,
@@ -297,39 +317,21 @@ class MemoryMonitor:
                 if stats.cache_sizes:
                     log.debug("Cache sizes: %s", stats.cache_sizes)
 
-            except Exception as e:
-                log.error("Memory check failed: %s", e, exc_info=True)
+            except Exception as exc:
+                log.error("Memory check failed: %s", exc, exc_info=True)
 
             await asyncio.sleep(interval_seconds)
 
-    def start_periodic_check(
-        self, interval_seconds: float = DEFAULT_MEMORY_CHECK_INTERVAL
-    ) -> None:
+    def start_periodic_check(self, interval_seconds: float = DEFAULT_MEMORY_CHECK_INTERVAL) -> None:
         """
         Start periodic memory checking in the background.
 
         Args:
             interval_seconds: How often to check memory (default 60s).
         """
-        if self._running:
-            log.warning("Memory monitor already running")
-            return
-
-        self._running = True
-        self._task = asyncio.create_task(self._periodic_check(interval_seconds))
+        self._interval = interval_seconds
+        self.start()
         log.info("Memory monitor periodic check started")
-
-    async def stop(self) -> None:
-        """Stop the periodic memory check."""
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-        log.info("Memory monitor stopped")
 
     @property
     def peak_memory_percent(self) -> float:
@@ -347,16 +349,14 @@ class MemoryMonitor:
         return self._running
 
 
-# Global monitor instance (lazy-initialized)
-_global_monitor: Optional[MemoryMonitor] = None
-
-
 def get_global_monitor(
     warning_threshold_percent: float = DEFAULT_MEMORY_WARNING_THRESHOLD,
     critical_threshold_percent: float = 90.0,
 ) -> MemoryMonitor:
     """
     Get or create the global memory monitor instance.
+
+    Thread-safe singleton using get_or_create_singleton from utils.
 
     Args:
         warning_threshold_percent: Warning threshold percentage.
@@ -365,13 +365,16 @@ def get_global_monitor(
     Returns:
         The global MemoryMonitor instance.
     """
-    global _global_monitor
-    if _global_monitor is None:
-        _global_monitor = MemoryMonitor(
-            warning_threshold_percent=warning_threshold_percent,
-            critical_threshold_percent=critical_threshold_percent,
-        )
-    return _global_monitor
+    return get_or_create_singleton(
+        MemoryMonitor,
+        warning_threshold_percent=warning_threshold_percent,
+        critical_threshold_percent=critical_threshold_percent,
+    )
+
+
+def reset_global_monitor() -> None:
+    """Reset the global memory monitor (useful for testing)."""
+    reset_singleton(MemoryMonitor)
 
 
 async def check_memory_health() -> dict[str, Any]:
@@ -417,13 +420,13 @@ async def check_memory_health() -> dict[str, Any]:
             ),
             "stats": None,
         }
-    except Exception as e:
-        log.error("Memory health check failed: %s", e, exc_info=True)
+    except Exception as exc:
+        log.error("Memory health check failed: %s", exc, exc_info=True)
         return {
             "component": ComponentHealth(
                 name="memory",
                 status=HealthStatus.DEGRADED,
-                message=f"Memory check error: {type(e).__name__}",
+                message=f"Memory check error: {type(exc).__name__}",
             ),
             "stats": None,
         }

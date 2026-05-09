@@ -24,8 +24,10 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ log = logging.getLogger(__name__)
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 
 
-@dataclass
+@dataclass(slots=True)
 class ParsedFile:
     """Result of parsing a file with optional frontmatter.
 
@@ -73,7 +75,7 @@ def parse_frontmatter(text: str) -> ParsedFile:
         import yaml
 
         metadata = yaml.safe_load(yaml_block)
-    except Exception as exc:
+    except (ImportError, ValueError) as exc:
         log.warning("Failed to parse frontmatter: %s", exc)
         return ParsedFile(content=text)
 
@@ -133,8 +135,6 @@ def dump_frontmatter(metadata: Dict[str, Any], content: str) -> str:
     """
     import yaml
 
-    yaml_block = yaml.dump(
-        metadata, default_flow_style=False, allow_unicode=True
-    ).strip()
+    yaml_block = yaml.dump(metadata, default_flow_style=False, allow_unicode=True).strip()
     body = content.lstrip("\n")
     return f"---\n{yaml_block}\n---\n\n{body}"

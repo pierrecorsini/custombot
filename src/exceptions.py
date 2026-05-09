@@ -4,10 +4,36 @@ exceptions.py — Custom exception hierarchy for CustomBot.
 Provides domain-specific exceptions for different error types:
     - LLMError: LLM API communication failures
     - DatabaseError: Database operation failures
-    - BridgeError: Bridge/channel communication failures
+    - BridgeError: Bridge/transport-layer communication failures
+    - ChannelError: Channel-specific errors (connection, auth, send failures)
     - SkillError: Skill execution failures
     - ConfigurationError: Configuration validation failures
     - RoutingError: Routing rule evaluation failures
+    - DiskSpaceError: Insufficient disk space conditions
+    - MemoryError: Vector memory and semantic search failures
+
+Exception hierarchy::
+
+    CustomBotException
+    ├── LLMError
+    ├── DatabaseError
+    ├── BridgeError          (transport/protocol layer)
+    ├── ChannelError         (channel-specific: connection, auth, send)
+    ├── SkillError
+    ├── ConfigurationError
+    │   └── ConfigValidationError
+    ├── RoutingError
+    ├── DiskSpaceError
+    └── MemoryError          (vector search, embedding failures)
+
+BridgeError vs ChannelError:
+    ``BridgeError`` covers transport-layer and protocol errors (e.g. the
+    WhatsApp bridge process is unreachable, message serialization fails).
+    ``ChannelError`` covers channel-specific errors that are tied to a
+    particular channel implementation (e.g. WhatsApp auth failure, QR
+    timeout, connection drop during send).  When in doubt, prefer
+    ``ChannelError`` for errors originating in ``src/channels/`` and
+    ``BridgeError`` for errors in the bridge/transport layer.
 
 All exceptions support:
     - User-friendly messages with actionable suggestions
@@ -27,8 +53,8 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Any, Optional
 from enum import Enum
+from typing import Any, Optional
 
 
 class ErrorCode(str, Enum):
@@ -40,6 +66,9 @@ class ErrorCode(str, Enum):
     LLM_TIMEOUT = "ERR_1003"
     LLM_MODEL_UNAVAILABLE = "ERR_1004"
     LLM_CONNECTION_FAILED = "ERR_1005"
+    LLM_INVALID_REQUEST = "ERR_1006"
+    LLM_CONTEXT_LENGTH_EXCEEDED = "ERR_1007"
+    LLM_CIRCUIT_BREAKER_OPEN = "ERR_1008"
 
     # Bridge/Channel errors (2000-2099)
     BRIDGE_CONNECTION_FAILED = "ERR_2001"
@@ -71,13 +100,14 @@ class ErrorCode(str, Enum):
 
 
 # Documentation URLs for common error categories
-DOCS_URLS = {
-    "llm": "https://github.com/your-repo/custombot/docs/llm-setup.md",
-    "bridge": "https://github.com/your-repo/custombot/docs/whatsapp-setup.md",
-    "database": "https://github.com/your-repo/custombot/docs/database.md",
-    "skills": "https://github.com/your-repo/custombot/docs/skills.md",
-    "config": "https://github.com/your-repo/custombot/docs/configuration.md",
-    "general": "https://github.com/your-repo/custombot/docs/troubleshooting.md",
+_BASE_DOCS = "https://github.com/pierrecorsini/custombot"
+DOCS_URLS: dict[str, str | None] = {
+    "llm": f"{_BASE_DOCS}#llm-providers",
+    "bridge": f"{_BASE_DOCS}#quick-start",
+    "database": f"{_BASE_DOCS}#workspace-isolation",
+    "skills": f"{_BASE_DOCS}#built-in-skills",
+    "config": f"{_BASE_DOCS}#configuration-configjson",
+    "general": _BASE_DOCS,
 }
 
 
@@ -145,12 +175,19 @@ class CustomBotException(Exception):
             parts.append(f"details={{{detail_str}}}")
         return f"{class_name}({', '.join(parts)})"
 
-    def to_user_message(self, include_ref: bool = True) -> str:
+    def to_user_message(
+        self,
+        include_ref: bool = True,
+        correlation_id: Optional[str] = None,
+        include_docs: bool = True,
+    ) -> str:
         """
         Format the error as a user-friendly message.
 
         Args:
             include_ref: Whether to include error code reference
+            correlation_id: Optional correlation ID for request tracing
+            include_docs: Whether to include documentation links
 
         Returns:
             Formatted message with emoji, explanation, and suggestions.
@@ -164,13 +201,18 @@ class CustomBotException(Exception):
         if self.suggestion:
             parts.append(f"💡 {self.suggestion}")
 
-        # Add error code for support reference
+        # Add error code and/or correlation ID for support reference
         if include_ref and self.error_code != ErrorCode.UNKNOWN:
-            parts.append(f"🔢 Error code: {self.error_code.value}")
+            ref_parts = [f"🔢 Ref: {self.error_code.value}"]
+            if correlation_id:
+                ref_parts.append(correlation_id)
+            parts.append(" | ".join(ref_parts))
+        elif correlation_id:
+            parts.append(f"🔢 Ref: {correlation_id}")
 
         # Add documentation link
-        if self.docs_url:
-            parts.append(f"📚 Docs: {self.docs_url}")
+        if include_docs and self.docs_url:
+            parts.append(f"📚 Help: {self.docs_url}")
 
         return "\n".join(parts)
 
@@ -303,6 +345,45 @@ class DiskSpaceError(CustomBotException):
     default_message = "Insufficient disk space"
 
 
+class ChannelError(CustomBotException):
+    """
+    Exception for channel-specific errors (connection, auth, send failures).
+
+    ``ChannelError`` covers errors originating in channel implementations
+    (``src/channels/``) that are tied to a specific channel type, such as
+    WhatsApp connection drops, QR timeout, or authentication failures.
+
+    Contrast with ``BridgeError``, which covers transport-layer and
+    protocol errors (e.g. the bridge process is unreachable, message
+    serialization fails).  When in doubt, prefer ``ChannelError`` for
+    errors originating in ``src/channels/`` and ``BridgeError`` for
+    errors in the bridge/transport layer.
+
+    Example:
+        raise ChannelError("WhatsApp connection lost", channel="whatsapp", reason="timeout")
+    """
+
+    default_message = "Channel communication failed"
+    default_docs_category = "bridge"
+
+
+class MemoryError(CustomBotException):
+    """
+    Exception for vector memory and semantic search failures.
+
+    Raised when:
+        - Vector search fails (embedding API error, index corruption)
+        - Memory overflow during embedding computation
+        - Vector store connection or query errors
+
+    Example:
+        raise MemoryError("Vector search failed", operation="semantic_search", query="hello")
+    """
+
+    default_message = "Memory operation failed"
+    default_docs_category = "database"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Error Factory Functions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -386,8 +467,9 @@ def format_user_error(
     """
     Format any exception as a user-friendly error message.
 
-    This function provides consistent formatting for all errors shown to users,
-    with actionable suggestions and support references.
+    For CustomBotException instances, delegates to ``to_user_message()`` to
+    keep formatting logic in a single place. Falls back to a generic message
+    for standard Python exceptions.
 
     Args:
         error: The exception to format
@@ -398,29 +480,11 @@ def format_user_error(
         Formatted user-friendly error message with emoji
     """
     if isinstance(error, CustomBotException):
-        parts = []
-
-        # Main error message with emoji
-        parts.append(f"⚠️ {error.message}")
-
-        # Add actionable suggestion
-        if error.suggestion:
-            parts.append(f"💡 {error.suggestion}")
-
-        # Add error code for support reference
-        if error.error_code != ErrorCode.UNKNOWN:
-            ref_parts = [f"🔢 Ref: {error.error_code.value}"]
-            if correlation_id:
-                ref_parts.append(f"{correlation_id}")
-            parts.append(" | ".join(ref_parts))
-        elif correlation_id:
-            parts.append(f"🔢 Ref: {correlation_id}")
-
-        # Add documentation link
-        if include_docs and error.docs_url:
-            parts.append(f"📚 Help: {error.docs_url}")
-
-        return "\n".join(parts)
+        return error.to_user_message(
+            include_ref=True,
+            correlation_id=correlation_id,
+            include_docs=include_docs,
+        )
 
     # Handle non-CustomBot exceptions with a generic message
     parts = ["⚠️ An unexpected error occurred"]
@@ -462,11 +526,7 @@ def get_user_friendly_message(technical_error: str, error_type: str) -> str:
     if error_type in friendly_messages:
         return friendly_messages[error_type]
 
-    # Fall back to the technical message if it's reasonably readable
-    if technical_error and len(technical_error) < 100:
-        return technical_error
-
-    # Generic fallback
+    # Generic fallback — never expose raw technical_error text to users
     return "An error occurred while processing your request."
 
 
@@ -481,10 +541,12 @@ __all__ = [
     "LLMError",
     "DatabaseError",
     "BridgeError",
+    "ChannelError",
     "SkillError",
     "ConfigurationError",
     "RoutingError",
     "DiskSpaceError",
+    "MemoryError",
     # Error codes
     "ErrorCode",
     # Factory functions

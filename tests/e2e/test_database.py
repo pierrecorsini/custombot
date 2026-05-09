@@ -9,11 +9,10 @@ Tests the database layer:
 
 from __future__ import annotations
 
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
 import pytest
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests: Database Lifecycle
@@ -319,7 +318,7 @@ async def test_routing_rules_loaded_from_frontmatter():
         )
 
         engine = RoutingEngine(instructions_dir)
-        engine.load_rules()
+        await engine.load_rules()
 
         rules = engine.rules
         assert len(rules) >= 1
@@ -343,7 +342,7 @@ async def test_routing_engine_refresh():
         )
 
         engine = RoutingEngine(instructions_dir)
-        engine.load_rules()
+        await engine.load_rules()
         assert len(engine.rules) == 1
 
         # Add another instruction file
@@ -358,7 +357,7 @@ async def test_routing_engine_refresh():
             encoding="utf-8",
         )
 
-        engine.refresh_rules()
+        await engine.refresh_rules()
         assert len(engine.rules) == 2
 
 

@@ -16,16 +16,17 @@ from __future__ import annotations
 
 import json
 import logging
-from logging.handlers import RotatingFileHandler
 import os
 import re
 import sys
 import uuid
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from enum import Enum
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
 
 class VerbosityLevel(str, Enum):
@@ -58,8 +59,17 @@ def set_verbosity(level: VerbosityLevel | str) -> None:
         _verbosity = level
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Context Variables for Structured Logging
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Context variable for correlation ID (thread-safe for async)
 _correlation_id: ContextVar[str | None] = ContextVar("correlation_id", default=None)
+
+# Context variables for structured log context (auto-injected by StructuredContextFilter)
+_chat_id: ContextVar[str | None] = ContextVar("chat_id", default=None)
+_app_phase: ContextVar[str | None] = ContextVar("app_phase", default=None)
+_session_id: ContextVar[str | None] = ContextVar("session_id", default=None)
 
 
 def get_correlation_id() -> str | None:
@@ -72,15 +82,39 @@ def new_correlation_id() -> str:
     return str(uuid.uuid4())[:8]
 
 
+# Maximum length for a correlation ID to prevent unbounded log output.
+_MAX_CORR_ID_LENGTH = 64
+
+# Control characters, newlines, carriage returns, and ANSI escape sequences
+# stripped from correlation IDs to prevent log injection.
+_CORR_ID_SANITIZE_PATTERN = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f-\x9f]")
+
+
+def _sanitize_correlation_id(corr_id: str) -> str:
+    """Strip control characters, newlines, and ANSI escapes; truncate to safe length."""
+    cleaned = _CORR_ID_SANITIZE_PATTERN.sub("", corr_id)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return new_correlation_id()
+    if len(cleaned) > _MAX_CORR_ID_LENGTH:
+        cleaned = cleaned[:_MAX_CORR_ID_LENGTH]
+    return cleaned
+
+
 def set_correlation_id(corr_id: str | None = None) -> str:
     """
     Set a correlation ID for the current context.
 
     If no ID is provided, generates a new UUID.
+    The ID is sanitized to strip control characters, newlines, and ANSI
+    escape sequences to prevent log injection. It is truncated to a
+    maximum of 64 characters.
     Returns the correlation ID that was set.
     """
     if corr_id is None:
         corr_id = new_correlation_id()
+    else:
+        corr_id = _sanitize_correlation_id(corr_id)
     _correlation_id.set(corr_id)
     return corr_id
 
@@ -88,6 +122,107 @@ def set_correlation_id(corr_id: str | None = None) -> str:
 def clear_correlation_id() -> None:
     """Clear the correlation ID from the current context."""
     _correlation_id.set(None)
+
+
+@contextmanager
+def correlation_id_scope(
+    corr_id: str | None = None,
+) -> Generator[str, None, None]:
+    """Context manager for correlation-ID lifecycle management.
+
+    Sets a correlation ID on entry and clears it on exit (including on
+    exceptions and early returns), eliminating the risk of forgetting
+    :func:`clear_correlation_id` on new early-return paths.
+
+    Saves and restores the previous correlation ID, allowing nesting.
+
+    Yields the correlation ID that was set.
+
+    Usage::
+
+        with correlation_id_scope(msg.correlation_id) as cid:
+            # ... all logging uses the correlation ID
+            # automatically cleared on exit
+    """
+    previous = _correlation_id.get()
+    correlation_id = set_correlation_id(corr_id)
+    try:
+        yield correlation_id
+    finally:
+        if previous is not None:
+            _correlation_id.set(previous)
+        else:
+            _correlation_id.set(None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Structured Context Accessors (chat_id, app_phase, session_id)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def get_chat_id() -> str | None:
+    """Get the current chat ID from the logging context."""
+    return _chat_id.get()
+
+
+def set_chat_id(chat_id: str | None) -> None:
+    """Set the chat ID in the logging context."""
+    _chat_id.set(chat_id)
+
+
+def get_app_phase() -> str | None:
+    """Get the current application phase from the logging context."""
+    return _app_phase.get()
+
+
+def set_app_phase(phase: str | None) -> None:
+    """Set the application phase in the logging context (e.g. 'startup', 'running', 'shutdown')."""
+    _app_phase.set(phase)
+
+
+def get_session_id() -> str | None:
+    """Get the current session ID from the logging context."""
+    return _session_id.get()
+
+
+def set_session_id(session_id: str | None) -> None:
+    """Set the session ID in the logging context."""
+    _session_id.set(session_id)
+
+
+def set_log_context(
+    *,
+    chat_id: str | None = None,
+    correlation_id: str | None = None,
+    app_phase: str | None = None,
+    session_id: str | None = None,
+) -> str:
+    """
+    Batch-set multiple structured log context fields at once.
+
+    Returns the correlation ID that was set (existing or newly generated).
+    Fields left as their default (None) are not modified.
+
+    Usage:
+        cid = set_log_context(chat_id="12345", app_phase="processing")
+    """
+    if correlation_id is not None or _correlation_id.get() is None:
+        correlation_id = set_correlation_id(correlation_id)
+    if chat_id is not None:
+        set_chat_id(chat_id)
+    if app_phase is not None:
+        set_app_phase(app_phase)
+    if session_id is not None:
+        set_session_id(session_id)
+    return correlation_id
+
+
+def clear_log_context() -> None:
+    """Clear all structured log context fields."""
+    clear_correlation_id()
+    _chat_id.set(None)
+    _app_phase.set(None)
+    _session_id.set(None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -149,6 +284,12 @@ DEFAULT_REDACTION_PATTERNS: list[tuple[str, str, str]] = [
         r"eyJ[a-zA-Z0-9_\-]*\.eyJ[a-zA-Z0-9_\-]*\.[a-zA-Z0-9_\-]*",
         "[REDACTED]",
     ),
+    # HMAC-SHA256 Authorization header (HMAC-SHA256 <timestamp>:<hex-signature>)
+    (
+        "hmac_auth_header",
+        r"(HMAC-SHA256\s+)[0-9]+(?:\.[0-9]+)?:[a-fA-F0-9]+",
+        r"\1[REDACTED]",
+    ),
 ]
 
 # Phone number patterns (partial redaction - keep last 4 digits)
@@ -198,9 +339,7 @@ class SensitiveDataRedactor:
             enabled: Whether redaction is enabled (default True).
         """
         self.enabled = enabled
-        self._patterns = (
-            patterns if patterns is not None else DEFAULT_REDACTION_PATTERNS
-        )
+        self._patterns = patterns if patterns is not None else DEFAULT_REDACTION_PATTERNS
         self._phone_patterns = (
             phone_patterns if phone_patterns is not None else DEFAULT_PHONE_PATTERNS
         )
@@ -231,8 +370,8 @@ class SensitiveDataRedactor:
         try:
             compiled = re.compile(pattern, re.IGNORECASE)
             self._compiled_patterns.append((name, compiled, replacement))
-        except re.error as e:
-            raise ValueError(f"Invalid regex pattern '{name}': {e}") from e
+        except re.error as exc:
+            raise ValueError(f"Invalid regex pattern '{name}': {exc}") from exc
 
     def remove_pattern(self, name: str) -> bool:
         """
@@ -245,9 +384,7 @@ class SensitiveDataRedactor:
             True if pattern was found and removed, False otherwise.
         """
         original_len = len(self._compiled_patterns)
-        self._compiled_patterns = [
-            (n, p, r) for n, p, r in self._compiled_patterns if n != name
-        ]
+        self._compiled_patterns = [(n, p, r) for n, p, r in self._compiled_patterns if n != name]
         return len(self._compiled_patterns) < original_len
 
     def redact(self, text: str) -> str:
@@ -560,6 +697,45 @@ class CorrelationIdFilter(logging.Filter):
         return True
 
 
+class StructuredContextFilter(logging.Filter):
+    """
+    Logging filter that auto-injects structured context into every LogRecord.
+
+    Injects the following fields from ContextVars:
+      - correlation_id: request tracing ID
+      - chat_id: active chat identifier
+      - app_phase: application lifecycle phase (startup, running, shutdown)
+      - session_id: session identifier
+
+    These fields appear in JSON output automatically and are accessible
+    in custom formatters.  Manual ``extra={"chat_id": ..., "correlation_id": ...}``
+    dicts become unnecessary — only truly call-site-specific fields need
+    to be passed via ``extra={}``.
+
+    Usage:
+        handler.addFilter(StructuredContextFilter())
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        corr = get_correlation_id()
+        if corr is not None:
+            record.correlation_id = corr
+
+        chat = get_chat_id()
+        if chat is not None:
+            record.chat_id = chat
+
+        phase = get_app_phase()
+        if phase is not None:
+            record.app_phase = phase
+
+        sid = get_session_id()
+        if sid is not None:
+            record.session_id = sid
+
+        return True
+
+
 def setup_logging(
     level: int | str = logging.INFO,
     log_format: str = "text",
@@ -651,9 +827,9 @@ def setup_logging(
     console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
 
-    # Add correlation ID filter
+    # Add structured context filter (injects correlation_id, chat_id, app_phase, session_id)
     if include_correlation_id:
-        console_handler.addFilter(CorrelationIdFilter())
+        console_handler.addFilter(StructuredContextFilter())
 
     # Add redaction filter for extra safety (catches args and edge cases)
     if redact_sensitive:
@@ -680,7 +856,7 @@ def setup_logging(
 
             # Add filters to file handler
             if include_correlation_id:
-                file_handler.addFilter(CorrelationIdFilter())
+                file_handler.addFilter(StructuredContextFilter())
             if redact_sensitive:
                 file_handler.addFilter(RedactionFilter())
 
@@ -691,18 +867,27 @@ def setup_logging(
                 log_max_bytes,
                 log_backup_count,
             )
-        except (OSError, IOError) as e:
+        except (OSError, IOError) as exc:
             # Log warning but don't fail - console logging will still work
             root_logger.warning(
                 "Failed to configure log file %s: %s. Falling back to console only.",
                 log_file,
-                e,
+                exc,
             )
 
     # Suppress noisy third-party libraries
     if suppress_noisy:
-        for noisy_lib in ("httpx", "httpcore", "urllib3", "asyncio"):
+        for noisy_lib in ("httpx", "httpcore", "urllib3", "asyncio", "primp"):
             logging.getLogger(noisy_lib).setLevel(logging.WARNING)
+
+    # Install PII redaction filter for additional safety net
+    if redact_sensitive:
+        try:
+            from src.security.log_redaction import install_pii_filter
+
+            install_pii_filter()
+        except ImportError:
+            pass  # security module not available in minimal environments
 
 
 # Convenience function for backward compatibility

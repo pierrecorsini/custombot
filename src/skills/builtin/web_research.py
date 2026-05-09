@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.skills.base import BaseSkill, validate_input
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -93,8 +95,8 @@ class WebResearchSkill(BaseSkill):
                 results = await loop.run_in_executor(
                     None, lambda: list(ddgs.text(query, max_results=max_results))
                 )
-        except Exception as e:
-            return f"Search failed: {e}"
+        except Exception as exc:
+            return f"Search failed: {exc}"
 
         if not results:
             return f"No results for: {query}"
@@ -127,7 +129,7 @@ class WebResearchSkill(BaseSkill):
 
     async def _crawl_single(self, url: str, selector: str) -> str:
         """Crawl a single URL using crawl4ai directly (no shell injection risk)."""
-        from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+        from crawl4ai import AsyncWebCrawler, CacheMode, CrawlerRunConfig
 
         try:
             config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
@@ -135,9 +137,7 @@ class WebResearchSkill(BaseSkill):
                 config.css_selector = selector
 
             async with AsyncWebCrawler() as crawler:
-                result = await asyncio.wait_for(
-                    crawler.arun(url=url, config=config), timeout=60.0
-                )
+                result = await asyncio.wait_for(crawler.arun(url=url, config=config), timeout=60.0)
 
             if result.success:
                 content = result.markdown.raw_markdown or ""
@@ -145,12 +145,10 @@ class WebResearchSkill(BaseSkill):
             return f"Failed: {result.error_message or 'Unknown error'}"
         except asyncio.TimeoutError:
             return f"Timeout crawling {url}"
-        except Exception as e:
-            return f"Error crawling {url}: {e}"
+        except Exception as exc:
+            return f"Error crawling {url}: {exc}"
 
-    async def _search_and_crawl(
-        self, query: str, max_results: int, selector: str
-    ) -> str:
+    async def _search_and_crawl(self, query: str, max_results: int, selector: str) -> str:
         """Search and then crawl the top results."""
         search_result = await self._search(query, max_results)
 

@@ -16,6 +16,7 @@ import sys
 import time
 
 from src.constants import DEFAULT_SHUTDOWN_TIMEOUT, SHUTDOWN_LOG_INTERVAL
+from src.utils.locking import AsyncLock
 
 
 class GracefulShutdown:
@@ -30,15 +31,43 @@ class GracefulShutdown:
     - Closes HTTP clients
 
     Works on both Unix (SIGTERM, SIGINT) and Windows (SIGINT, SIGBREAK).
+
+    In-flight operation tracking
+    ----------------------------
+    Use ``enter_operation`` / ``exit_operation`` to wrap critical sections
+    that must complete before shutdown can finish.  The shutdown sequence
+    waits (up to ``timeout`` seconds) for all registered operations to
+    complete before proceeding with teardown.
+
+    Usage::
+
+        async def process_message(msg, shutdown_mgr):
+            op_id = await shutdown_mgr.enter_operation(
+                f"processing message from {msg.chat_id}"
+            )
+            if op_id is None:
+                # Shutdown already in progress — skip work
+                return
+            try:
+                await do_expensive_work(msg)
+            finally:
+                await shutdown_mgr.exit_operation(op_id)
+
+    The ``try/finally`` ensures the operation is always unregistered,
+    even on exceptions or ``CancelledError``.  If ``enter_operation``
+    returns ``None``, shutdown has already started and the caller must
+    not begin new work.
     """
 
     def __init__(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT) -> None:
         self._timeout = timeout
         self._shutdown_event = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._in_flight_count = 0
         self._in_flight_ops: dict[int, str] = {}
         self._next_op_id = 0
-        self._in_flight_lock = asyncio.Lock()
+        # Lazy-initialised via AsyncLock — see src.utils.locking policy
+        self._in_flight_lock = AsyncLock()
         self._accepting_messages = True
         self._log = logging.getLogger(__name__)
 
@@ -53,9 +82,16 @@ class GracefulShutdown:
         return self._accepting_messages and not self.is_shutting_down
 
     def request_shutdown(self) -> None:
-        """Signal that shutdown has been requested."""
-        self._shutdown_event.set()
+        """Signal that shutdown has been requested.
+
+        Thread-safe: uses ``loop.call_soon_threadsafe`` to set the
+        asyncio Event from signal handlers that run outside the event loop.
+        """
         self._accepting_messages = False
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._shutdown_event.set)
+        else:
+            self._shutdown_event.set()
         self._log.info("Shutdown requested - stopping new message acceptance")
 
     async def enter_operation(self, description: str = "unknown") -> int | None:
@@ -153,14 +189,11 @@ class GracefulShutdown:
         Handles SIGINT (Ctrl+C) and SIGTERM on Unix.
         Handles SIGINT and SIGBREAK on Windows.
         """
+        self._loop = loop
         shutdown_manager = self
 
         def handle_signal(signum: int, frame) -> None:
-            signal_name = (
-                signal.Signals(signum).name
-                if hasattr(signal, "Signals")
-                else str(signum)
-            )
+            signal_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
             shutdown_manager._log.info(
                 "Received signal %s, initiating graceful shutdown", signal_name
             )
@@ -180,7 +213,7 @@ class GracefulShutdown:
                     "Registered handler for %s",
                     sig.name if hasattr(sig, "name") else sig,
                 )
-            except (ValueError, OSError) as e:
+            except (ValueError, OSError) as exc:
                 shutdown_manager._log.debug(
-                    "Could not register handler for signal %s: %s", sig, e
+                    "Could not register handler for signal %s: %s", sig, exc
                 )

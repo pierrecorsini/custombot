@@ -1,0 +1,42 @@
+"""Routing engine constants — file watching, match cache, frontmatter cache."""
+
+from __future__ import annotations
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routing Engine — Frontmatter Cache
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of parsed frontmatter entries cached in memory.  Keyed by
+# ``(filename, mtime, size)`` — avoids redundant YAML parsing when instruction
+# files are unchanged during hot-reload.
+ROUTING_FRONTMATTER_CACHE_MAX_SIZE: int = 128
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routing Engine — File Watching
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Minimum interval (seconds) between stale-checks on instruction .md files.
+# Prevents redundant stat() calls when match() is invoked at high frequency.
+# Set to 5s so the per-message _is_stale() call triggers at most one filesystem
+# scan (os.scandir + stat on every .md) every 5 seconds, reducing I/O on the
+# hot path while still detecting instruction-file changes promptly.
+ROUTING_WATCH_DEBOUNCE_SECONDS: float = 5.0
+
+# TTL (seconds) for the routing match result cache. Identical message signatures
+# within this window return the cached match result without re-evaluating rules.
+ROUTING_MATCH_CACHE_TTL_SECONDS: float = 5.0
+
+# Maximum number of cached routing match results. Bounded to prevent unbounded
+# memory growth; evicts least-recently-used entries when full.
+ROUTING_MATCH_CACHE_MAX_SIZE: int = 500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routing Engine — Retry Budget
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Cumulative time budget (seconds) for retry sleeps across all instruction
+# files during a single load_rules() call. Each transient parse failure
+# triggers a 100ms asyncio.sleep retry. Without a cap, N corrupted files
+# would block the event loop for N×100ms. Once this budget is exhausted,
+# subsequent parse failures are skipped without retrying.
+ROUTING_RETRY_SLEEP_BUDGET_SECONDS: float = 1.0

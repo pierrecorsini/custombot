@@ -6,14 +6,15 @@ and better type checking without requiring explicit inheritance.
 
 Protocols:
     - Channel: Interface for messaging channel implementations
+    - MemoryProtocol: Interface for per-chat memory operations
     - Skill: Interface for executable tool-skills
     - Storage: Interface for database operations
 
 Usage:
-    from src.utils.protocols import Channel, Skill, Storage
+    from src.utils.protocols import Channel, MemoryProtocol, Skill, Storage
 
-    def process_messages(channel: Channel) -> None:
-        # Accepts any object with Channel protocol methods
+    def process_messages(channel: Channel, memory: MemoryProtocol) -> None:
+        # Accepts any object with the respective protocol methods
         ...
 
     # Runtime check (limited - only checks method existence)
@@ -23,9 +24,10 @@ Usage:
 
 from __future__ import annotations
 
-from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import (
     Any,
+    AsyncIterator,
     Awaitable,
     Callable,
     Dict,
@@ -33,8 +35,12 @@ from typing import (
     Optional,
     Protocol,
     runtime_checkable,
+    TYPE_CHECKING,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
+    import asyncio
 
 # Type alias for message handlers (re-exported for convenience)
 MessageHandler = Callable[..., Awaitable[None]]
@@ -55,6 +61,7 @@ class Channel(Protocol):
         start: Initialize and run the channel (polling or webhook)
         send_message: Send a text message to a chat
         send_typing: Send typing indicator (optional, may be no-op)
+        get_channel_prompt: Return channel-specific prompt instructions (optional)
 
     Example:
         class WhatsAppChannel:
@@ -105,6 +112,18 @@ class Channel(Protocol):
         """
         ...
 
+    def get_channel_prompt(self) -> Optional[str]:
+        """
+        Return channel-specific prompt instructions to inject before other prompts.
+
+        Override this method to provide formatting or behavioral instructions
+        specific to this channel (e.g., WhatsApp formatting, Telegram markdown).
+
+        Returns:
+            Channel-specific prompt content, or None if no prompt needed.
+        """
+        ...
+
 
 @runtime_checkable
 class Skill(Protocol):
@@ -144,6 +163,7 @@ class Skill(Protocol):
     name: str
     description: str
     parameters: Dict[str, Any]
+    expensive: bool
 
     async def execute(self, workspace_dir: Path, **kwargs: Any) -> str:
         """
@@ -240,6 +260,21 @@ class Storage(Protocol):
         """
         ...
 
+    async def batch_message_exists(self, message_ids: list[str]) -> dict[str, bool]:
+        """
+        Batch-check which message IDs exist across all chats.
+
+        More efficient than calling ``message_exists`` N times when
+        checking many IDs at once (e.g. crash-recovery backlog).
+
+        Args:
+            message_ids: List of unique message identifiers to check.
+
+        Returns:
+            Dict mapping each requested ID to True (exists) or False.
+        """
+        ...
+
     async def save_message(
         self,
         chat_id: str,
@@ -263,9 +298,7 @@ class Storage(Protocol):
         """
         ...
 
-    async def get_recent_messages(
-        self, chat_id: str, limit: int = 50
-    ) -> List[Dict[str, Any]]:
+    async def get_recent_messages(self, chat_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         """
         Retrieve recent messages for a chat.
 
@@ -302,14 +335,25 @@ class Storage(Protocol):
 
 # Protocol version info for documentation purposes
 __all__ = [
-    "MessageHandler",
+    "BackgroundService",
     "Channel",
+    "Closeable",
+    "LockProvider",
+    "MemoryMonitor",
+    "MemoryProtocol",
+    "MessageHandler",
     "Skill",
+    "Stoppable",
     "Storage",
     "ProjectStore",
     "ProjectContextLoader",
-    "MemoryMonitor",
 ]
+
+
+# Storage is now defined in src.db.storage_protocol.StorageProvider.
+# Re-export from here for backward compatibility.
+# (The @runtime_checkable class below remains for existing code that
+# imports from this module directly.)
 
 
 @runtime_checkable
@@ -337,6 +381,147 @@ class ProjectContextLoader(Protocol):
 
 
 @runtime_checkable
+class MemoryProtocol(Protocol):
+    """
+    Protocol for per-chat memory operations.
+
+    Decouples Bot from the concrete Memory class so alternative
+    implementations (e.g., Redis-backed, database-backed) can be
+    swapped in without touching Bot.
+
+    Methods:
+        ensure_workspace: Create per-chat workspace directory and seed files
+        read_memory: Read the MEMORY.md file for a chat
+        read_agents_md: Read the AGENTS.md file for a chat
+
+    Example:
+        class RedisMemory:
+            def __init__(self, redis_url: str) -> None:
+                self._redis = redis.asyncio.from_url(redis_url)
+
+            def ensure_workspace(self, chat_id: str) -> Path:
+                # Create workspace dir and return Path
+                ...
+
+            async def read_memory(self, chat_id: str) -> Optional[str]:
+                content = await self._redis.get(f"memory:{chat_id}")
+                return content
+
+            async def read_agents_md(self, chat_id: str) -> str:
+                content = await self._redis.get(f"agents:{chat_id}")
+                return content or "Default instructions"
+
+        # RedisMemory satisfies MemoryProtocol
+        memory: MemoryProtocol = RedisMemory("redis://localhost")
+    """
+
+    def ensure_workspace(self, chat_id: str) -> Path:
+        """
+        Create the per-chat workspace directory and seed initial files.
+
+        Args:
+            chat_id: Chat/conversation identifier.
+
+        Returns:
+            Path to the chat's workspace directory.
+        """
+        ...
+
+    async def read_memory(self, chat_id: str) -> Optional[str]:
+        """
+        Read the MEMORY.md content for a chat.
+
+        Args:
+            chat_id: Chat/conversation identifier.
+
+        Returns:
+            Memory content string, or None if no memory exists.
+        """
+        ...
+
+    async def read_agents_md(self, chat_id: str) -> str:
+        """
+        Read the AGENTS.md content for a chat.
+
+        Args:
+            chat_id: Chat/conversation identifier.
+
+        Returns:
+            Agent instructions content string.
+
+        Raises:
+            FileNotFoundError: If AGENTS.md has not been seeded yet.
+        """
+        ...
+
+
+@runtime_checkable
+class LockProvider(Protocol):
+    """
+    Protocol for per-chat lock management.
+
+    Decouples Bot from the concrete LRULockCache so alternative
+    implementations (e.g., distributed lock backends, shared lock
+    state for multi-process deployments) can be swapped in without
+    touching Bot.
+
+    Methods:
+        get_or_create: Get an existing lock or create a new one for the key
+        acquire: Async context manager that ref-tracks, acquires, and releases
+        release: Decrement reference count for a previously obtained lock
+        __len__: Return the current number of cached locks
+        active_count: Return the number of currently held (ref_count > 0) locks
+
+    Example:
+        class RedisLockProvider:
+            def __init__(self, redis_url: str) -> None:
+                self._redis = redis.asyncio.from_url(redis_url)
+
+            async def get_or_create(self, key: str) -> asyncio.Lock:
+                return asyncio.Lock()
+
+            def __len__(self) -> int:
+                return 0
+    """
+
+    async def get_or_create(self, key: str) -> "asyncio.Lock":
+        """
+        Get an existing lock for the key or create a new one.
+
+        Args:
+            key: Unique identifier for the lock (e.g., chat_id).
+
+        Returns:
+            An asyncio.Lock for the given key.
+        """
+        ...
+
+    @asynccontextmanager
+    async def acquire(self, key: str) -> AsyncIterator[None]:
+        """
+        Context manager: get, ref-track, acquire, and release a lock.
+
+        Combines get_or_create(), lock acquisition, and release() into
+        a single async context manager so callers never miss the release step.
+        """
+        ...
+        yield  # pragma: no cover
+
+    def release(self, key: str) -> None:
+        """Decrement the reference count for a previously obtained lock."""
+        ...
+
+    def __len__(self) -> int:
+        """Return the current number of managed locks."""
+        ...
+
+    @property
+    def active_count(self) -> int:
+        """Return the number of locks currently held (ref_count > 0)."""
+        ...
+
+
+@runtime_checkable
 class MemoryMonitor(Protocol):
     """
     Protocol for system memory monitoring.
@@ -352,4 +537,57 @@ class MemoryMonitor(Protocol):
 
     async def stop(self) -> None:
         """Stop monitoring."""
+        ...
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lifecycle Protocols
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class Stoppable(Protocol):
+    """Protocol for background services with long-running loops.
+
+    Components that manage asyncio tasks or background loops should
+    implement ``stop()`` to cancel tasks and clean up resources.
+
+    Examples: TaskScheduler, WorkspaceMonitor, PerformanceMetrics,
+    MemoryMonitor, HealthServer, ConfigWatcher.
+    """
+
+    async def stop(self) -> None:
+        """Cancel background tasks and release resources."""
+        ...
+
+
+@runtime_checkable
+class Closeable(Protocol):
+    """Protocol for resources that hold connections or handles.
+
+    Components that manage open connections, file handles, or database
+    references should implement ``close()`` to release them.
+
+    Examples: Database, BaseChannel, LLMClient, MessageQueue, EventBus.
+    """
+
+    async def close(self) -> None:
+        """Release connections, handles, and other resources."""
+        ...
+
+
+@runtime_checkable
+class BackgroundService(Protocol):
+    """Protocol for long-running background services with managed tasks.
+
+    Standardizes the lifecycle of components that spawn ``asyncio.create_task``
+    loops.  All such services should follow: start → loop → stop.
+
+    Examples: TaskScheduler, WorkspaceMonitor, PerformanceMetrics,
+    MemoryMonitor, HealthServer, ConfigWatcher, MessageQueue (flush loop),
+    LLMClient (health probe), Channel (incoming message pump).
+    """
+
+    async def stop(self) -> None:
+        """Cancel background tasks and release resources."""
         ...
