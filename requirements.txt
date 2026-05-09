@@ -155,7 +155,7 @@ watchdog==6.0.0
     # via custombot (pyproject.toml)
 wrapt==2.1.2
     # via deprecated
-xxhash==3.5.0
+xxhash==3.7.0
     # via custombot (pyproject.toml)
 yarl==1.23.0
     # via aiohttp
